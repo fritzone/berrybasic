@@ -1,0 +1,23 @@
+# BerryBasic - bare-metal Raspberry Pi 4 boot configuration.
+#
+# The Pi 4 boot ROM + on-board EEPROM load start4.elf/fixup4.dat from this FAT
+# partition, which then load and run kernel8.img (our 64-bit bare-metal kernel).
+
+# Run the kernel in 64-bit (AArch64) mode.
+arm_64bit=1
+
+# Our kernel image.
+kernel=kernel8.img
+
+# Bare-metal kernel: don't load a device tree (the firmware passes 0 in x0).
+device_tree=
+
+# Serial console on GPIO14/15 (mini-UART / PL011), 115200 8N1. Handy for
+# headless bring-up; harmless if unused.
+enable_uart=1
+
+# Skip the rainbow splash so the screen starts black like a real micro.
+disable_splash=1
+
+# We only need a framebuffer, so keep GPU memory small.
+gpu_mem=64
