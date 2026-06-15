@@ -61,20 +61,38 @@ static int s_eq(const char *a, const char *b) {
 static int g_err     = 0;    // set by err(); unwinds the current operation
 static int g_runline = -1;   // line number currently executing, or -1 immediate
 
-// BBC BASIC-style error report, e.g. "Syntax error" or "No such line at line 30".
+// Print the " (line N)" suffix and the trailing newline of an error report.
+static void err_tail(void) {
+    if (g_runline >= 0) {
+        con_puts(" (line ");
+        char buf[12]; int n = 0; long v = g_runline;
+        if (v == 0) buf[n++] = '0';
+        while (v) { buf[n++] = (char)('0' + v % 10); v /= 10; }
+        while (n) con_putc(buf[--n]);
+        con_putc(')');
+    }
+    con_putc('\n');
+}
+
+// Report an error and unwind the current operation; only the first one sticks.
+// e.g. "Syntax error (line 30)".
 static void err(const char *msg) {
     if (g_err) return;       // keep the first error
     g_err = 1;
     con_putc('\n');
     con_puts(msg);
-    if (g_runline >= 0) {
-        con_puts(" at line ");
-        char buf[12]; int n = 0; long v = g_runline;
-        if (v == 0) buf[n++] = '0';
-        while (v) { buf[n++] = (char)('0' + v % 10); v /= 10; }
-        while (n) con_putc(buf[--n]);
-    }
+    err_tail();
+}
+
+// Two-part error, for a fixed prefix plus a dynamic name, e.g.
+// err2("Expected ", "')'") -> "Expected ')' (line 30)".
+static void err2(const char *a, const char *b) {
+    if (g_err) return;
+    g_err = 1;
     con_putc('\n');
+    con_puts(a);
+    con_puts(b);
+    err_tail();
 }
 
 static void con_putn(long v) {
@@ -173,7 +191,7 @@ static double dpow(double a, double b) {          // a ^ b
     if (a == 0) return 0;
     if (a > 0)  return dexp(b * dlog(a));
     double rb = dround(b);                         // negative base: integer exponent only
-    if (rb != b) { err("Bad call"); return 0; }
+    if (rb != b) { err("Invalid argument"); return 0; }
     double r = dexp(rb * dlog(-a));
     return ((long)rb & 1) ? -r : r;
 }
@@ -286,7 +304,7 @@ static void prog_store(int num, const char *text) {
         return;
     }
     if (line_is_blank(text)) return;              // delete of nonexistent line
-    if (prog_n >= MAX_LINES) { err("No room"); return; }
+    if (prog_n >= MAX_LINES) { err("Out of memory"); return; }
 
     for (int j = prog_n; j > i; j--) prog[j] = prog[j - 1];  // insert, keep sorted
     prog[i].num = num;
@@ -348,7 +366,7 @@ static int   var_n = 0;
 static var_t *var_find(const char *name) {
     for (int i = 0; i < var_n; i++)
         if (s_eq(vars[i].name, name)) return &vars[i];
-    if (var_n >= MAX_VARS) { err("No room"); return 0; }
+    if (var_n >= MAX_VARS) { err("Out of memory"); return 0; }
     var_t *v = &vars[var_n++];
     s_copy(v->name, name, NAME_LEN);
     v->is_str = name_is_str(name);
@@ -392,8 +410,8 @@ static arr_t *arr_find(const char *name) {
 }
 
 static arr_t *arr_create(const char *name, int ndim, const int *counts, int is_str) {
-    if (arr_n >= MAX_ARRAYS) { err("No room"); return 0; }
-    if (ndim < 1 || ndim > MAX_DIMS) { err("Subscript"); return 0; }
+    if (arr_n >= MAX_ARRAYS) { err("Out of memory"); return 0; }
+    if (ndim < 1 || ndim > MAX_DIMS) { err("Array index out of range"); return 0; }
     int total = 1;
     for (int i = 0; i < ndim; i++) total *= counts[i];
     arr_t *a = &arrs[arr_n];
@@ -404,12 +422,12 @@ static arr_t *arr_create(const char *name, int ndim, const int *counts, int is_s
     a->total = total;
     for (int i = 0; i < ndim; i++) a->dim[i] = counts[i];
     if (is_str) {
-        if (arr_strs_top + total > ARR_STR_POOL) { err("No room"); return 0; }
+        if (arr_strs_top + total > ARR_STR_POOL) { err("Out of memory"); return 0; }
         a->off = arr_strs_top;
         for (int k = 0; k < total; k++) { arr_strs[a->off + k].sptr = 0; arr_strs[a->off + k].slen = 0; }
         arr_strs_top += total;
     } else {
-        if (arr_nums_top + total > ARR_NUM_POOL) { err("No room"); return 0; }
+        if (arr_nums_top + total > ARR_NUM_POOL) { err("Out of memory"); return 0; }
         a->off = arr_nums_top;
         for (int k = 0; k < total; k++) arr_nums[a->off + k] = 0;
         arr_nums_top += total;
@@ -442,7 +460,7 @@ static int  scratch_base = 0;   // PROC/FN bodies rewind here, preserving caller
 static void scratch_reset(void) { scratch_top = scratch_base; }
 
 static char *scratch_alloc(int n) {
-    if (scratch_top + n > SCRATCH_SIZE) { err("Too complex"); return 0; }
+    if (scratch_top + n > SCRATCH_SIZE) { err("Expression too complex"); return 0; }
     char *p = &scratch[scratch_top];
     scratch_top += n;
     return p;
@@ -493,7 +511,7 @@ static void gc(void) {
 
 static char *gc_alloc(int n) {
     if (gcheap_top + n > GCHEAP_SIZE) gc();
-    if (gcheap_top + n > GCHEAP_SIZE) { err("No room"); return 0; }
+    if (gcheap_top + n > GCHEAP_SIZE) { err("Out of memory"); return 0; }
     char *p = &gcheap[gcheap_top];
     gcheap_top += n;
     return p;
@@ -504,7 +522,7 @@ static char *gc_alloc(int n) {
 // private buffer before gc_alloc(), which may relocate gcheap.
 static void str_store_to(strdesc_t *d, const char *src, int len) {
     static char stage[MAX_STR];
-    if (len > MAX_STR) { err("String too long"); return; }
+    if (len > MAX_STR) { err("Text string is too long"); return; }
     for (int i = 0; i < len; i++) stage[i] = src[i];
     char *dst = gc_alloc(len);
     if (!dst) return;
@@ -697,7 +715,7 @@ static void lex_next(void) {
         case '>':
             if (*lx == '=') { lx++; tok = T_GE; return; }
             tok = T_GT; return;
-        default: err("Syntax error"); tok = T_EOL; return;
+        default: err("I don't recognise that character"); tok = T_EOL; return;
     }
 }
 
@@ -717,18 +735,46 @@ static void    call_proc(int is_fn, value_t *retval);   // PROC/FN call (defined
 static double need_num(void) {
     value_t v = eval_expr();
     if (g_err) return 0;
-    if (v.is_str) { err("Type mismatch"); return 0; }
+    if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return 0; }
     return v.num;
 }
 static value_t need_str(void) {
     value_t v = eval_expr();
     if (g_err) return v_num(0);
-    if (!v.is_str) { err("Type mismatch"); return v_num(0); }
+    if (!v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
     return v;
 }
 
-static int expect(int t) {              // consume token t or raise SYNTAX
-    if (tok != t) { err("Syntax error"); return 0; }
+// Human-readable name of a token type, for "Expected X" error messages.
+static const char *tok_name(int t) {
+    switch (t) {
+        case T_EOL:   return "end of line";
+        case T_NUM:   return "a number";
+        case T_STR:   return "a string";
+        case T_VAR:   return "a variable name";
+        case T_KW:    return "a keyword";
+        case T_PLUS:  return "'+'";
+        case T_MINUS: return "'-'";
+        case T_STAR:  return "'*'";
+        case T_SLASH: return "'/'";
+        case T_CARET: return "'^'";
+        case T_LP:    return "'('";
+        case T_RP:    return "')'";
+        case T_COMMA: return "','";
+        case T_SEMI:  return "';'";
+        case T_COLON: return "':'";
+        case T_EQ:    return "'='";
+        case T_NE:    return "'<>'";
+        case T_LT:    return "'<'";
+        case T_GT:    return "'>'";
+        case T_LE:    return "'<='";
+        case T_GE:    return "'>='";
+        default:      return "something else";
+    }
+}
+
+static int expect(int t) {              // consume token t or report what's missing
+    if (tok != t) { err2("Expected ", tok_name(t)); return 0; }
     lex_next();
     return 1;
 }
@@ -754,7 +800,7 @@ static int parse_subscripts(int *subs, int *nsub) {
         break;
     }
     if (!expect(T_RP)) return 0;
-    if (n > MAX_DIMS) { err("Subscript"); return 0; }
+    if (n > MAX_DIMS) { err("Array index out of range"); return 0; }
     *nsub = n;
     return 1;
 }
@@ -773,10 +819,10 @@ static int arr_elem(const char *name, int is_str, int *idx, arr_t **out) {
         a = arr_create(name, nsub, counts, is_str);
         if (!a) return 0;
     }
-    if (a->ndim != nsub) { err("Subscript"); return 0; }
+    if (a->ndim != nsub) { err("Array index out of range"); return 0; }
     int off = 0;
     for (int i = 0; i < nsub; i++) {
-        if (subs[i] < 0 || subs[i] >= a->dim[i]) { err("Subscript"); return 0; }
+        if (subs[i] < 0 || subs[i] >= a->dim[i]) { err("Array index out of range"); return 0; }
         off = off * a->dim[i] + subs[i];
     }
     *idx = a->off + off;
@@ -804,7 +850,7 @@ static value_t eval_function(int fn) {
         case KW_INT: { double x = need_num(); result = v_num(dfloor(x)); break; }
         case KW_SGN: { double x = need_num(); result = v_num((x > 0) - (x < 0)); break; }
         case KW_SQR: { double x = need_num();
-                       if (x < 0) { err("Bad call"); break; }
+                       if (x < 0) { err("Invalid argument"); break; }
                        result = v_num(dsqrt(x)); break; }
         case KW_SIN: { result = v_num(dsin(need_num())); break; }
         case KW_COS: { result = v_num(dcos(need_num())); break; }
@@ -813,10 +859,10 @@ static value_t eval_function(int fn) {
         case KW_DEG: { result = v_num(need_num() * 180.0 / BAS_PI); break; }
         case KW_RAD: { result = v_num(need_num() * BAS_PI / 180.0); break; }
         case KW_ASN: { double x = need_num();          // arcsin via atan
-                       if (x < -1 || x > 1) { err("Bad call"); break; }
+                       if (x < -1 || x > 1) { err("Invalid argument"); break; }
                        result = v_num(datan(x / dsqrt(1 - x * x))); break; }
         case KW_ACS: { double x = need_num();          // arccos = pi/2 - arcsin
-                       if (x < -1 || x > 1) { err("Bad call"); break; }
+                       if (x < -1 || x > 1) { err("Invalid argument"); break; }
                        result = v_num(BAS_HALFPI - datan(x / dsqrt(1 - x * x))); break; }
         case KW_INKEY:  { int n = (int)need_num(); result = v_num((double)con_inkey(n)); break; }
         case KW_INKEYS: { int n = (int)need_num(); int k = con_inkey(n);
@@ -825,7 +871,7 @@ static value_t eval_function(int fn) {
                           break; }
         case KW_EXP: { result = v_num(dexp(need_num())); break; }
         case KW_LOG: { double x = need_num();
-                       if (x <= 0) { err("Bad call"); break; }
+                       if (x <= 0) { err("Invalid argument"); break; }
                        result = v_num(dlog(x)); break; }
         case KW_RND: { double x = need_num();         // BBC: RND(1)->[0,1), RND(n>1)->1..n
                        double res;
@@ -836,7 +882,7 @@ static value_t eval_function(int fn) {
                        result = v_num(res); break; }
         case KW_LEN: { value_t s = need_str(); result = v_num(s.len); break; }
         case KW_ASC: { value_t s = need_str();
-                       if (s.len == 0) { err("Bad call"); break; }
+                       if (s.len == 0) { err("Invalid argument"); break; }
                        result = v_num((unsigned char)s.str[0]); break; }
         case KW_VAL: { value_t s = need_str();
                        result = v_num(parse_double(s.str, s.len, 0)); break; }
@@ -885,13 +931,13 @@ static value_t eval_function(int fn) {
         case KW_STRINGS: { int rep = (int)need_num(); if (!expect(T_COMMA)) break;
                            value_t s = need_str(); if (g_err) break;
                            if (rep < 0) rep = 0;
-                           if (rep * s.len > MAX_STR) { err("String too long"); break; }
+                           if (rep * s.len > MAX_STR) { err("Text string is too long"); break; }
                            char *p = scratch_alloc(rep * s.len);
                            if (!p) break;
                            for (int i = 0; i < rep; i++)
                                for (int j = 0; j < s.len; j++) p[i * s.len + j] = s.str[j];
                            result = v_str(p, rep * s.len); break; }
-        default: err("Syntax error"); break;
+        default: err("Syntax error in expression"); break;
     }
     if (!g_err) expect(T_RP);
     return result;
@@ -942,7 +988,7 @@ static value_t eval_primary(void) {
         expect(T_RP);
         return v;
     }
-    err("Syntax error");
+    err("Expected a value or expression");
     return v_num(0);
 }
 
@@ -956,7 +1002,7 @@ static value_t eval_power(void) {
         while (tok == T_MINUS || tok == T_PLUS) { if (tok == T_MINUS) neg = !neg; lex_next(); }
         value_t b = eval_primary();
         if (g_err) return a;
-        if (a.is_str || b.is_str) { err("Type mismatch"); return v_num(0); }
+        if (a.is_str || b.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
         a = v_num(dpow(a.num, neg ? -b.num : b.num));
     }
     return a;
@@ -964,13 +1010,13 @@ static value_t eval_power(void) {
 
 static value_t eval_unary(void) {
     if (tok == T_MINUS) { lex_next(); value_t v = eval_unary();
-                          if (v.is_str) { err("Type mismatch"); return v_num(0); }
+                          if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
                           return v_num(-v.num); }
     if (tok == T_PLUS)  { lex_next(); return eval_unary(); }
     if (tok == T_KW && tok_kw == KW_NOT) {        // bitwise complement (NOT TRUE = 0)
         lex_next();
         value_t v = eval_unary();
-        if (v.is_str) { err("Type mismatch"); return v_num(0); }
+        if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
         return v_num((double)(~(int)v.num));
     }
     return eval_power();
@@ -983,7 +1029,7 @@ static value_t eval_term(void) {
         int op = tok, kw = tok_kw; lex_next();
         value_t b = eval_unary();
         if (g_err) return a;
-        if (a.is_str || b.is_str) { err("Type mismatch"); return v_num(0); }
+        if (a.is_str || b.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
         if (op == T_STAR) {
             a = v_num(a.num * b.num);
         } else if (op == T_SLASH) {
@@ -1007,14 +1053,14 @@ static value_t eval_add(void) {
         if (g_err) return a;
         if (op == T_PLUS && a.is_str && b.is_str) {        // string concatenation
             int total = a.len + b.len;
-            if (total > MAX_STR) { err("String too long"); return v_num(0); }
+            if (total > MAX_STR) { err("Text string is too long"); return v_num(0); }
             char *p = scratch_alloc(total);
             if (!p) return v_num(0);
             for (int i = 0; i < a.len; i++) p[i] = a.str[i];
             for (int i = 0; i < b.len; i++) p[a.len + i] = b.str[i];
             a = v_str(p, total);
         } else if (a.is_str || b.is_str) {
-            err("Type mismatch"); return v_num(0);
+            err("Type mismatch: numbers and text can't be mixed"); return v_num(0);
         } else {
             a = v_num(op == T_PLUS ? a.num + b.num : a.num - b.num);
         }
@@ -1043,7 +1089,7 @@ static value_t eval_compare(void) {
         long c;
         if (a.is_str && b.is_str)      c = str_cmp(a, b);
         else if (!a.is_str && !b.is_str) c = (a.num > b.num) - (a.num < b.num);
-        else { err("Type mismatch"); return v_num(0); }
+        else { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
         int r = 0;
         switch (op) {
             case T_EQ: r = (c == 0); break;
@@ -1064,7 +1110,7 @@ static value_t eval_and(void) {                   // AND: lower than relational
         lex_next();
         value_t b = eval_compare();
         if (g_err) return a;
-        if (a.is_str || b.is_str) { err("Type mismatch"); return v_num(0); }
+        if (a.is_str || b.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
         a = v_num((double)((int)a.num & (int)b.num));
     }
     return a;
@@ -1076,7 +1122,7 @@ static value_t eval_expr(void) {                  // OR / EOR: lowest precedence
         int kw = tok_kw; lex_next();
         value_t b = eval_and();
         if (g_err) return a;
-        if (a.is_str || b.is_str) { err("Type mismatch"); return v_num(0); }
+        if (a.is_str || b.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
         a = v_num((double)(kw == KW_OR ? ((int)a.num | (int)b.num)
                                        : ((int)a.num ^ (int)b.num)));
     }
@@ -1136,7 +1182,7 @@ static int cur_off(void) { return (int)(lx - cur_text); }
 
 static void branch_to_line(int num) {
     int idx = find_line_index(num);
-    if (idx < 0) { err("No such line"); return; }
+    if (idx < 0) { err("No such line number"); return; }
     g_branch = 1; g_branch_line = idx; g_branch_off = 0;
 }
 
@@ -1182,7 +1228,7 @@ static void stmt_print(void) {
 
 static void stmt_let(int had_let) {
     if (had_let) lex_next();                 // consume LET
-    if (tok != T_VAR) { err("Syntax error"); return; }
+    if (tok != T_VAR) { err("Expected a variable name"); return; }
     char name[NAME_LEN];
     s_copy(name, tok_var, NAME_LEN);
     int isstr = name_is_str(name);
@@ -1191,38 +1237,38 @@ static void stmt_let(int had_let) {
     if (tok == T_LP) {                       // array element assignment
         int idx; arr_t *a;
         if (!arr_elem(name, isstr, &idx, &a)) return;
-        if (tok != T_EQ) { err("Syntax error"); return; }
+        if (tok != T_EQ) { err("Expected '='"); return; }
         lex_next();
         value_t v = eval_expr();
         if (g_err) return;
         if (a->is_str) {
-            if (!v.is_str) { err("Type mismatch"); return; }
+            if (!v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
             str_store_to(&arr_strs[idx], v.str, v.len);
         } else {
-            if (v.is_str) { err("Type mismatch"); return; }
+            if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
             arr_nums[idx] = trunc_int(a->is_int, v.num);
         }
         return;
     }
 
-    if (tok != T_EQ) { err("Syntax error"); return; }
+    if (tok != T_EQ) { err("Expected '='"); return; }
     lex_next();
     value_t v = eval_expr();
     if (g_err) return;
     var_t *var = var_find(name);
     if (!var) return;
     if (var->is_str) {
-        if (!v.is_str) { err("Type mismatch"); return; }
+        if (!v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
         str_store(var, v.str, v.len);
     } else {
-        if (v.is_str) { err("Type mismatch"); return; }
+        if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
         var->num = trunc_int(var->is_int, v.num);
     }
 }
 
 static void stmt_goto(void) {
     lex_next();
-    if (tok != T_NUM) { err("Syntax error"); return; }
+    if (tok != T_NUM) { err("Expected a line number"); return; }
     int target = (int)tok_num;
     lex_next();
     branch_to_line(target);
@@ -1265,8 +1311,8 @@ static void stmt_if(void) {
 
 static void stmt_repeat(void) {
     lex_next();                              // consume REPEAT
-    if (cur_line_idx < 0) { err("Bad direct"); return; }
-    if (repeat_sp >= REPEAT_MAX) { err("Too many REPEATs"); return; }
+    if (cur_line_idx < 0) { err("This can only be used inside a program"); return; }
+    if (repeat_sp >= REPEAT_MAX) { err("Too many nested REPEAT loops"); return; }
     repeat_stack[repeat_sp].line = cur_line_idx;   // loop body starts here
     repeat_stack[repeat_sp].off  = cur_off();
     repeat_sp++;
@@ -1276,7 +1322,7 @@ static void stmt_until(void) {
     lex_next();                              // consume UNTIL
     double cond = need_num();
     if (g_err) return;
-    if (repeat_sp <= 0) { err("No REPEAT"); return; }
+    if (repeat_sp <= 0) { err("UNTIL without a matching REPEAT"); return; }
     if (cond == 0) {                         // condition false -> loop again
         retaddr_t *r = &repeat_stack[repeat_sp - 1];
         g_branch = 1; g_branch_line = r->line; g_branch_off = r->off;
@@ -1297,8 +1343,8 @@ static void stmt_colour(void) {
 static void stmt_local(void) {
     lex_next();                              // consume LOCAL
     for (;;) {
-        if (tok != T_VAR) { err("Syntax error"); return; }
-        if (local_sp >= LOCAL_MAX) { err("No room"); return; }
+        if (tok != T_VAR) { err("Expected a variable name"); return; }
+        if (local_sp >= LOCAL_MAX) { err("Out of memory"); return; }
         var_t *v = var_find(tok_var);
         if (!v) return;
         local_stack[local_sp].slot = v;
@@ -1313,11 +1359,11 @@ static void stmt_local(void) {
 
 static void stmt_gosub(void) {
     lex_next();
-    if (tok != T_NUM) { err("Syntax error"); return; }
+    if (tok != T_NUM) { err("Expected a line number"); return; }
     int target = (int)tok_num;
     lex_next();
-    if (cur_line_idx < 0) { err("Bad direct"); return; }
-    if (gosub_sp >= GOSUB_MAX) { err("No room"); return; }
+    if (cur_line_idx < 0) { err("This can only be used inside a program"); return; }
+    if (gosub_sp >= GOSUB_MAX) { err("Out of memory"); return; }
     gosub_stack[gosub_sp].line = cur_line_idx;   // resume after the GOSUB
     gosub_stack[gosub_sp].off  = cur_off();
     gosub_sp++;
@@ -1327,7 +1373,7 @@ static void stmt_gosub(void) {
 
 static void stmt_return(void) {
     lex_next();
-    if (gosub_sp <= 0) { err("No GOSUB"); return; }
+    if (gosub_sp <= 0) { err("RETURN without a matching GOSUB"); return; }
     gosub_sp--;
     g_branch = 1;
     g_branch_line = gosub_stack[gosub_sp].line;
@@ -1336,14 +1382,14 @@ static void stmt_return(void) {
 
 static void stmt_for(void) {
     lex_next();                              // consume FOR
-    if (tok != T_VAR) { err("Syntax error"); return; }
+    if (tok != T_VAR) { err("Expected a variable name"); return; }
     char name[NAME_LEN];
     s_copy(name, tok_var, NAME_LEN);
     lex_next();
-    if (tok != T_EQ) { err("Syntax error"); return; }
+    if (tok != T_EQ) { err("Expected '='"); return; }
     lex_next();
     double start = need_num(); if (g_err) return;
-    if (tok != T_KW || tok_kw != KW_TO) { err("Syntax error"); return; }
+    if (tok != T_KW || tok_kw != KW_TO) { err("Expected TO in a FOR statement"); return; }
     lex_next();
     double limit = need_num(); if (g_err) return;
     double step = 1;
@@ -1352,11 +1398,11 @@ static void stmt_for(void) {
         step = need_num(); if (g_err) return;
     }
     var_t *r = var_find(name); if (!r) return;
-    if (r->is_str) { err("Type mismatch"); return; }
+    if (r->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
     r->num = trunc_int(r->is_int, start);
 
-    if (cur_line_idx < 0) { err("Bad direct"); return; }
-    if (for_sp >= FOR_MAX) { err("No room"); return; }
+    if (cur_line_idx < 0) { err("This can only be used inside a program"); return; }
+    if (for_sp >= FOR_MAX) { err("Out of memory"); return; }
     s_copy(for_stack[for_sp].name, name, NAME_LEN);
     for_stack[for_sp].limit = limit;
     for_stack[for_sp].step  = step;
@@ -1371,11 +1417,11 @@ static void stmt_next(void) {
     char name[NAME_LEN]; name[0] = 0;
     if (tok == T_VAR) { s_copy(name, tok_var, NAME_LEN); lex_next(); }
 
-    if (for_sp <= 0) { err("No FOR"); return; }
+    if (for_sp <= 0) { err("NEXT without a matching FOR"); return; }
     int idx = for_sp - 1;
     if (name[0]) {                           // NEXT I: pop inner loops to reach I
         while (idx >= 0 && !s_eq(for_stack[idx].name, name)) idx--;
-        if (idx < 0) { err("No FOR"); return; }
+        if (idx < 0) { err("NEXT without a matching FOR"); return; }
         for_sp = idx + 1;
     }
 
@@ -1393,20 +1439,20 @@ static void stmt_next(void) {
 static void stmt_dim(void) {
     lex_next();                              // consume DIM
     for (;;) {
-        if (tok != T_VAR) { err("Syntax error"); return; }
+        if (tok != T_VAR) { err("Expected a variable name"); return; }
         char name[NAME_LEN];
         s_copy(name, tok_var, NAME_LEN);
         int isstr = name_is_str(name);
         lex_next();
-        if (tok != T_LP) { err("Syntax error"); return; }
+        if (tok != T_LP) { err("Expected '(' after the array name"); return; }
 
         int subs[MAX_DIMS];
         int nsub;
         if (!parse_subscripts(subs, &nsub)) return;
-        if (arr_find(name)) { err("Bad DIM"); return; }
+        if (arr_find(name)) { err("That array is already defined"); return; }
         int counts[MAX_DIMS];
         for (int i = 0; i < nsub; i++) {
-            if (subs[i] < 0) { err("Subscript"); return; }
+            if (subs[i] < 0) { err("Array index out of range"); return; }
             counts[i] = subs[i] + 1;         // DIM A(10) -> indices 0..10
         }
         if (!arr_create(name, nsub, counts, isstr)) return;
@@ -1432,7 +1478,7 @@ static void stmt_input(void) {
     int ip = 0;
 
     for (;;) {
-        if (tok != T_VAR) { err("Syntax error"); return; }
+        if (tok != T_VAR) { err("Expected a variable name"); return; }
         char name[NAME_LEN];
         s_copy(name, tok_var, NAME_LEN);
         lex_next();
@@ -1529,12 +1575,12 @@ static void stmt_on(void) {
     lex_next();                                  // consume ON
     int sel = (int)need_num();
     if (g_err) return;
-    if (tok != T_KW || (tok_kw != KW_GOTO && tok_kw != KW_GOSUB)) { err("Syntax error"); return; }
+    if (tok != T_KW || (tok_kw != KW_GOTO && tok_kw != KW_GOSUB)) { err("Expected GOTO or GOSUB after ON"); return; }
     int is_gosub = (tok_kw == KW_GOSUB);
     lex_next();
     int target = -1, i = 1;
     for (;;) {                                   // pick the sel-th line number (1-based)
-        if (tok != T_NUM) { err("Syntax error"); return; }
+        if (tok != T_NUM) { err("Expected a line number"); return; }
         if (i == sel) target = (int)tok_num;
         lex_next();
         i++;
@@ -1543,8 +1589,8 @@ static void stmt_on(void) {
     }
     if (target < 0) return;                      // out of range: fall through to next line
     if (is_gosub) {
-        if (cur_line_idx < 0) { err("Bad direct"); return; }
-        if (gosub_sp >= GOSUB_MAX) { err("No room"); return; }
+        if (cur_line_idx < 0) { err("This can only be used inside a program"); return; }
+        if (gosub_sp >= GOSUB_MAX) { err("Out of memory"); return; }
         gosub_stack[gosub_sp].line = cur_line_idx;
         gosub_stack[gosub_sp].off  = cur_off();
         gosub_sp++;
@@ -1579,7 +1625,7 @@ static void stmt_restore(void) {
 static void stmt_read(void) {
     lex_next();                                  // consume READ
     for (;;) {
-        if (tok != T_VAR) { err("Syntax error"); return; }
+        if (tok != T_VAR) { err("Expected a variable name"); return; }
         char name[NAME_LEN]; s_copy(name, tok_var, NAME_LEN);
         int isstr = name_is_str(name);
         lex_next();
@@ -1591,17 +1637,17 @@ static void stmt_read(void) {
             var = var_find(name); if (!var) return;
         }
         int len;
-        if (!data_next(&len)) { err("Out of DATA"); return; }
+        if (!data_next(&len)) { err("READ ran out of DATA"); return; }
         if (isstr) {
-            if (is_arr) { if (!a->is_str) { err("Type mismatch"); return; }
+            if (is_arr) { if (!a->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
                           str_store_to(&arr_strs[idx], data_item, len); }
-            else        { if (!var->is_str) { err("Type mismatch"); return; }
+            else        { if (!var->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
                           str_store(var, data_item, len); }
         } else {
             double dv = parse_double(data_item, len, 0);
-            if (is_arr) { if (a->is_str) { err("Type mismatch"); return; }
+            if (is_arr) { if (a->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
                           arr_nums[idx] = trunc_int(a->is_int, dv); }
-            else        { if (var->is_str) { err("Type mismatch"); return; }
+            else        { if (var->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
                           var->num = trunc_int(var->is_int, dv); }
         }
         if (g_err) return;
@@ -1617,21 +1663,47 @@ static char stg_buf[STG_BUF_SIZE];
 // Map a storage error code to a BASIC error message.
 static void stg_err(int code) {
     switch (code) {
-        case STG_ENOTFOUND: err("File not found"); break;
-        case STG_EFULL:     err("Disk full");      break;
-        case STG_ENOFS:     err("No disk");        break;
-        case STG_ETOOBIG:   err("File too big");   break;
-        default:            err("Disk error");     break;
+        case STG_ENOTFOUND: err("File not found");                 break;
+        case STG_EFULL:     err("Storage card is full");           break;
+        case STG_ENOFS:     err("No storage card found");          break;
+        case STG_ETOOBIG:   err("File is too big to load");        break;
+        default:            err("Storage read/write error");       break;
     }
 }
 
-// Copy the next string operand into a small NUL-terminated filename buffer.
+// Read the next filename operand into a NUL-terminated buffer. Accepts either a
+// quoted string ("name.bas") or a bare filename typed without quotes (name.bas
+// or just name). Reads straight from the raw source so characters like '.' don't
+// trip the expression tokeniser, then resyncs the tokeniser. If no extension is
+// given, ".BAS" is appended, so "LOAD WELCOME" finds WELCOME.BAS. The FAT layer
+// is case-insensitive, so the name is kept as typed. Callers must NOT lex past
+// the keyword first - lx still points just after LOAD/SAVE/DELETE.
 static int read_filename(char *out, int outsz) {
-    value_t nm = need_str();
-    if (g_err) return 0;
-    int n = nm.len < outsz - 1 ? nm.len : outsz - 1;
-    for (int i = 0; i < n; i++) out[i] = nm.str[i];
+    while (is_space(*lx)) lx++;
+    int n = 0;
+    if (*lx == '"') {                          // quoted form: "name"
+        lx++;
+        while (*lx && *lx != '"') { if (n < outsz - 1) out[n++] = *lx; lx++; }
+        if (*lx == '"') lx++;
+    } else {                                   // bare form: letters digits . / _ -
+        while (*lx && (is_alnum(*lx) || *lx == '.' || *lx == '/' ||
+                       *lx == '_' || *lx == '-')) {
+            if (n < outsz - 1) out[n++] = *lx;
+            lx++;
+        }
+    }
     out[n] = 0;
+    if (n == 0) { err("Expected a file name"); return 0; }
+
+    // Default the extension to .BAS when the name has none.
+    int has_dot = 0;
+    for (int i = 0; i < n; i++) if (out[i] == '.') has_dot = 1;
+    if (!has_dot && n + 4 < outsz) {
+        out[n++] = '.'; out[n++] = 'B'; out[n++] = 'A'; out[n++] = 'S';
+        out[n] = 0;
+    }
+
+    lex_next();                                // resync the tokeniser for what follows
     return 1;
 }
 
@@ -1645,7 +1717,6 @@ static int uint_to_str(char *p, int v) {        // unsigned decimal -> p, return
 
 // SAVE "name" : serialise the program ("<num> <text>\n" per line) and write it.
 static void stmt_save(void) {
-    lex_next();
     char name[64];
     if (!read_filename(name, sizeof name)) return;
     int pos = 0;
@@ -1662,7 +1733,6 @@ static void stmt_save(void) {
 
 // LOAD "name" : clear the current program and parse the file's numbered lines.
 static void stmt_load(void) {
-    lex_next();
     char name[64];
     if (!read_filename(name, sizeof name)) return;
     int n = stg_read(name, stg_buf, STG_BUF_SIZE);
@@ -1692,7 +1762,6 @@ static void stmt_load(void) {
 }
 
 static void stmt_delete(void) {
-    lex_next();
     char name[64];
     if (!read_filename(name, sizeof name)) return;
     int r = stg_delete(name);
@@ -1786,7 +1855,7 @@ static void exec_statement(void) {
                              con_putc('\n'); g_stop = 1; return;
             case KW_TIME: {                            // TIME = expr  (set the centisecond clock)
                 lex_next();
-                if (tok != T_EQ) { err("Syntax error"); return; }
+                if (tok != T_EQ) { err("Expected '='"); return; }
                 lex_next();
                 double v = need_num();
                 if (g_err) return;
@@ -1801,7 +1870,7 @@ static void exec_statement(void) {
             case KW_LIST:  stmt_list();    return;
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
                            for_sp = 0; gosub_sp = 0; return;
-            default:       err("Syntax error");  return;
+            default:       err("That keyword can't be used as a command");  return;
         }
     }
     if (tok == T_VAR) { stmt_let(0); return; }   // implicit assignment
@@ -1813,7 +1882,7 @@ static void exec_statement(void) {
         g_return = 1;
         return;
     }
-    err("Syntax error");
+    err("Expected a command");
 }
 
 // Execute one line of source starting at byte offset `off` (which may hold
@@ -1828,7 +1897,7 @@ static void exec_text(const char *text, int off) {
         if (g_err || g_stop || g_branch || g_return) break;
         if (tok == T_COLON) { lex_next(); continue; }
         if (tok == T_EOL)   break;
-        err("Syntax error");                          // junk after a statement
+        err("Unexpected text after the statement");    // junk after a statement
         break;
     }
 }
@@ -1919,7 +1988,7 @@ static void call_proc(int is_fn, value_t *retval) {
         lex_next();
         if (tok != T_RP) {
             for (;;) {
-                if (argc >= MAX_ARGS) { err("Too many args"); return; }
+                if (argc >= MAX_ARGS) { err("Too many arguments"); return; }
                 value_t a = eval_expr();
                 if (g_err) return;
                 if (a.is_str) a = str_in_scratch(a.str, a.len);
@@ -1936,7 +2005,7 @@ static void call_proc(int is_fn, value_t *retval) {
     for (int i = 0; i < def_n; i++)
         if (defs[i].is_fn == is_fn && s_eq(defs[i].name, name)) { d = i; break; }
     if (d < 0) { err(is_fn ? "No such FN" : "No such PROC"); return; }
-    if (call_sp >= 32) { err("Too many PROCs"); return; }
+    if (call_sp >= 32) { err("Too many nested PROC calls"); return; }
 
     // Save the caller's resume state.
     const char *save_lx   = lx;
@@ -1963,10 +2032,10 @@ static void call_proc(int is_fn, value_t *retval) {
         lex_next();
         if (tok != T_RP) {
             for (;;) {
-                if (tok != T_VAR) { err("Syntax error"); ok = 0; break; }
+                if (tok != T_VAR) { err("Expected a parameter name"); ok = 0; break; }
                 char pname[NAME_LEN]; s_copy(pname, tok_var, NAME_LEN);
                 lex_next();
-                if (pi >= argc) { err("Arguments"); ok = 0; break; }
+                if (pi >= argc) { err("Wrong number of arguments"); ok = 0; break; }
                 var_t *pv = var_find(pname);
                 if (!pv) { ok = 0; break; }
                 local_stack[local_sp].slot = pv;
@@ -1974,20 +2043,20 @@ static void call_proc(int is_fn, value_t *retval) {
                 local_sp++;
                 value_t a = args[pi++];
                 if (name_is_str(pname)) {
-                    if (!a.is_str) { err("Type mismatch"); ok = 0; break; }
+                    if (!a.is_str) { err("Type mismatch: numbers and text can't be mixed"); ok = 0; break; }
                     str_store(pv, a.str, a.len);
                 } else {
-                    if (a.is_str) { err("Type mismatch"); ok = 0; break; }
+                    if (a.is_str) { err("Type mismatch: numbers and text can't be mixed"); ok = 0; break; }
                     pv->is_str = 0; pv->num = trunc_int(pv->is_int, a.num);
                 }
                 if (tok == T_COMMA) { lex_next(); continue; }
                 break;
             }
         }
-        if (ok && tok != T_RP) { err("Syntax error"); ok = 0; }
+        if (ok && tok != T_RP) { err("Expected ')' to close the parameter list"); ok = 0; }
         if (ok) body_off = cur_off();            // lx is just past ')' = body start
     }
-    if (ok && pi != argc) { err("Arguments"); ok = 0; }
+    if (ok && pi != argc) { err("Wrong number of arguments"); ok = 0; }
 
     if (ok) {
         run_body(defs[d].line, body_off);

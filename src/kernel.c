@@ -34,6 +34,8 @@
 static int cursor_col     = 0;
 static int cursor_row     = 0;
 static int fb_ready       = 0;
+static uint32_t g_fb_phys = 0;   // framebuffer physical base (for non-cacheable remap)
+static uint32_t g_fb_size = 0;   // framebuffer size in bytes
 static int cursor_visible = 0;   // whether the cursor glyph is currently drawn
 static uint32_t text_color = COLOR_WHITE;   // current foreground (BBC COLOUR)
 
@@ -114,9 +116,11 @@ static int g_kbd_ok  = 0;   // DWC2 (USB-C) keyboard present
 static int g_xhci_ok = 0;   // xHCI/VL805 (USB-A) keyboard present
 static int g_sd_ready = 0;  // SD filesystem mounted (boot log can be written)
 
-// Dump the in-RAM UART log to BOOTLOG.TXT on the SD card. Best-effort: needs the
-// filesystem mounted, and guards against re-entry (e.g. from an exception while
-// already writing). Lets a board with no serial cable still surface diagnostics.
+// Dump the in-RAM UART log to BOOTLOG.TXT on the SD card. Called only from the
+// exception handler now, so a normal boot leaves the data partition holding just
+// the user's programs; a crash still surfaces diagnostics on a board with no
+// serial cable. Best-effort: needs the filesystem mounted, and guards against
+// re-entry (e.g. an exception while already writing).
 static void flush_boot_log(void) {
     static int busy = 0;
     if (!g_sd_ready || busy) return;
@@ -125,6 +129,15 @@ static void flush_boot_log(void) {
     uart_log_get(&buf, &len);
     stg_write("BOOTLOG.TXT", buf, len);
     busy = 0;
+}
+
+// Emit a boot-progress line to *both* the UART/RAM log and, once it exists, the
+// HDMI framebuffer. On a cableless board the screen is the only channel we know
+// works (the firmware drew its own diagnostics on it), so mirroring boot stages
+// there means the last line visible on screen is exactly where the kernel hung.
+static void boot_msg(const char *s) {
+    uart_puts(s);
+    if (fb_ready) term_puts(s);
 }
 
 // Return the next input character from any keyboard (DWC2 USB-C or xHCI USB-A),
@@ -254,7 +267,7 @@ extern const unsigned int  logo_w;
 extern const unsigned int  logo_h;
 extern const unsigned char logo_rgb[];
 
-static int g_show_logo = 0;   // set at boot when running under QEMU
+static int g_show_logo = 0;   // set at boot once the framebuffer is up
 
 // Draw the embedded RGB logo at framebuffer pixel (ox, oy), shrunk by integer
 // factor `div` (nearest-neighbour). Colours are already baked into logo_rgb
@@ -272,13 +285,14 @@ static void draw_logo(int ox, int oy, int div) {
     }
 }
 
-// Show the boot splash. On the target (QEMU session only) this paints the
-// inverted logo on the left, prints the banner beside it (vertically centred on
-// the logo), parks the text cursor cleanly below the logo, and returns 1 so the
-// caller does not print the banner again. Returns 0 when no logo is shown, in
-// which case the caller prints the banner itself (host, or non-QEMU target).
+// Show the boot splash. On the target this clears the boot-progress text, paints
+// the logo on the left, prints the banner beside it (vertically centred on the
+// logo), parks the text cursor cleanly below the logo, and returns 1 so the
+// caller does not print the banner again. Returns 0 when no logo is shown (e.g.
+// the host build), in which case the caller prints the banner itself.
 int con_splash(const char *banner) {
     if (!g_show_logo || !fb_ready) return 0;
+    cleardevice();                                    // wipe the boot-progress text
     int div = 2;                                      // half size
     int lw = (int)logo_w / div, lh = (int)logo_h / div;
     int ox = CHAR_W;                                  // small left margin
@@ -406,6 +420,30 @@ int con_point(int x, int y) {
 // Exception handler (called from the vector table in vectors.S)
 // ---------------------------------------------------------------------------
 
+// Print a labelled hex value straight to the framebuffer terminal (used by the
+// exception handler so fault details are readable on screen even when the SD
+// log write itself fails).
+static void term_hexval(const char *label, uint64_t v, int digits) {
+    term_puts(label);
+    const char *h = "0123456789ABCDEF";
+    for (int i = (digits - 1) * 4; i >= 0; i -= 4)
+        term_putchar(h[(v >> i) & 0xF]);
+    term_putchar('\n');
+}
+
+// Print the last `max_lines` lines of the in-RAM boot log to the framebuffer.
+// Lets the exception handler show how far boot got (e.g. the [PCIE]/[XHCI]
+// progress lines) on screen, without needing the SD card.
+static void term_log_tail(int max_lines) {
+    const char *buf; int len;
+    uart_log_get(&buf, &len);
+    int start = 0, nl = 0;
+    for (int i = len - 1; i >= 0; i--) {
+        if (buf[i] == '\n') { if (++nl > max_lines) { start = i + 1; break; } }
+    }
+    for (int i = start; i < len; i++) term_putchar(buf[i]);
+}
+
 void exception_handler(uint64_t type, uint64_t esr, uint64_t elr, uint64_t far) {
     static const char *vec_names[16] = {
         "SYNC/SP0",  "IRQ/SP0",  "FIQ/SP0",  "SERROR/SP0",
@@ -433,33 +471,50 @@ void exception_handler(uint64_t type, uint64_t esr, uint64_t elr, uint64_t far) 
     uart_hex64("FAR_EL1: ", far);   // faulting address
     uart_puts("system halted.\n");
 
-    // Best-effort: dump the log (including this fault) to the SD card so it can
-    // be read without a serial cable.
-    flush_boot_log();
+    // Paint the fault details straight onto the screen FIRST - this is just
+    // framebuffer memory writes, so it works even when the SD/FAT path that
+    // flush_boot_log() uses is itself wedged by the fault (e.g. a pending PCIe
+    // SError that re-fires during the SD write). Read these off the screen.
+    if (fb_ready) {
+        fill_rect(0, 0, FB_WIDTH - 1, FB_HEIGHT - 1, COLOR_BLACK);
+        cursor_col = 0; cursor_row = 0; cursor_visible = 0;
+        text_color = COLOR_WHITE;
+        // Recent boot progress first (shows the [PCIE]/[XHCI] lines), then the
+        // fault details at the bottom so they stay visible if the log scrolls.
+        term_puts("--- recent log ---\n");
+        term_log_tail(20);
+        term_puts("*** EXCEPTION ***\n");
+        term_puts("vector: "); term_puts(vec_names[type & 15]); term_putchar('\n');
+        term_puts("cause : "); term_puts(cause); term_putchar('\n');
+        term_hexval("ESR = ", esr, 8);
+        term_hexval("ELR = ", elr, 16);
+        term_hexval("FAR = ", far, 16);
+    }
 
-    if (fb_ready) term_puts("\n*** EXCEPTION - see BOOTLOG.TXT on the SD card ***\n");
+    // Then also try to dump the full log to the SD card (best-effort).
+    flush_boot_log();
     // vectors.S halts the CPU after we return.
 }
 
 // ---------------------------------------------------------------------------
-// Board identification (used to tell QEMU apart from real hardware)
+// Board identification
 // ---------------------------------------------------------------------------
 
-// Query board revision (tag 0x00010002) and serial (0x00010004). On real Pi
-// hardware these are nonzero; QEMU's raspi4b leaves the serial as 0. We treat
-// "serial == 0" as "running under QEMU" so we can show the boot logo there.
-static int running_under_qemu(void) {
+// Query and log the board serial (tag 0x00010004). Real Pi hardware returns a
+// nonzero serial; QEMU's raspi4b leaves it 0. Returns 1 on real hardware. We use
+// this to avoid touching the PCIe controller under QEMU, which does not model it
+// (an access there raises an external abort).
+static int board_real_hw(void) {
     mbox[0] = 9 * 4;
     mbox[1] = 0;
     mbox[2] = 0x00010004; mbox[3] = 8; mbox[4] = 0;   // get board serial
     mbox[5] = 0; mbox[6] = 0;
     mbox[7] = 0;                                       // end tag
     mbox[8] = 0;
-    int ok = mbox_call();
-    uint32_t lo = mbox[5], hi = mbox[6];
-    uart_hex("[BOARD] serial lo: ", lo);
-    uart_hex("[BOARD] serial hi: ", hi);
-    return ok && lo == 0 && hi == 0;
+    mbox_call();
+    uart_hex("[BOARD] serial lo: ", mbox[5]);
+    uart_hex("[BOARD] serial hi: ", mbox[6]);
+    return (mbox[5] | mbox[6]) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,42 +524,51 @@ static int running_under_qemu(void) {
 static int setup_fb(void) {
     mbox[ 0] = 35 * 4;
     mbox[ 1] = 0;
-    mbox[ 2] = 0x00048003; mbox[ 3] = 8; mbox[ 4] = 8;
+    mbox[ 2] = 0x00048003; mbox[ 3] = 8; mbox[ 4] = 8;   // set physical w/h
     mbox[ 5] = FB_WIDTH;
     mbox[ 6] = FB_HEIGHT;
-    mbox[ 7] = 0x00048004; mbox[ 8] = 8; mbox[ 9] = 8;
+    mbox[ 7] = 0x00048004; mbox[ 8] = 8; mbox[ 9] = 8;   // set virtual w/h
     mbox[10] = FB_WIDTH;
     mbox[11] = FB_HEIGHT;
-    mbox[12] = 0x00048005; mbox[13] = 4; mbox[14] = 4;
+    mbox[12] = 0x00048005; mbox[13] = 4; mbox[14] = 4;   // set depth
     mbox[15] = 32;
-    mbox[16] = 0x00040001; mbox[17] = 8; mbox[18] = 8;
-    mbox[19] = 4096;
-    mbox[20] = 0;
-    mbox[21] = 0x00040008; mbox[22] = 4; mbox[23] = 4;
-    mbox[24] = 0;
-    mbox[25] = 0;
+    // Force pixel order to RGB (1). Without this each platform uses its own
+    // default - QEMU is RGB but the real Pi 4 firmware defaults to BGR, which
+    // swaps red/blue and turns the raspberry logo purple. We pack pixels with red
+    // in the low byte, which is the RGB order.
+    mbox[16] = 0x00048006; mbox[17] = 4; mbox[18] = 4;   // set pixel order
+    mbox[19] = 1;                                        // 1 = RGB
+    mbox[20] = 0x00040001; mbox[21] = 8; mbox[22] = 8;   // allocate framebuffer
+    mbox[23] = 4096;                                     // -> base address
+    mbox[24] = 0;                                        // -> size
+    mbox[25] = 0x00040008; mbox[26] = 4; mbox[27] = 4;   // get pitch
+    mbox[28] = 0;                                        // -> pitch
+    mbox[29] = 0;                                        // end tag
 
     int ok = mbox_call();
     uart_dec("[FB] mbox_call returned: ", (uint32_t)ok);
     uart_hex("[FB] mbox[1] response:   ", mbox[1]);
     uart_dec("[FB] width:  ", mbox[5]);
     uart_dec("[FB] height: ", mbox[6]);
-    uart_hex("[FB] bus addr: ", mbox[19]);
-    uart_dec("[FB] size:   ", mbox[20]);
-    uart_dec("[FB] pitch:  ", mbox[24]);
+    uart_hex("[FB] pixel order: ", mbox[19]);
+    uart_hex("[FB] bus addr: ", mbox[23]);
+    uart_dec("[FB] size:   ", mbox[24]);
+    uart_dec("[FB] pitch:  ", mbox[28]);
 
-    if (!ok || mbox[24] == 0) return 0;
+    if (!ok || mbox[28] == 0) return 0;
 
-    uint32_t fb_bus  = mbox[19];
+    uint32_t fb_bus  = mbox[23];
     uint32_t fb_phys = fb_bus & 0x3FFFFFFF;  // strip VideoCore bus alias
-    uint32_t pitch   = mbox[24];
-    uint32_t fb_size = mbox[20];
+    uint32_t pitch   = mbox[28];
+    uint32_t fb_size = mbox[24];
     uint32_t *fb     = (uint32_t *)(uintptr_t)fb_phys;
 
     uart_hex("[FB] physical: ", fb_phys);
-    // On real hardware the GPU scans the framebuffer straight out of RAM, so map
-    // it non-cacheable to keep CPU pixel writes coherent (no-op effect in QEMU).
-    mmu_set_noncached(fb_phys, fb_size);
+    // The framebuffer is brought up before the MMU (see kernel_main), so we just
+    // record its extent here; kernel_main re-marks it non-cacheable once the MMU
+    // page tables exist, so CPU pixel writes stay coherent with the GPU scan-out.
+    g_fb_phys = fb_phys;
+    g_fb_size = fb_size;
     init_graphics(fb, mbox[5], mbox[6], pitch);
     fb_ready = 1;
     return 1;
@@ -518,48 +582,60 @@ void kernel_main(void) {
     uart_init();
     uart_puts("\n[BOOT] RPi4 bare metal kernel started\n");
 
-    // Enable MMU + caches early (big speed-up; also lets unaligned access work).
-    mmu_init();
-    uart_puts("[MMU] enabled (MMU + D/I caches)\n");
-
-    // Framebuffer (the BBC boot banner is printed by basic_repl)
+    // Bring the framebuffer up BEFORE enabling the MMU. With caches off the
+    // framebuffer is naturally coherent with the GPU, and - crucially - this
+    // gives us a screen to print on even if the MMU/cache bring-up is itself what
+    // hangs on real silicon. boot_msg() mirrors progress to this screen once up,
+    // so the last line you see is exactly where the kernel stopped.
     uart_puts("[FB] setting up framebuffer...\n");
     if (!setup_fb()) {
         uart_puts("[FB] ERROR: framebuffer setup failed\n");
     } else {
-        uart_puts("[FB] framebuffer OK\n");
         cleardevice();
+        boot_msg("[FB] framebuffer OK\n");
     }
 
-    // Decide whether to show the boot logo (only inside a QEMU session).
-    g_show_logo = running_under_qemu();
-    uart_dec("[BOARD] qemu session: ", (uint32_t)g_show_logo);
+    // Enable MMU + caches (big speed-up; also lets unaligned access work). On
+    // real hardware this invalidates stale firmware cache state first.
+    boot_msg("[MMU] enabling MMU + caches...\n");
+    mmu_init();
+    mmu_set_noncached(g_fb_phys, g_fb_size);   // re-mark FB NC (mmu_init rebuilt the tables)
+    boot_msg("[MMU] enabled\n");
 
-    // Mount the SD card FIRST, so the boot log can be dumped to it (the only way
-    // to read diagnostics on a board with no serial cable).
-    uart_puts("[SD] mounting filesystem...\n");
+    // Show the BerryBasic boot logo (con_splash draws it when the REPL banner
+    // prints; clearing the boot-progress text first).
+    int real_hw = board_real_hw();
+    g_show_logo = 1;
+
+    // Mount the SD card (the data partition holds the user's BASIC programs).
+    boot_msg("[SD] mounting filesystem...\n");
     g_sd_ready = (stg_init() == 0);
+    boot_msg(g_sd_ready ? "[SD] mounted\n" : "[SD] mount FAILED\n");
 
     // USB keyboard on the DWC2 OTG / USB-C port (this is what QEMU emulates).
-    uart_puts("[USB] initialising keyboard...\n");
+    // NOTE: on a board whose only USB-C port is power, no device is present here;
+    // if boot visibly stops on the next line, the DWC2 probe is the culprit.
+    boot_msg("[USB] initialising keyboard (DWC2/USB-C)...\n");
     g_kbd_ok = usb_kbd_init();
-    uart_puts(g_kbd_ok ? "[USB] keyboard ready\n"
-                       : "[USB] no USB keyboard - UART input only\n");
-    flush_boot_log();                  // checkpoint: boot + SD + DWC2 captured
+    boot_msg(g_kbd_ok ? "[USB] keyboard ready\n"
+                      : "[USB] no USB-C keyboard\n");
 
     // On real hardware the USB-A ports are behind the VL805 xHCI on PCIe; bring
-    // it up and look for a keyboard there too. (No PCIe under QEMU -> skipped.)
-    if (!g_kbd_ok) {
-        uart_puts("[USB] trying USB-A (PCIe/VL805 xHCI)...\n");
+    // it up and look for a keyboard there too. QEMU does not model the PCIe
+    // controller (touching it faults), so only do this on real hardware.
+    if (!g_kbd_ok && real_hw) {
+        boot_msg("[USB] trying USB-A (PCIe/VL805 xHCI)...\n");
         uintptr_t xhci_mmio = pcie_init();
         if (xhci_mmio) g_xhci_ok = xhci_kbd_init(xhci_mmio);
-        uart_puts(g_xhci_ok ? "[USB] USB-A keyboard ready\n"
-                            : "[USB] no USB-A keyboard\n");
-        flush_boot_log();              // full log including the USB-A bring-up
+        boot_msg(g_xhci_ok ? "[USB] USB-A keyboard ready\n"
+                           : "[USB] no USB-A keyboard\n");
     }
 
+    // The boot log is only written to the card on a crash (see exception_handler),
+    // so normal boots leave the data partition holding nothing but user programs.
+
     // Hand control to the BASIC interpreter (runs forever on the target).
-    uart_puts("[LOOP] entering BASIC\n");
+    boot_msg("[LOOP] entering BASIC\n");
     basic_init();
     basic_repl();
 }

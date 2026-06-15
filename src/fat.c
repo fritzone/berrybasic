@@ -80,8 +80,14 @@ int stg_init(void) {
     if (sd_read(0, 1, s)) return STG_EIO;
     uint32_t base = 0;
     if (s[0] != 0xEB && s[0] != 0xE9) {       // not a BPB jump -> assume MBR
-        uint32_t p = rd32(s + 454);           // first partition: start LBA
-        if (p) base = p;
+        // The BerryBasic card has two partitions: #1 is the boot/system volume
+        // (firmware + kernel), #2 holds the user's BASIC programs. Mount #2 so
+        // CAT/LOAD/SAVE only ever see user files. Fall back to #1 for old
+        // single-partition cards. MBR entries are 16 bytes from 0x1BE; the
+        // start-LBA field is at +8, so entry 1 -> 454, entry 2 -> 470.
+        uint32_t p2 = rd32(s + 470);          // partition 2: start LBA
+        uint32_t p1 = rd32(s + 454);          // partition 1: start LBA
+        base = p2 ? p2 : p1;
     }
     int r = parse_bpb(base);
     if (r) { uart_puts("[FAT] no FAT filesystem\n"); return r; }

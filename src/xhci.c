@@ -41,6 +41,7 @@ static uintptr_t db_base;        // doorbell array
 
 #define USBCMD_RS       (1u << 0)
 #define USBCMD_HCRST    (1u << 1)
+#define USBCMD_INTE     (1u << 2)    // interrupter enable
 #define USBSTS_HCH      (1u << 0)
 #define USBSTS_CNR      (1u << 11)
 
@@ -84,12 +85,23 @@ typedef struct __attribute__((packed)) {
 #define RING_TRBS  16
 
 // --- non-cacheable DMA arena ------------------------------------------------
-#define ARENA_SIZE (256 * 1024)
-static uint8_t arena[ARENA_SIZE] __attribute__((aligned(0x10000)));
+// CRITICAL: mmu_set_noncached() marks whole 2 MiB MMU blocks non-cacheable, so
+// the arena MUST occupy its OWN 2 MiB block. If it shared a block with the
+// stack / kernel / globals (as a normal BSS array in the low 2 MiB would),
+// marking it non-cacheable would make those stale too - corrupting the stack
+// (PC alignment fault) and globals like cap_base (garbage MMIO reads). So the
+// arena is exactly 2 MiB and 2 MiB-aligned: it fills one block and nothing else
+// shares it.
+#define ARENA_SIZE (2 * 1024 * 1024)
+static uint8_t arena[ARENA_SIZE] __attribute__((aligned(ARENA_SIZE)));
 static uint32_t arena_off;
 
 static void *dma_alloc(uint32_t size, uint32_t align) {
     arena_off = (arena_off + align - 1) & ~(align - 1);
+    if (arena_off + size > ARENA_SIZE) {       // never write past the arena block
+        uart_puts("[XHCI] arena exhausted\n");
+        return &arena[0];                       // degrade safely rather than smash memory
+    }
     void *p = &arena[arena_off];
     arena_off += size;
     uint8_t *b = (uint8_t *)p;
@@ -126,8 +138,17 @@ static void usleep(uint32_t us) {
 
 static uint64_t pa(void *p) { return (uint64_t)(uintptr_t)p; }
 
+// Full system barrier: ensure prior memory writes (TRBs, contexts in the
+// non-cached arena) are globally visible before the following access.
+static inline void dsb(void) { __asm__ volatile("dsb sy" ::: "memory"); }
+
 // Ring a doorbell (slot 0 = command ring; slot N = device slot, target = DCI).
+// The DSB is essential: the TRB we just wrote lives in non-cached memory and the
+// doorbell is a Device write; without the barrier the doorbell can reach the
+// controller before the TRB lands, so it reads a stale/zero TRB (e.g. a null
+// input-context pointer) and the command never completes.
 static void ring_db(int slot, uint32_t target) {
+    dsb();
     WR32(db_base + slot * 4, target);
 }
 
@@ -173,17 +194,44 @@ static void ring_push(trb_t *ring, uint32_t *enq, uint32_t *cyc,
 // Issue a command TRB and wait for its completion event. Returns the slot id
 // from the completion (or completion code in low bits); <0 on error.
 static int run_command(uint64_t param, uint32_t control) {
+    // Remember the address of the command TRB we are about to enqueue. The
+    // Command Completion Event echoes this pointer, so we can match the
+    // completion to OUR command and ignore completions that belong to an
+    // earlier, slow-to-finish command (otherwise the event pipeline shifts by
+    // one and every later wait reads the wrong event).
+    uint64_t my_trb = pa(&cmd_ring[cmd_enq]);
     ring_push(cmd_ring, &cmd_enq, &cmd_cycle, param, 0, control);
     ring_db(0, 0);
+    volatile uint32_t *clo = (volatile uint32_t *)0xFE003004UL;
+    uint32_t t0 = *clo;
     trb_t ev;
-    if (!next_event(&ev, 200)) { uart_puts("[XHCI] cmd timeout\n"); return -1; }
-    if (TRB_GET_TYPE(ev.control) != TRB_CMD_COMPLETION) {
-        uart_hex("[XHCI] unexpected event ", TRB_GET_TYPE(ev.control));
-        return -1;
+    // Poll in short slices, re-ringing the command doorbell between them. After
+    // the command ring goes idle (following the previous command), a single
+    // doorbell can be missed by the controller; periodically re-ringing nudges a
+    // stalled command ring without re-executing already-finished commands.
+    for (int tries = 0; tries < 60; tries++) {     // ~3 s total
+        if (!next_event(&ev, 50)) {
+            ring_db(0, 0);                          // nudge a possibly-stalled ring
+            continue;
+        }
+        if (TRB_GET_TYPE(ev.control) == TRB_CMD_COMPLETION) {
+            uint64_t ev_trb = (uint64_t)ev.lo | ((uint64_t)ev.hi << 32);
+            if (ev_trb != my_trb) {            // completion for a previous command
+                uart_hex("[XHCI] stale cmd comp ", (uint32_t)ev_trb);
+                continue;
+            }
+            uart_dec("[XHCI] cmd us ", *clo - t0);
+            int cc = COMP_CODE(ev.status);
+            if (cc != 1) { uart_hex("[XHCI] cmd comp code ", cc); return -1; }
+            return (ev.control >> 24) & 0xff;     // slot id
+        }
+        uart_hex("[XHCI] skip event type ", TRB_GET_TYPE(ev.control));
     }
-    int cc = COMP_CODE(ev.status);
-    if (cc != 1) { uart_hex("[XHCI] cmd comp code ", cc); return -1; }
-    return (ev.control >> 24) & 0xff;     // slot id
+    uart_puts("[XHCI] cmd timeout\n");
+    uart_hex("[XHCI]   USBSTS: ", RD32(op_base + OP_USBSTS));
+    uart_hex("[XHCI]   CRCR lo: ", RD32(op_base + OP_CRCR));
+    uart_hex("[XHCI]   PORTSC1: ", RD32(op_base + OP_PORTSC(1)));
+    return -1;
 }
 
 // --- control transfer on EP0 ------------------------------------------------
@@ -209,10 +257,23 @@ static int control_xfer(uint8_t bmReqType, uint8_t bReq, uint16_t wValue,
 
     ring_db(slot_id, 1);                              // EP0 = DCI 1
     trb_t ev;
-    if (!next_event(&ev, 200)) { uart_puts("[XHCI] ctrl timeout\n"); return -1; }
-    int cc = COMP_CODE(ev.status);
-    if (cc != 1 && cc != 13 /*short packet*/) { uart_hex("[XHCI] ctrl cc ", cc); return -1; }
-    return 0;
+    // Drain until the Transfer Event, re-ringing the endpoint doorbell between
+    // polls (same lost-doorbell race as the command ring) and skipping any
+    // intervening events (e.g. Port Status Change).
+    for (int tries = 0; tries < 60; tries++) {        // ~3 s total
+        if (!next_event(&ev, 50)) {
+            ring_db(slot_id, 1);                       // nudge a possibly-stalled ring
+            continue;
+        }
+        if (TRB_GET_TYPE(ev.control) == TRB_TRANSFER_EVENT) {
+            int cc = COMP_CODE(ev.status);
+            if (cc != 1 && cc != 13 /*short packet*/) { uart_hex("[XHCI] ctrl cc ", cc); return -1; }
+            return 0;
+        }
+        uart_hex("[XHCI] skip event type ", TRB_GET_TYPE(ev.control));
+    }
+    uart_puts("[XHCI] ctrl timeout\n");
+    return -1;
 }
 
 // Slot/endpoint context field helpers (32 dwords each, ctx_size bytes apart).
@@ -221,7 +282,18 @@ static uint32_t *ep_ctx(uint8_t *ctx, int dci) { return (uint32_t *)(ctx + dci *
 
 // --- controller bring-up ----------------------------------------------------
 static int xhci_start(void) {
-    uint8_t caplen = RD32(cap_base + CAP_CAPLENGTH) & 0xff;
+    uint32_t cap0 = RD32(cap_base + CAP_CAPLENGTH);
+    uint8_t  caplen  = cap0 & 0xff;
+    uint16_t hciver  = (cap0 >> 16) & 0xffff;
+    uart_hex("[XHCI] cap0 raw: ", cap0);
+    uart_hex("[XHCI] HCIVERSION: ", hciver);
+    // Sanity: a working xHCI has CAPLENGTH ~0x20-0x40 and HCIVERSION 0x0100/0x0110.
+    // If these are wild, the MMIO window isn't reaching the controller - bail
+    // gracefully rather than computing a misaligned op_base and data-aborting.
+    if (caplen < 0x20 || caplen > 0x40 || (hciver != 0x0100 && hciver != 0x0110)) {
+        uart_puts("[XHCI] MMIO not responding (bad CAPLENGTH/HCIVERSION)\n");
+        return -1;
+    }
     op_base = cap_base + caplen;
     rt_base = cap_base + (RD32(cap_base + CAP_RTSOFF) & ~0x1fu);
     db_base = cap_base + (RD32(cap_base + CAP_DBOFF) & ~0x3u);
@@ -234,13 +306,33 @@ static int xhci_start(void) {
     uart_dec("[XHCI] max slots: ", maxslots);
     uart_dec("[XHCI] max ports: ", maxports);
 
-    // Halt then reset the controller.
+    uart_hex("[XHCI] USBSTS pre : ", RD32(op_base + OP_USBSTS));
+
+    // CRITICAL: the VL805 sets CNR (Controller Not Ready) while its firmware
+    // (re)loads after the reset-notify. The xHCI spec forbids writing ANY
+    // register except USBSTS while CNR=1; writing USBCMD too early wedges the
+    // controller (HSE set, HCRST never clears). So wait for CNR to clear FIRST.
+    int i;
+    for (i = 0; i < 8000 && (RD32(op_base + OP_USBSTS) & USBSTS_CNR); i++) usleep(1000);
+    uart_dec("[XHCI] initial CNR clear after ms ", i);
+    if (RD32(op_base + OP_USBSTS) & USBSTS_CNR) {
+        uart_puts("[XHCI] controller never became ready (VL805 firmware?)\n");
+        return -1;
+    }
+
+    // Now it is safe to halt: clear Run/Stop, wait for HCHalted.
     uint32_t cmd = RD32(op_base + OP_USBCMD);
     WR32(op_base + OP_USBCMD, cmd & ~USBCMD_RS);
-    for (int i = 0; i < 100 && !(RD32(op_base + OP_USBSTS) & USBSTS_HCH); i++) usleep(1000);
+    for (i = 0; i < 200 && !(RD32(op_base + OP_USBSTS) & USBSTS_HCH); i++) usleep(1000);
+    uart_hex("[XHCI] USBSTS halt: ", RD32(op_base + OP_USBSTS));
+
+    // Reset: set HCRST and wait for it to self-clear, then for CNR to clear again.
     WR32(op_base + OP_USBCMD, USBCMD_HCRST);
-    for (int i = 0; i < 1000 && (RD32(op_base + OP_USBCMD) & USBCMD_HCRST); i++) usleep(1000);
-    for (int i = 0; i < 1000 && (RD32(op_base + OP_USBSTS) & USBSTS_CNR); i++) usleep(1000);
+    for (i = 0; i < 1000 && (RD32(op_base + OP_USBCMD) & USBCMD_HCRST); i++) usleep(1000);
+    uart_dec("[XHCI] HCRST cleared after ms ", i);
+    for (i = 0; i < 2000 && (RD32(op_base + OP_USBSTS) & USBSTS_CNR); i++) usleep(1000);
+    uart_dec("[XHCI] CNR cleared after ms ", i);
+    uart_hex("[XHCI] USBSTS post: ", RD32(op_base + OP_USBSTS));
     if (RD32(op_base + OP_USBSTS) & USBSTS_CNR) { uart_puts("[XHCI] controller not ready\n"); return -1; }
 
     // DCBAA, command ring, event ring, scratchpad.
@@ -253,6 +345,7 @@ static int xhci_start(void) {
     // Scratchpad buffers if the controller wants them.
     uint32_t hcs2 = RD32(cap_base + CAP_HCSPARAMS2);
     int spb = ((hcs2 >> 27) & 0x1f) | (((hcs2 >> 21) & 0x1f) << 5);
+    if (spb > 64) spb = 64;                 // sanity clamp (real controllers use few)
     if (spb) {
         uint64_t *spa = dma_alloc(spb * 8, 64);
         for (int i = 0; i < spb; i++) spa[i] = pa(dma_alloc(4096, 4096));
@@ -282,28 +375,175 @@ static int xhci_start(void) {
     WR32(rt_base + IR0_ERSTBA, (uint32_t)erstba);
     WR32(rt_base + IR0_ERSTBA + 4, (uint32_t)(erstba >> 32));
 
-    // Run.
-    WR32(op_base + OP_USBCMD, USBCMD_RS);
+    // Interrupter 0: no moderation (IMOD=0 -> post events immediately) and
+    // enable it (IMAN.IE=1, write 1 to IP to clear). We poll the event ring, but
+    // the VL805 appears to defer posting completion events for ~1 s unless the
+    // interrupter is enabled and moderation is disabled.
+    WR32(rt_base + IR0_IMOD, 0);
+    WR32(rt_base + IR0_IMAN, 0x3);
+
+    // Run (Run/Stop + Interrupter Enable).
+    WR32(op_base + OP_USBCMD, USBCMD_RS | USBCMD_INTE);
     for (int i = 0; i < 100 && (RD32(op_base + OP_USBSTS) & USBSTS_HCH); i++) usleep(1000);
     uart_puts("[XHCI] controller running\n");
     return maxports;
 }
 
+// PORTSC has dangerous bits when writing: PED (bit 1) is write-1-to-DISABLE, and
+// the change bits [23:17] are write-1-to-clear. So when we write to set PR we
+// must mask both off, or we accidentally disable the port / clear changes.
+#define PORTSC_PP        (1u << 9)        // port power
+#define PORTSC_CHANGES   (0x7fu << 17)    // CSC,PEC,WRC,OCC,PRC,PLC,CEC
+#define PORTSC_PRESERVE  (~(PORTSC_PED | PORTSC_CHANGES))
+
 // Reset a port and return 1 if a device is present and enabled.
 static int port_reset(int port) {
     uint32_t sc = RD32(op_base + OP_PORTSC(port));
+    uart_hex("[XHCI] PORTSC init  : ", sc);
     if (!(sc & PORTSC_CCS)) return 0;               // nothing connected
-    // Write 1 to PR; preserve, clear change bits by writing them back.
-    WR32(op_base + OP_PORTSC(port), (sc & ~PORTSC_PED) | PORTSC_PR | PORTSC_CSC);
-    for (int i = 0; i < 200; i++) {
+
+    // Ensure the port is powered.
+    if (!(sc & PORTSC_PP)) {
+        WR32(op_base + OP_PORTSC(port), (sc & PORTSC_PRESERVE) | PORTSC_PP);
+        usleep(20000);
+        sc = RD32(op_base + OP_PORTSC(port));
+    }
+
+    // A SuperSpeed (USB3) port enables itself in hardware on connect - it is
+    // already in the Enabled state, no PR needed (and PR would be wrong).
+    if (sc & PORTSC_PED) {
+        uart_puts("[XHCI] port already enabled (SuperSpeed)\n");
+        return 1;
+    }
+
+    // USB2 port: issue a port reset (PR) and wait for the reset-change (PRC).
+    WR32(op_base + OP_PORTSC(port), (sc & PORTSC_PRESERVE) | PORTSC_PR);
+    int i;
+    for (i = 0; i < 500; i++) {
         sc = RD32(op_base + OP_PORTSC(port));
         if (sc & PORTSC_PRC) break;
         usleep(1000);
     }
-    WR32(op_base + OP_PORTSC(port), sc | PORTSC_PRC); // ack reset change
+    uart_dec("[XHCI] PRC after ms : ", i);
+    uart_hex("[XHCI] PORTSC reset : ", sc);
+
+    // Acknowledge the reset + connect changes (write 1 to clear them only).
+    WR32(op_base + OP_PORTSC(port),
+         (sc & PORTSC_PRESERVE) | PORTSC_PRC | PORTSC_CSC);
     usleep(20000);
     sc = RD32(op_base + OP_PORTSC(port));
+    uart_hex("[XHCI] PORTSC final : ", sc);
     return (sc & PORTSC_PED) ? 1 : 0;
+}
+
+// Enable a slot and Address a device, leaving it in the global slot_id with a
+// fresh global ep0_ring / dev_ctx / input_ctx.
+//   root_port : VL805 root-hub port (1-based) the device's topology hangs off
+//   route     : route string (0 = directly on a root port; else parent hub's
+//               downstream port number, for a tier-1 device)
+//   speed     : 1=FS 2=LS 3=HS 4=SS
+//   tt_slot   : parent hub slot id (FS/LS device behind a HS hub) or 0 = no TT
+//   tt_port   : parent hub downstream port number (when tt_slot != 0)
+// Returns the new slot id, or 0 on failure.
+static int address_device_on(int root_port, uint32_t route, int speed,
+                             int tt_slot, int tt_port) {
+    int sid = run_command(0, TRB_TYPE(TRB_ENABLE_SLOT));
+    if (sid <= 0) { uart_puts("[XHCI] enable slot failed\n"); return 0; }
+    uart_dec("[XHCI] slot ", sid);
+
+    dev_ctx   = dma_alloc(32 * ctx_size, 64);
+    input_ctx = dma_alloc(33 * ctx_size, 64);
+    ep0_ring  = dma_alloc(RING_TRBS * sizeof(trb_t), 64);
+    ep0_enq = 0; ep0_cycle = TRB_CYCLE;
+    dcbaa[sid] = pa(dev_ctx);
+
+    int mps0 = (speed == 4) ? 512 : (speed == 3) ? 64 : 8;
+
+    uint32_t *icc = (uint32_t *)input_ctx;
+    icc[1] = (1u << 0) | (1u << 1);                       // add slot + EP0
+    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
+    slot[0] = (1u << 27) | ((uint32_t)speed << 20) | (route & 0xfffff);
+    slot[1] = (root_port << 16);
+    if (tt_slot)                                          // FS/LS behind a HS hub
+        slot[2] = (tt_slot & 0xff) | ((tt_port & 0xff) << 8);
+    uint32_t *ep0 = ep_ctx(input_ctx + ctx_size, 1);
+    ep0[1] = (4u << 3) | ((uint32_t)mps0 << 16) | (3u << 1);
+    ep0[4] = 8;                                           // Average TRB Length
+    uint64_t trp = pa(ep0_ring) | 1;                      // DCS=1
+    ep0[2] = (uint32_t)trp;
+    ep0[3] = (uint32_t)(trp >> 32);
+
+    if (run_command(pa(input_ctx),
+                    TRB_TYPE(TRB_ADDRESS_DEVICE) | (1u << 9) | (sid << 24)) < 0) {
+        uart_puts("[XHCI] addr dev BSR=1 failed\n"); return 0;
+    }
+    if (run_command(pa(input_ctx), TRB_TYPE(TRB_ADDRESS_DEVICE) | (sid << 24)) < 0) {
+        uart_puts("[XHCI] address device failed\n"); return 0;
+    }
+    slot_id = sid;
+    uart_puts("[XHCI] device addressed\n");
+    return sid;
+}
+
+// The Pi 4 wires its USB-A sockets through an onboard USB hub on a VL805 root
+// port, so a keyboard is always a tier-1 device behind that hub. Given the hub's
+// already-addressed slot (global slot_id/ep0_ring point at it), find the
+// downstream port a device is connected to, reset it, and return that port with
+// *speed set; 0 if nothing connected. `buf` is a scratch DMA buffer.
+static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_speed,
+                         int *dport, int *dspeed) {
+    // Hub must be configured before its ports work.
+    if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[HUB] set config failed\n"); return 0; }
+    // Class hub descriptor (type 0x29): bNbrPorts, wHubCharacteristics, pwr-good.
+    if (control_xfer(0xA0, 6, (0x29 << 8), 0, 8, buf) < 0) { uart_puts("[HUB] get desc failed\n"); return 0; }
+    int nports = buf[2];
+    int ttt    = ((buf[3] | (buf[4] << 8)) >> 5) & 3;     // TT think time
+    int pgood  = buf[5] * 2;                              // ms
+    uart_dec("[HUB] ports ", nports);
+
+    // Tell the xHC this slot is a hub (route split transactions through it):
+    // Hub=1 (dword0 bit26), NumberOfPorts (dword1 24-31), TTT (dword2 16-17).
+    uint32_t *icc = (uint32_t *)input_ctx;
+    icc[0] = 0; icc[1] = (1u << 0);                       // evaluate slot context only
+    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
+    slot[0] = (1u << 27) | ((uint32_t)hub_speed << 20) | (1u << 26);
+    slot[1] = (root_port << 16) | (nports << 24);
+    slot[2] = (ttt << 16);
+    if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (hub_slot << 24)) < 0)
+        uart_puts("[HUB] set-hub config_ep failed (continuing)\n");
+
+    // Power every downstream port, wait power-good.
+    for (int p = 1; p <= nports; p++)
+        control_xfer(0x23, 3, 8 /*PORT_POWER*/, p, 0, buf);
+    usleep((pgood + 30) * 1000);
+
+    // Find a connected port, reset it, read its speed.
+    for (int p = 1; p <= nports; p++) {
+        if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;    // GET_STATUS
+        uint32_t st = buf[0] | (buf[1] << 8);
+        uart_dec("[HUB] port ", p);
+        uart_hex("[HUB]   status ", st);
+        if (!(st & 1)) continue;                          // PORT_CONNECTION
+        control_xfer(0x23, 3, 4 /*PORT_RESET*/, p, 0, buf);
+        for (int i = 0; i < 50; i++) {
+            usleep(10000);
+            if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;
+            st = buf[0] | (buf[1] << 8);
+            if (st & (1 << 4)) continue;                  // PORT_RESET still set
+            break;
+        }
+        control_xfer(0x23, 1, 20 /*C_PORT_RESET*/, p, 0, buf);
+        control_xfer(0xA3, 0, 0, p, 4, buf);
+        st = buf[0] | (buf[1] << 8);
+        uart_hex("[HUB]   post-reset ", st);
+        *dport  = p;
+        *dspeed = (st & (1 << 10)) ? 3 : (st & (1 << 9)) ? 2 : 1;   // HS/LS/FS
+        uart_dec("[HUB] device on port ", p);
+        uart_dec("[HUB]   speed ", *dspeed);
+        return p;
+    }
+    uart_puts("[HUB] no downstream device\n");
+    return 0;
 }
 
 int xhci_kbd_init(uintptr_t mmio_base) {
@@ -317,55 +557,58 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     int maxports = xhci_start();
     if (maxports < 0) return 0;
 
-    // Find and reset a connected port.
+    // Log every port's PORTSC and find a connected one.
     int port = 0;
     for (int p = 1; p <= maxports; p++) {
-        if (RD32(op_base + OP_PORTSC(p)) & PORTSC_CCS) { port = p; break; }
+        uint32_t sc = RD32(op_base + OP_PORTSC(p));
+        uart_dec("[XHCI] port ", p);
+        uart_hex("[XHCI]   PORTSC: ", sc);          // speed = bits [13:10]
+        if ((sc & PORTSC_CCS) && !port) port = p;   // first connected port
     }
     if (!port) { uart_puts("[XHCI] no device on any port\n"); return 0; }
-    uart_dec("[XHCI] device on port ", port);
+    uart_dec("[XHCI] using port ", port);
     if (!port_reset(port)) { uart_puts("[XHCI] port reset failed\n"); return 0; }
 
-    // Enable a slot.
-    slot_id = run_command(0, TRB_TYPE(TRB_ENABLE_SLOT));
-    if (slot_id <= 0) { uart_puts("[XHCI] enable slot failed\n"); return 0; }
-    uart_dec("[XHCI] slot ", slot_id);
+    // Address whatever is on this root port. On the Pi 4 this is the onboard USB
+    // hub; on other hardware it could be the keyboard directly.
+    int speed = (RD32(op_base + OP_PORTSC(port)) >> 10) & 0xf;
+    uart_dec("[XHCI] dev speed ", speed);
+    int hub_slot = address_device_on(port, 0, speed, 0, 0);
+    if (!hub_slot) return 0;
 
-    // Device + input contexts, EP0 transfer ring.
-    dev_ctx   = dma_alloc(32 * ctx_size, 64);
-    input_ctx = dma_alloc(33 * ctx_size, 64);
-    ep0_ring  = dma_alloc(RING_TRBS * sizeof(trb_t), 64);
-    ep0_enq = 0; ep0_cycle = TRB_CYCLE;
-    dcbaa[slot_id] = pa(dev_ctx);
+    // Topology of the device we will finally run the keyboard endpoint on. For a
+    // device directly on a root port these stay default; behind the Pi 4 hub
+    // they are updated. They are needed again when we reconfigure the slot to add
+    // the interrupt endpoint.
+    int dev_route = 0, dev_speed = speed, dev_tt_slot = 0, dev_tt_port = 0;
 
-    // Input control context: add slot (A0) and EP0 (A1).
-    uint32_t *icc = (uint32_t *)input_ctx;
-    icc[1] = (1u << 0) | (1u << 1);
-    // Slot context: 1 entry context, root hub port.
-    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
-    slot[0] = (1u << 27);                 // context entries = 1
-    slot[1] = (port << 16);               // root hub port number
-    // EP0 context: control, EP type 4, MPS 8 (full speed default), TR ptr.
-    uint32_t *ep0 = ep_ctx(input_ctx + ctx_size, 1);
-    ep0[1] = (4u << 3) | (8u << 16) | (3u << 1);   // EP type=control, MPS=8, CErr=3
-    uint64_t trp = pa(ep0_ring) | 1;       // DCS=1
-    ep0[2] = (uint32_t)trp;
-    ep0[3] = (uint32_t)(trp >> 32);
-
-    if (run_command(pa(input_ctx), TRB_TYPE(TRB_ADDRESS_DEVICE) | (slot_id << 24)) < 0) {
-        uart_puts("[XHCI] address device failed\n"); return 0;
-    }
-    uart_puts("[XHCI] device addressed\n");
-
-    // Get device descriptor (18 bytes) to read EP0 max packet size.
+    // Get the device descriptor (18 bytes).
     uint8_t *buf = dma_alloc(256, 64);
     if (control_xfer(0x80, 6, (1 << 8), 0, 18, buf) < 0) {
         uart_puts("[XHCI] GET_DESCRIPTOR failed\n"); return 0;
     }
-    int ep0_mps = buf[7];
     uart_hex("[XHCI] VID ", buf[8] | (buf[9] << 8));
     uart_hex("[XHCI] PID ", buf[10] | (buf[11] << 8));
-    (void)ep0_mps;   // (could re-evaluate EP0 context; MPS 8 works for enumeration)
+    uart_hex("[XHCI] bDeviceClass ", buf[4]);   // 0x09 = hub, 0x00 = per-interface
+
+    // If it is a hub (the Pi 4's onboard hub), find the keyboard on a downstream
+    // port and address it as a tier-1 device behind that hub. After this, the
+    // global slot_id/ep0_ring point at the keyboard for the rest of enumeration.
+    if (buf[4] == 0x09) {
+        int dport = 0, dspeed = 0;
+        if (!hub_enumerate(buf, port, hub_slot, speed, &dport, &dspeed)) return 0;
+        dev_route   = dport;
+        dev_speed   = dspeed;
+        dev_tt_slot = (dspeed < 3) ? hub_slot : 0;   // FS/LS device needs the hub as TT
+        dev_tt_port = dport;
+        if (!address_device_on(port, (uint32_t)dport, dspeed, dev_tt_slot, dport)) return 0;
+        if (control_xfer(0x80, 6, (1 << 8), 0, 18, buf) < 0) {
+            uart_puts("[XHCI] kbd GET_DESCRIPTOR failed\n"); return 0;
+        }
+        uart_hex("[XHCI] kbd VID ", buf[8] | (buf[9] << 8));
+        uart_hex("[XHCI] kbd PID ", buf[10] | (buf[11] << 8));
+        uart_hex("[XHCI] kbd class ", buf[4]);
+    }
 
     // Get configuration descriptor (first 9 bytes, then full) and find the HID
     // interrupt IN endpoint.
@@ -403,11 +646,15 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     report_buf = dma_alloc(8, 64);
 
     for (int i = 0; i < 33 * ctx_size; i++) input_ctx[i] = 0;
-    icc = (uint32_t *)input_ctx;
+    uint32_t *icc = (uint32_t *)input_ctx;
     icc[1] = (1u << 0) | (1u << kbd_dci);                      // add slot + this EP
-    slot = slot_ctx(input_ctx + ctx_size);
-    slot[0] = (kbd_dci << 27);                                 // context entries
+    // Rebuild the FULL slot context (A0 is set, so it is evaluated): keep the
+    // device's route string / speed / TT, and bump Context Entries to this EP.
+    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
+    slot[0] = (kbd_dci << 27) | ((uint32_t)dev_speed << 20) | (dev_route & 0xfffff);
     slot[1] = (port << 16);
+    if (dev_tt_slot)
+        slot[2] = (dev_tt_slot & 0xff) | ((dev_tt_port & 0xff) << 8);
     uint32_t *epi = ep_ctx(input_ctx + ctx_size, kbd_dci);
     int interval = 6;                                          // ~8ms for FS HID
     if (ep_interval > 0) interval = 3;                         // leave conservative
@@ -437,9 +684,11 @@ char xhci_kbd_getchar(void) {
 
     // Poll the event ring briefly; on a completed interrupt transfer, decode the
     // HID report and re-arm the endpoint for the next one.
+    static uint32_t idle = 0;
     trb_t ev;
     char out = 0;
     if (next_event(&ev, 1)) {
+        idle = 0;
         if (TRB_GET_TYPE(ev.control) == TRB_TRANSFER_EVENT) {
             int cc = COMP_CODE(ev.status);
             if (cc == 1 || cc == 13) out = hid_report_char(report_buf, kbd_prev);
@@ -448,6 +697,12 @@ char xhci_kbd_getchar(void) {
                       TRB_TYPE(TRB_NORMAL) | TRB_IOC);
             ring_db(slot_id, kbd_dci);
         }
+    } else if (++idle >= 64) {
+        // Periodically re-ring the endpoint doorbell. The VL805 can miss a
+        // doorbell (same race as the command/control rings); without this nudge
+        // a lost prime/re-arm doorbell would stall keyboard polling forever.
+        idle = 0;
+        ring_db(slot_id, kbd_dci);
     }
     return out;
 }

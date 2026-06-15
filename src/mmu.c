@@ -34,7 +34,44 @@
 static uint64_t l1_table[512] __attribute__((aligned(4096)));
 static uint64_t l2_table[512] __attribute__((aligned(4096)));   // first 1 GiB, 2 MiB blocks
 
+// Clean+invalidate the entire data cache to the point of coherency, by set/way.
+// REQUIRED on real silicon before enabling the D-cache: coming out of the
+// firmware the caches may hold stale lines covering our load region and page
+// tables, which would shadow RAM once caching is turned on - giving wrong
+// translations and a silent hang. QEMU never exhibits this because it doesn't
+// model the caches, which is exactly why it boots there but not on hardware.
+static void dcache_clean_inval_all(void) {
+    uint64_t clidr;
+    __asm__ volatile("mrs %0, clidr_el1" : "=r"(clidr));
+    uint32_t loc = (uint32_t)(clidr >> 24) & 0x7;          // level of coherency
+    for (uint32_t level = 0; level < loc; level++) {
+        uint32_t ctype = (uint32_t)(clidr >> (level * 3)) & 0x7;
+        if (ctype < 2) continue;                            // no data/unified cache here
+        __asm__ volatile("msr csselr_el1, %0" :: "r"((uint64_t)(level << 1)));
+        __asm__ volatile("isb");
+        uint64_t ccsidr;
+        __asm__ volatile("mrs %0, ccsidr_el1" : "=r"(ccsidr));
+        uint32_t line_shift = ((uint32_t)ccsidr & 0x7) + 4;          // log2(line bytes)
+        uint32_t ways = ((uint32_t)(ccsidr >> 3))  & 0x3FF;          // associativity - 1
+        uint32_t sets = ((uint32_t)(ccsidr >> 13)) & 0x7FFF;         // number of sets - 1
+        uint32_t way_shift = ways ? (uint32_t)__builtin_clz(ways) : 31;
+        for (int32_t w = (int32_t)ways; w >= 0; w--)
+            for (int32_t s = (int32_t)sets; s >= 0; s--) {
+                uint64_t sw = ((uint64_t)level << 1) |
+                              ((uint64_t)(uint32_t)w << way_shift) |
+                              ((uint64_t)(uint32_t)s << line_shift);
+                __asm__ volatile("dc cisw, %0" :: "r"(sw) : "memory");
+            }
+    }
+    __asm__ volatile("dsb sy");
+    __asm__ volatile("isb");
+}
+
 void mmu_init(void) {
+    // Discard any stale cache state the firmware left behind before we turn the
+    // D-cache on below (no-op effect under QEMU; essential on real hardware).
+    dcache_clean_inval_all();
+
     uint64_t normal_blk = DESC_BLOCK | DESC_AF | DESC_SH_INNER | ATTR_IDX(MAIR_IDX_NORMAL);
     uint64_t device_blk = DESC_BLOCK | DESC_AF | ATTR_IDX(MAIR_IDX_DEVICE);
 

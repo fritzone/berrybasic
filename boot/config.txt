@@ -9,15 +9,36 @@ arm_64bit=1
 # Our kernel image.
 kernel=kernel8.img
 
-# Bare-metal kernel: don't load a device tree (the firmware passes 0 in x0).
-device_tree=
+# Load the Pi 4 device tree normally. We do NOT disable it (no "device_tree=")
+# because on Pi 4 the firmware's 64-bit kernel handoff depends on a DTB being
+# present - disabling it makes the firmware fail to start the kernel (splash,
+# then nothing). Our bare-metal kernel simply ignores the DTB pointer the
+# firmware passes in x0.
 
-# Serial console on GPIO14/15 (mini-UART / PL011), 115200 8N1. Handy for
-# headless bring-up; harmless if unused.
+# --- HDMI: force a known-good, monitor-independent 800x600 mode -------------
+# Our framebuffer/terminal is compiled for 800x600, so pin the HDMI output to
+# exactly that. These settings make the GPU drive a signal unconditionally,
+# regardless of what the monitor reports over EDID (some monitors/TVs don't
+# advertise 800x600, which would otherwise give a black "no signal" screen):
+#   hdmi_force_hotplug=1  - always output, even if hotplug detect says "no TV"
+#   hdmi_ignore_edid      - don't trust the monitor's mode list; use ours
+#   hdmi_group=2          - DMT (computer-monitor) timings
+#   hdmi_mode=9           - 800x600 @ 60 Hz (DMT mode 9), very widely supported
+#   hdmi_drive=2          - normal HDMI mode (with audio); use 1 for pure DVI
+hdmi_force_hotplug=1
+hdmi_ignore_edid=0xa5000080
+hdmi_group=2
+hdmi_mode=9
+hdmi_drive=2
+config_hdmi_boost=5
+
+# Serial console on GPIO14/15, 115200 8N1. Handy for headless bring-up.
 enable_uart=1
 
-# Skip the rainbow splash so the screen starts black like a real micro.
-disable_splash=1
+# Show the rainbow splash on purpose: if you see it, HDMI + firmware output are
+# working and any later black screen is our kernel's framebuffer, not the
+# cable/monitor. (Set back to 1 once the screen is confirmed working.)
+disable_splash=0
 
 # We only need a framebuffer, so keep GPU memory small.
 gpu_mem=64
