@@ -214,6 +214,33 @@ PRINT 6 AND 3
 
 
 
+## Shift and Rotate
+
+Bitwise shifts and rotates operate on 32-bit integers, written as functions:
+
+| Function    | Meaning                                             |
+| ----------- | --------------------------------------------------- |
+| SHL(x, n)   | Shift x left by n bits (zeros in from the right)    |
+| SHR(x, n)   | Logical shift right by n bits (zeros in, unsigned)  |
+| ASR(x, n)   | Arithmetic shift right by n bits (keeps the sign)   |
+| ROL(x, n)   | Rotate left by n bits within 32 bits                |
+| ROR(x, n)   | Rotate right by n bits within 32 bits               |
+
+Examples:
+
+    PRINT SHL(1, 4)        : REM 16
+    PRINT SHR(256, 4)      : REM 16
+    PRINT ASR(-8, 1)       : REM -4  (sign preserved)
+    PRINT ROL(1, 1)        : REM 2
+
+Shift counts of 32 or more give 0 for SHL/SHR; a negative count is an error.
+Combine with AND/OR to pack and unpack fields, e.g. an RGB colour:
+
+    COL = SHL(R,16) OR SHL(G,8) OR B
+    R   = SHR(COL,16) AND 255
+
+
+
 ## String Concatenation
 
 FULL$ = FIRST$ + LAST$

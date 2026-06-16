@@ -16,7 +16,45 @@ int con_getline(char *buf, int maxlen) {
     return n;
 }
 
+// Host has no interactive line editor (stdin is line-buffered), so there's no
+// cursor editing or history. We still honour the prompt and the prefill so AUTO
+// and EDIT work when scripting: print the prompt + prefill, then append the
+// typed line after the prefilled characters.
+int con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
+    if (prompt && *prompt) fputs(prompt, stdout);
+    if (prefill_len > 0) { buf[prefill_len] = 0; fputs(buf, stdout); }
+    fflush(stdout);
+    char tmp[1024];
+    if (!fgets(tmp, sizeof tmp, stdin)) return -1;
+    int t = (int)strlen(tmp);
+    while (t > 0 && (tmp[t - 1] == '\n' || tmp[t - 1] == '\r')) tmp[--t] = 0;
+    int n = prefill_len;
+    for (int i = 0; i < t && n < maxlen - 1; i++) buf[n++] = tmp[i];
+    buf[n] = 0;
+    return n;
+}
+
 void con_cls(void) { fputs("\033[2J\033[H", stdout); }   // ANSI clear on a terminal
+
+// VDU driver for the host: keeps the same parameter-counting state machine as
+// the target so multi-byte commands stay in sync, prints text codes to stdout,
+// and ignores the graphics/screen-control codes (no display on the host).
+void con_vdu(int b) {
+    static const unsigned char nparams[32] = {
+        0,1,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+        0,1,2,5,0,0,1,9, 8,5,0,1,4,4,0,2
+    };
+    static int need = 0, cmd = -1, got = 0;
+    b &= 0xff;
+    if (cmd >= 0) { if (++got >= need) cmd = -1; return; }   // skip parameter bytes
+    if (b < 32) {
+        if (b == 10 || b == 13) putchar(b);                  // LF/CR are visible
+        if (nparams[b]) { cmd = b; need = nparams[b]; got = 0; }
+        return;
+    }
+    if (b == 127) { fputs("\b \b", stdout); return; }
+    putchar(b);                                              // printable
+}
 
 void con_colour(int c) {
     static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };

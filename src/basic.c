@@ -581,7 +581,8 @@ enum {
     KW_RND, KW_LEN, KW_ASC, KW_VAL, KW_INSTR, KW_GET, KW_INKEY,
     KW_CHRS, KW_STRS, KW_LEFTS, KW_RIGHTS, KW_MIDS, KW_STRINGS, KW_GETS, KW_INKEYS,
     KW_POINT,                                         // POINT(x,y) graphics function
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_POINT,
+    KW_SHL, KW_SHR, KW_ASR, KW_ROL, KW_ROR,           // bitwise shift / rotate functions
+    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_ROR,
     KW_TAB, KW_SPC                                    // PRINT-only modifiers
 };
 
@@ -623,6 +624,8 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "VAL",   KW_VAL   }, { "CHR$", KW_CHRS  }, { "STR$",   KW_STRS   },
     { "LEFT$", KW_LEFTS }, { "RIGHT$", KW_RIGHTS }, { "MID$",  KW_MIDS  },
     { "STRING$", KW_STRINGS }, { "GET$", KW_GETS }, { "INKEY$", KW_INKEYS },
+    { "SHL",   KW_SHL   }, { "SHR",  KW_SHR   }, { "ASR",    KW_ASR    },
+    { "ROL",   KW_ROL   }, { "ROR",  KW_ROR   },
     { "TAB",   KW_TAB   }, { "SPC",  KW_SPC   },
 };
 static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
@@ -995,6 +998,28 @@ static value_t eval_function(int fn) {
                            for (int i = 0; i < rep; i++)
                                for (int j = 0; j < s.len; j++) p[i * s.len + j] = s.str[j];
                            result = v_str(p, rep * s.len); break; }
+        // Bitwise shift / rotate on 32-bit integers. SHL/SHR shift in zeros
+        // (SHR is logical/unsigned); ASR is an arithmetic right shift that keeps
+        // the sign bit; ROL/ROR rotate within 32 bits.
+        case KW_SHL: { unsigned x = (unsigned)(int)need_num(); if (!expect(T_COMMA)) break;
+                       int n = (int)need_num(); if (g_err) break;
+                       if (n < 0) { err("Invalid argument"); break; }
+                       result = v_num((double)(int)(n >= 32 ? 0u : x << n)); break; }
+        case KW_SHR: { unsigned x = (unsigned)(int)need_num(); if (!expect(T_COMMA)) break;
+                       int n = (int)need_num(); if (g_err) break;
+                       if (n < 0) { err("Invalid argument"); break; }
+                       result = v_num((double)(int)(n >= 32 ? 0u : x >> n)); break; }
+        case KW_ASR: { int x = (int)need_num(); if (!expect(T_COMMA)) break;
+                       int n = (int)need_num(); if (g_err) break;
+                       if (n < 0) { err("Invalid argument"); break; }
+                       if (n > 31) n = 31;
+                       result = v_num((double)(x >> n)); break; }
+        case KW_ROL: { unsigned x = (unsigned)(int)need_num(); if (!expect(T_COMMA)) break;
+                       int n = (int)need_num() & 31; if (g_err) break;
+                       result = v_num((double)(int)((x << n) | (x >> ((32 - n) & 31)))); break; }
+        case KW_ROR: { unsigned x = (unsigned)(int)need_num(); if (!expect(T_COMMA)) break;
+                       int n = (int)need_num() & 31; if (g_err) break;
+                       result = v_num((double)(int)((x >> n) | (x << ((32 - n) & 31)))); break; }
         default: err("Syntax error in expression"); break;
     }
     if (!g_err) expect(T_RP);
