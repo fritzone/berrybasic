@@ -485,65 +485,86 @@ static int address_device_on(int root_port, uint32_t route, int speed,
     return sid;
 }
 
-// The Pi 4 wires its USB-A sockets through an onboard USB hub on a VL805 root
-// port, so a keyboard is always a tier-1 device behind that hub. Given the hub's
-// already-addressed slot (global slot_id/ep0_ring point at it), find the
-// downstream port a device is connected to, reset it, and return that port with
-// *speed set; 0 if nothing connected. `buf` is a scratch DMA buffer.
+// Configure an already-addressed device as a USB hub and find a device on one of
+// its downstream ports. `hub_slot`/`hub_speed`/`route`/`tt_slot`/`tt_port` are the
+// hub's own slot context (route and TT must be preserved when we re-write the
+// slot context to set the hub bit, or a 2nd-tier hub loses its route). Returns the
+// connected downstream port with *dspeed set; 0 if nothing is connected.
 static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_speed,
+                         uint32_t route, int tt_slot, int tt_port,
                          int *dport, int *dspeed) {
     // Hub must be configured before its ports work.
     if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[HUB] set config failed\n"); return 0; }
     // Class hub descriptor (type 0x29): bNbrPorts, wHubCharacteristics, pwr-good.
     if (control_xfer(0xA0, 6, (0x29 << 8), 0, 8, buf) < 0) { uart_puts("[HUB] get desc failed\n"); return 0; }
-    int nports = buf[2];
-    int ttt    = ((buf[3] | (buf[4] << 8)) >> 5) & 3;     // TT think time
-    int pgood  = buf[5] * 2;                              // ms
+    int nports   = buf[2];
+    int wHubChar = buf[3] | (buf[4] << 8);
+    int ttt      = (wHubChar >> 5) & 3;                   // TT think time
+    int pgood    = buf[5] * 2;                            // ms
     uart_dec("[HUB] ports ", nports);
+    uart_hex("[HUB] wHubChar ", (uint32_t)wHubChar);
 
     // Tell the xHC this slot is a hub (route split transactions through it):
-    // Hub=1 (dword0 bit26), NumberOfPorts (dword1 24-31), TTT (dword2 16-17).
+    // Hub=1 (dword0 bit26), NumberOfPorts (dword1 24-31), TTT (dword2 16-17). Keep
+    // the hub's existing route string and TT so deeper hubs stay reachable.
     uint32_t *icc = (uint32_t *)input_ctx;
     icc[0] = 0; icc[1] = (1u << 0);                       // evaluate slot context only
     uint32_t *slot = slot_ctx(input_ctx + ctx_size);
-    slot[0] = (1u << 27) | ((uint32_t)hub_speed << 20) | (1u << 26);
+    slot[0] = (1u << 27) | ((uint32_t)hub_speed << 20) | (1u << 26) | (route & 0xfffff);
     slot[1] = (root_port << 16) | (nports << 24);
-    slot[2] = (ttt << 16);
+    slot[2] = (ttt << 16) | (tt_slot ? ((tt_slot & 0xff) | ((tt_port & 0xff) << 8)) : 0);
     if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (hub_slot << 24)) < 0)
         uart_puts("[HUB] set-hub config_ep failed (continuing)\n");
 
-    // Power every downstream port, wait power-good.
+    // Power every downstream port.
+    uart_dec("[HUB] pwr-good ms ", pgood);
     for (int p = 1; p <= nports; p++)
         control_xfer(0x23, 3, 8 /*PORT_POWER*/, p, 0, buf);
-    usleep((pgood + 30) * 1000);
+    usleep((pgood + 50) * 1000);
 
-    // Find a connected port, reset it, read its speed.
-    for (int p = 1; p <= nports; p++) {
-        if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;    // GET_STATUS
-        uint32_t st = buf[0] | (buf[1] << 8);
-        uart_dec("[HUB] port ", p);
-        uart_hex("[HUB]   status ", st);
-        if (!(st & 1)) continue;                          // PORT_CONNECTION
-        control_xfer(0x23, 3, 4 /*PORT_RESET*/, p, 0, buf);
-        for (int i = 0; i < 50; i++) {
-            usleep(10000);
-            if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;
-            st = buf[0] | (buf[1] << 8);
-            if (st & (1 << 4)) continue;                  // PORT_RESET still set
-            break;
+    // Wait for a device to appear. A downstream hub (e.g. a monitor's built-in
+    // hub) can take a while to power up and assert a connection after its upstream
+    // port is powered, so poll all ports for up to ~6 s. Diagnostic: log every
+    // port's status/change word once a second so we can see if anything ever
+    // connects (CONNECTION = status bit 0).
+    int dp = 0;
+    for (int tries = 0; tries < 60 && !dp; tries++) {
+        for (int p = 1; p <= nports; p++) {
+            if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;       // GET_STATUS
+            uint32_t st = buf[0] | (buf[1] << 8);
+            uint32_t ch = buf[2] | (buf[3] << 8);
+            if (tries % 10 == 0) {                                       // ~ every 1 s
+                uart_dec("[HUB] poll p", p);
+                uart_hex("  st", st); uart_hex("  ch", ch);
+            }
+            if (st & 1) {                                                // PORT_CONNECTION
+                dp = p;
+                uart_dec("[HUB] connected port ", p);
+                uart_hex("[HUB]   status ", st);
+                break;
+            }
         }
-        control_xfer(0x23, 1, 20 /*C_PORT_RESET*/, p, 0, buf);
-        control_xfer(0xA3, 0, 0, p, 4, buf);
-        st = buf[0] | (buf[1] << 8);
-        uart_hex("[HUB]   post-reset ", st);
-        *dport  = p;
-        *dspeed = (st & (1 << 10)) ? 3 : (st & (1 << 9)) ? 2 : 1;   // HS/LS/FS
-        uart_dec("[HUB] device on port ", p);
-        uart_dec("[HUB]   speed ", *dspeed);
-        return p;
+        if (!dp) usleep(100000);                                         // 100 ms
     }
-    uart_puts("[HUB] no downstream device\n");
-    return 0;
+    if (!dp) { uart_puts("[HUB] no downstream device\n"); return 0; }
+
+    // Reset the connected port and read the new device's speed.
+    control_xfer(0x23, 3, 4 /*PORT_RESET*/, dp, 0, buf);
+    for (int i = 0; i < 50; i++) {
+        usleep(10000);
+        if (control_xfer(0xA3, 0, 0, dp, 4, buf) < 0) continue;
+        uint32_t st = buf[0] | (buf[1] << 8);
+        if (!(st & (1 << 4))) break;                      // PORT_RESET cleared
+    }
+    control_xfer(0x23, 1, 20 /*C_PORT_RESET*/, dp, 0, buf);
+    control_xfer(0xA3, 0, 0, dp, 4, buf);
+    uint32_t st = buf[0] | (buf[1] << 8);
+    uart_hex("[HUB]   post-reset ", st);
+    *dport  = dp;
+    *dspeed = (st & (1 << 10)) ? 3 : (st & (1 << 9)) ? 2 : 1;   // HS/LS/FS
+    uart_dec("[HUB] device on port ", dp);
+    uart_dec("[HUB]   speed ", *dspeed);
+    return dp;
 }
 
 int xhci_kbd_init(uintptr_t mmio_base) {
@@ -591,23 +612,36 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     uart_hex("[XHCI] PID ", buf[10] | (buf[11] << 8));
     uart_hex("[XHCI] bDeviceClass ", buf[4]);   // 0x09 = hub, 0x00 = per-interface
 
-    // If it is a hub (the Pi 4's onboard hub), find the keyboard on a downstream
-    // port and address it as a tier-1 device behind that hub. After this, the
-    // global slot_id/ep0_ring point at the keyboard for the rest of enumeration.
-    if (buf[4] == 0x09) {
+    // Walk down a chain of hubs until we reach the actual keyboard. On a bare Pi
+    // there is one hub (the onboard one); with a monitor/dock that has its own
+    // hub (e.g. CrowView) the keyboard is two hubs deep, and so on. Each hub tier
+    // contributes its downstream port number to the route string (one nibble per
+    // tier), and a full/low-speed device uses its immediate (high-speed) parent
+    // hub as its Transaction Translator.
+    int cur_slot = hub_slot;             // slot of the device we last addressed
+    int depth = 0;                       // number of hubs descended so far
+    while (buf[4] == 0x09) {             // current device is a hub
+        if (depth >= 5) { uart_puts("[XHCI] hub chain too deep\n"); return 0; }
         int dport = 0, dspeed = 0;
-        if (!hub_enumerate(buf, port, hub_slot, speed, &dport, &dspeed)) return 0;
-        dev_route   = dport;
-        dev_speed   = dspeed;
-        dev_tt_slot = (dspeed < 3) ? hub_slot : 0;   // FS/LS device needs the hub as TT
-        dev_tt_port = dport;
-        if (!address_device_on(port, (uint32_t)dport, dspeed, dev_tt_slot, dport)) return 0;
+        // Configure cur_slot as a hub (preserving its own route/TT) and find the
+        // next device down.
+        if (!hub_enumerate(buf, port, cur_slot, dev_speed, dev_route,
+                           dev_tt_slot, dev_tt_port, &dport, &dspeed)) return 0;
+        dev_route |= (uint32_t)(dport & 0xf) << (4 * depth);   // append this hub's port
+        depth++;
+        if (dspeed < 3) { dev_tt_slot = cur_slot; dev_tt_port = dport; }  // FS/LS -> TT
+        else            { dev_tt_slot = 0;        dev_tt_port = 0;     }  // HS -> none
+        cur_slot = address_device_on(port, dev_route, dspeed, dev_tt_slot, dev_tt_port);
+        if (!cur_slot) return 0;
+        dev_speed = dspeed;
         if (control_xfer(0x80, 6, (1 << 8), 0, 18, buf) < 0) {
-            uart_puts("[XHCI] kbd GET_DESCRIPTOR failed\n"); return 0;
+            uart_puts("[XHCI] downstream GET_DESCRIPTOR failed\n"); return 0;
         }
-        uart_hex("[XHCI] kbd VID ", buf[8] | (buf[9] << 8));
-        uart_hex("[XHCI] kbd PID ", buf[10] | (buf[11] << 8));
-        uart_hex("[XHCI] kbd class ", buf[4]);
+        uart_dec("[XHCI] tier ", depth);
+        uart_hex("[XHCI]   route ", dev_route);
+        uart_hex("[XHCI]   VID ", buf[8] | (buf[9] << 8));
+        uart_hex("[XHCI]   PID ", buf[10] | (buf[11] << 8));
+        uart_hex("[XHCI]   class ", buf[4]);
     }
 
     // Get configuration descriptor (first 9 bytes, then full) and find the HID

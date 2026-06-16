@@ -102,3 +102,4 @@ echo "at sector 2048 (the system) plus a second 0x0c FAT32 data partition, total
 echo "matching your card, and NO 'GPT detected' warning. A leftover GPT (type 0xee in"
 echo "the Pi bootloader log) or a too-small total size makes the Pi read the wrong"
 echo "filesystem and print 'Firmware not found'."
+

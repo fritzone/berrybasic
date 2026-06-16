@@ -41,7 +41,7 @@
 static int  is_space(char c) { return c == ' ' || c == '\t'; }
 static int  is_digit(char c) { return c >= '0' && c <= '9'; }
 static int  is_alpha(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
-static int  is_alnum(char c) { return is_alpha(c) || is_digit(c); }
+static int  is_alnum(char c) { return is_alpha(c) || is_digit(c) || c == '_'; }
 static char up(char c)       { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
 
 static void s_copy(char *d, const char *s, int max) {
@@ -52,6 +52,12 @@ static void s_copy(char *d, const char *s, int max) {
 static int s_eq(const char *a, const char *b) {
     while (*a && *b) { if (*a != *b) return 0; a++; b++; }
     return *a == *b;
+}
+
+// True if the first n characters of a equal b (b must be at least n chars).
+static int s_eqn(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +554,7 @@ static void clear_vars(void) {       // BASIC CLR: scalars + arrays + string hea
 // ---------------------------------------------------------------------------
 
 enum {
-    T_EOL, T_NUM, T_STR, T_VAR, T_KW,
+    T_EOL, T_NUM, T_STR, T_VAR, T_KW, T_LABEL,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_CARET,
     T_LP, T_RP, T_COMMA, T_SEMI, T_COLON, T_SQUOTE,
     T_EQ, T_NE, T_LT, T_GT, T_LE, T_GE
@@ -560,11 +566,14 @@ enum {
     KW_REM, KW_END, KW_RUN, KW_LIST, KW_NEW,
     KW_FOR, KW_TO, KW_STEP, KW_NEXT, KW_GOSUB, KW_RETURN, KW_INPUT, KW_DIM, KW_PI,
     KW_REPEAT, KW_UNTIL, KW_ELSE, KW_CLS, KW_COLOUR,
+    KW_WHILE, KW_ENDWHILE, KW_ENDIF,                  // structured loops / block IF
+    KW_CASE, KW_OF, KW_WHEN, KW_OTHERWISE, KW_ENDCASE, // CASE selection
     KW_DEF, KW_PROC, KW_FN, KW_ENDPROC, KW_LOCAL,     // procedures & functions
     KW_DIV, KW_MOD, KW_AND, KW_OR, KW_EOR, KW_NOT,    // operator keywords
     KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
     KW_SAVE, KW_LOAD, KW_CAT, KW_DIR, KW_DELETE,                    // storage statements
+    KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
     // Functions from the "standard library"
     KW_ABS, KW_INT, KW_SGN, KW_SQR, KW_SIN, KW_COS, KW_TAN, KW_ATN,
@@ -586,6 +595,9 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "STEP",  KW_STEP  }, { "NEXT", KW_NEXT  }, { "GOSUB",  KW_GOSUB  },
     { "RETURN",KW_RETURN }, { "INPUT", KW_INPUT }, { "DIM", KW_DIM },
     { "REPEAT",KW_REPEAT }, { "UNTIL", KW_UNTIL }, { "ELSE", KW_ELSE },
+    { "WHILE", KW_WHILE }, { "ENDWHILE", KW_ENDWHILE }, { "ENDIF", KW_ENDIF },
+    { "CASE",  KW_CASE  }, { "OF", KW_OF }, { "WHEN", KW_WHEN },
+    { "OTHERWISE", KW_OTHERWISE }, { "ENDCASE", KW_ENDCASE },
     { "CLS",   KW_CLS   }, { "COLOUR", KW_COLOUR }, { "COLOR", KW_COLOUR },
     { "DEF",   KW_DEF   }, { "ENDPROC", KW_ENDPROC }, { "LOCAL", KW_LOCAL },
     { "DIV",   KW_DIV   }, { "MOD",  KW_MOD   }, { "AND",    KW_AND    },
@@ -597,6 +609,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "POINT", KW_POINT },
     { "SAVE",  KW_SAVE  }, { "LOAD", KW_LOAD  }, { "CAT",    KW_CAT    },
     { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE },
+    { "AUTO",  KW_AUTO  }, { "RENUMBER", KW_RENUMBER }, { "EDIT", KW_EDIT },
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },
     { "POS",   KW_POS   }, { "VPOS", KW_VPOS  },
     { "PI",    KW_PI    },
@@ -615,6 +628,7 @@ static const struct { const char *name; int id; } kwtab[] = {
 static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
 
 static const char *lx;                 // lexer cursor into the current line
+static const char *tok_start;          // start of the current token (for re-branching)
 static int    tok;                     // current token type
 static double tok_num;                 // payload for T_NUM
 static int  tok_kw;                    // payload for T_KW
@@ -623,9 +637,21 @@ static char tok_var[NAME_LEN];         // payload for T_VAR
 
 static void lex_next(void) {
     while (is_space(*lx)) lx++;
+    tok_start = lx;
     char c = *lx;
 
     if (c == 0) { tok = T_EOL; return; }
+
+    // ".name" is a branch label (definition at a line's start, or a GOTO/GOSUB
+    // target). A leading '.' followed by a digit is still a number (handled below).
+    if (c == '.' && is_alpha(lx[1])) {
+        lx++;
+        char id[NAME_LEN]; int n = 0;
+        while (is_alnum(*lx)) { if (n < NAME_LEN - 1) id[n++] = up(*lx); lx++; }
+        id[n] = 0;
+        s_copy(tok_var, id, NAME_LEN);
+        tok = T_LABEL; return;
+    }
 
     if (is_digit(c) || (c == '.' && is_digit(lx[1]))) {
         double val = 0;
@@ -676,6 +702,7 @@ static void lex_next(void) {
     }
 
     if (is_alpha(c)) {
+        const char *id_start = lx;                 // for keyword-prefix splitting
         char id[16];
         int  n = 0;
         while (is_alnum(*lx)) { if (n < 15) id[n++] = up(*lx); lx++; }
@@ -690,6 +717,18 @@ static void lex_next(void) {
         }
         for (int i = 0; i < kwcount; i++)
             if (s_eq(id, kwtab[i].name)) { tok = T_KW; tok_kw = kwtab[i].id; return; }
+        // BBC tokenises a function keyword glued to a numeric argument: SQR3 = SQR 3.
+        // If a function keyword is a prefix of this word and is immediately followed
+        // by a digit, emit the keyword and re-read the rest from after it. Limiting
+        // this to a following digit keeps word-like variable names (SINE, VALUE...).
+        for (int i = 0; i < kwcount; i++) {
+            if (!is_func_kw(kwtab[i].id)) continue;
+            int L = 0; while (kwtab[i].name[L]) L++;
+            if (L < n && is_digit(id[L]) && s_eqn(id, kwtab[i].name, L)) {
+                lx = id_start + L;                 // re-lex the argument next time
+                tok = T_KW; tok_kw = kwtab[i].id; return;
+            }
+        }
         s_copy(tok_var, id, NAME_LEN);
         tok = T_VAR; return;
     }
@@ -840,39 +879,58 @@ static double rnd_float(void) {         // pseudo-random in [0.0, 1.0)
     return rnd_last;
 }
 
+static value_t eval_primary(void);      // a function argument is a factor (primary)
+
+// Parse a single function argument as the next factor: a primary expression,
+// which is either a parenthesised group or a bare value. This makes the
+// single-argument math functions paren-optional, BBC-style (SQR 3 = SQR(3),
+// SQR(3) and SQR(X+1) all work, and SQR binds tighter than the operators around
+// it, so X * SQR 3 / 6 is X * (SQR 3) / 6).
+static double factor_num(void) {
+    value_t v = eval_primary();
+    if (g_err) return 0;
+    if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return 0; }
+    return v.num;
+}
+
 static value_t eval_function(int fn) {
     lex_next();                         // consume function name
-    if (!expect(T_LP)) return v_num(0);
 
+    // Single-argument math functions: paren-optional, argument is the next factor.
+    switch (fn) {
+        case KW_ABS: { double x = factor_num(); return v_num(x < 0 ? -x : x); }
+        case KW_INT: return v_num(dfloor(factor_num()));
+        case KW_SGN: { double x = factor_num(); return v_num((x > 0) - (x < 0)); }
+        case KW_SQR: { double x = factor_num();
+                       if (x < 0) { err("Invalid argument"); return v_num(0); }
+                       return v_num(dsqrt(x)); }
+        case KW_SIN: return v_num(dsin(factor_num()));
+        case KW_COS: return v_num(dcos(factor_num()));
+        case KW_TAN: return v_num(dtan(factor_num()));
+        case KW_ATN: return v_num(datan(factor_num()));
+        case KW_DEG: return v_num(factor_num() * 180.0 / BAS_PI);
+        case KW_RAD: return v_num(factor_num() * BAS_PI / 180.0);
+        case KW_EXP: return v_num(dexp(factor_num()));
+        case KW_LOG: { double x = factor_num();
+                       if (x <= 0) { err("Invalid argument"); return v_num(0); }
+                       return v_num(dlog(x)); }
+        case KW_ASN: { double x = factor_num();         // arcsin via atan
+                       if (x < -1 || x > 1) { err("Invalid argument"); return v_num(0); }
+                       return v_num(datan(x / dsqrt(1 - x * x))); }
+        case KW_ACS: { double x = factor_num();         // arccos = pi/2 - arcsin
+                       if (x < -1 || x > 1) { err("Invalid argument"); return v_num(0); }
+                       return v_num(BAS_HALFPI - datan(x / dsqrt(1 - x * x))); }
+    }
+
+    // All other functions keep the parenthesised form: FUNC(arg[,arg...]).
+    if (!expect(T_LP)) return v_num(0);
     value_t result = v_num(0);
     switch (fn) {
-        case KW_ABS: { double x = need_num(); result = v_num(x < 0 ? -x : x); break; }
-        case KW_INT: { double x = need_num(); result = v_num(dfloor(x)); break; }
-        case KW_SGN: { double x = need_num(); result = v_num((x > 0) - (x < 0)); break; }
-        case KW_SQR: { double x = need_num();
-                       if (x < 0) { err("Invalid argument"); break; }
-                       result = v_num(dsqrt(x)); break; }
-        case KW_SIN: { result = v_num(dsin(need_num())); break; }
-        case KW_COS: { result = v_num(dcos(need_num())); break; }
-        case KW_TAN: { result = v_num(dtan(need_num())); break; }
-        case KW_ATN: { result = v_num(datan(need_num())); break; }
-        case KW_DEG: { result = v_num(need_num() * 180.0 / BAS_PI); break; }
-        case KW_RAD: { result = v_num(need_num() * BAS_PI / 180.0); break; }
-        case KW_ASN: { double x = need_num();          // arcsin via atan
-                       if (x < -1 || x > 1) { err("Invalid argument"); break; }
-                       result = v_num(datan(x / dsqrt(1 - x * x))); break; }
-        case KW_ACS: { double x = need_num();          // arccos = pi/2 - arcsin
-                       if (x < -1 || x > 1) { err("Invalid argument"); break; }
-                       result = v_num(BAS_HALFPI - datan(x / dsqrt(1 - x * x))); break; }
         case KW_INKEY:  { int n = (int)need_num(); result = v_num((double)con_inkey(n)); break; }
         case KW_INKEYS: { int n = (int)need_num(); int k = con_inkey(n);
                           if (k < 0) result = v_str(0, 0);   // timeout -> empty string
                           else { char c = (char)k; result = str_in_scratch(&c, 1); }
                           break; }
-        case KW_EXP: { result = v_num(dexp(need_num())); break; }
-        case KW_LOG: { double x = need_num();
-                       if (x <= 0) { err("Invalid argument"); break; }
-                       result = v_num(dlog(x)); break; }
         case KW_RND: { double x = need_num();         // BBC: RND(1)->[0,1), RND(n>1)->1..n
                        double res;
                        if (x == 1)      res = rnd_float();
@@ -1168,6 +1226,15 @@ static int       for_sp;
 static retaddr_t repeat_stack[REPEAT_MAX];
 static int       repeat_sp;
 
+// WHILE loop stack: position of the WHILE keyword, so ENDWHILE re-tests it.
+#define WHILE_MAX 16
+static retaddr_t while_stack[WHILE_MAX];
+static int       while_sp;
+
+// CASE nesting depth (the selector is matched immediately, so only the depth
+// needs tracking for ENDCASE balancing and nested-CASE skipping).
+static int       case_sp;
+
 // Procedures / functions
 static int     g_return;         // ENDPROC or =<expr> ends the current PROC/FN body
 static value_t fn_retval;        // value returned from an FN via =<expr>
@@ -1184,6 +1251,68 @@ static void branch_to_line(int num) {
     int idx = find_line_index(num);
     if (idx < 0) { err("No such line number"); return; }
     g_branch = 1; g_branch_line = idx; g_branch_off = 0;
+}
+
+// Find the program line that begins with the label ".name". Labels are matched
+// only as the first token of a line. Returns the prog[] index, or -1.
+static int find_label(const char *name) {
+    const char *save_text = cur_text;
+    const char *save_lx   = lx;
+    int save_tok = tok, save_kw = tok_kw;
+    int found = -1;
+    for (int i = 0; i < prog_n; i++) {
+        cur_text = prog[i].text; lx = prog[i].text; lex_next();
+        if (tok == T_LABEL && s_eq(tok_var, name)) { found = i; break; }
+    }
+    cur_text = save_text; lx = save_lx; tok = save_tok; tok_kw = save_kw;
+    return found;
+}
+
+// Branch to a label by name (GOTO/GOSUB target).
+static void branch_to_label(const char *name) {
+    int idx = find_label(name);
+    if (idx < 0) { err("No such label"); return; }
+    g_branch = 1; g_branch_line = idx; g_branch_off = 0;
+}
+
+// Reposition the global lexer at (program line index pc, byte offset off) and
+// read the first token there. Used by the structured-block forward scanners.
+static void lex_at(int pc, int off) {
+    cur_text = prog[pc].text;
+    lx = cur_text + off;
+    lex_next();
+}
+
+// Two string values are equal iff same length and same bytes.
+static int val_equal(value_t a, value_t b) {
+    if (a.is_str != b.is_str) return 0;
+    if (a.is_str) {
+        if (a.len != b.len) return 0;
+        for (int i = 0; i < a.len; i++) if (a.str[i] != b.str[i]) return 0;
+        return 1;
+    }
+    return a.num == b.num;
+}
+
+// Forward-scan from the current lexer position for the keyword `close_kw` that
+// matches an enclosing `open_kw`, honouring nesting. On success sets g_branch to
+// the position just after the matched close keyword and returns 1; on running
+// off the end of the program raises `msg` and returns 0. Used by WHILE/ENDWHILE.
+static int skip_to_close(int open_kw, int close_kw, const char *msg) {
+    int pc = cur_line_idx;
+    int depth = 0;
+    for (;;) {
+        while (tok != T_EOL) {
+            if (tok == T_KW && tok_kw == open_kw) depth++;
+            else if (tok == T_KW && tok_kw == close_kw) {
+                if (depth == 0) { g_branch = 1; g_branch_line = pc; g_branch_off = cur_off(); return 1; }
+                depth--;
+            }
+            lex_next();
+        }
+        if (++pc >= prog_n) { err(msg); return 0; }
+        lex_at(pc, 0);
+    }
 }
 
 static void exec_statement(void);   // forward decl (IF runs a sub-statement)
@@ -1268,7 +1397,10 @@ static void stmt_let(int had_let) {
 
 static void stmt_goto(void) {
     lex_next();
-    if (tok != T_NUM) { err("Expected a line number"); return; }
+    // A label target may be written bare (GOTO start) or dotted (GOTO .start).
+    if (tok == T_LABEL || tok == T_VAR) { char nm[NAME_LEN]; s_copy(nm, tok_var, NAME_LEN);
+                          lex_next(); branch_to_label(nm); return; }
+    if (tok != T_NUM) { err("Expected a line number or label"); return; }
     int target = (int)tok_num;
     lex_next();
     branch_to_line(target);
@@ -1286,16 +1418,67 @@ static void exec_clause(void) {
     }
 }
 
-// IF <expr> [THEN] (<line>|stmts) [ELSE (<line>|stmts)].  IF owns the rest of
-// the line, so we consume to EOL when done. BBC makes THEN optional.
+// Consume the rest of the current IF line, returning 1 if THEN was the last
+// token on it (the block-IF form `IF cond THEN` <newline>). The lexer is left
+// at EOL. Used while scanning so a nested single-line IF (whose ELSE belongs to
+// itself) is skipped as a whole and never miscounted.
+static int scan_if_line_is_block(void) {
+    int last_then = 0;
+    lex_next();                              // consume IF
+    while (tok != T_EOL) {
+        last_then = (tok == T_KW && tok_kw == KW_THEN);
+        lex_next();
+    }
+    return last_then;
+}
+
+// Forward-scan for the ELSE/ENDIF that matches the current block IF. Nested
+// block IFs increment the depth; single-line IFs are skipped whole. With
+// else_too set we stop at the first depth-0 ELSE *or* ENDIF (the false branch
+// jumps to whichever comes first); otherwise only ENDIF (a finished THEN branch
+// jumps past its ELSE block). Branches past the matched keyword. Returns 1.
+static int skip_if_block(int else_too) {
+    int pc = cur_line_idx;
+    int depth = 0;
+    for (;;) {
+        while (tok != T_EOL) {
+            if (tok == T_KW && tok_kw == KW_IF) {
+                if (scan_if_line_is_block()) depth++;   // consumes to EOL
+                break;
+            }
+            if (tok == T_KW && tok_kw == KW_ENDIF) {
+                if (depth == 0) { g_branch = 1; g_branch_line = pc; g_branch_off = cur_off(); return 1; }
+                depth--;
+            } else if (else_too && depth == 0 && tok == T_KW && tok_kw == KW_ELSE) {
+                g_branch = 1; g_branch_line = pc; g_branch_off = cur_off(); return 1;
+            }
+            lex_next();
+        }
+        if (++pc >= prog_n) { err("IF without a matching ENDIF"); return 0; }
+        lex_at(pc, 0);
+    }
+}
+
+// IF <expr> [THEN] (<line>|stmts) [ELSE (<line>|stmts)]    -- single-line form
+// IF <expr> THEN <newline> ... [ELSE ...] ENDIF            -- block form
+// THEN is optional in the single-line form; the block form is recognised when
+// THEN is the last token on the line.
 static void stmt_if(void) {
     lex_next();                              // consume IF
     value_t cv = eval_expr();
     if (g_err) return;
     long cond = cv.is_str ? (cv.len != 0) : (cv.num != 0);
-    if (tok == T_KW && tok_kw == KW_THEN) lex_next();   // THEN is optional
+    int had_then = 0;
+    if (tok == T_KW && tok_kw == KW_THEN) { had_then = 1; lex_next(); }
 
-    if (cond) {
+    if (had_then && tok == T_EOL) {          // block IF (THEN ends the line)
+        if (cur_line_idx < 0) { err("Block IF can only be used inside a program"); return; }
+        if (cond) return;                    // fall through: run the THEN block
+        skip_if_block(1);                    // false: jump to ELSE or ENDIF
+        return;
+    }
+
+    if (cond) {                              // single-line IF
         if (tok == T_NUM) { int t = (int)tok_num; lex_next(); branch_to_line(t); }
         else exec_clause();                  // run THEN clause (stops at ELSE/EOL)
     } else {
@@ -1307,6 +1490,14 @@ static void stmt_if(void) {
         }
     }
     if (!g_branch && !g_err && !g_stop) tok = T_EOL;   // discard any leftover ELSE part
+}
+
+// A standalone ELSE statement is only reached after running a block IF's THEN
+// branch: skip past the matching ENDIF.
+static void stmt_else_block(void) {
+    lex_next();                              // consume ELSE
+    if (cur_line_idx < 0) { err("ELSE without a matching IF"); return; }
+    skip_if_block(0);
 }
 
 static void stmt_repeat(void) {
@@ -1329,6 +1520,109 @@ static void stmt_until(void) {
     } else {
         repeat_sp--;                         // true -> exit the loop
     }
+}
+
+// WHILE <expr> ... ENDWHILE : a pre-tested loop. The condition is re-evaluated
+// each pass, so ENDWHILE branches back to the WHILE keyword (re-running this).
+// To keep the stack balanced, ENDWHILE pops before branching back and each
+// WHILE pass pushes exactly once.
+static void stmt_while(void) {
+    int kw_line = cur_line_idx;
+    int kw_off  = (int)(tok_start - cur_text);   // offset of the WHILE keyword
+    lex_next();                                  // consume WHILE
+    value_t cv = eval_expr();
+    if (g_err) return;
+    long cond = cv.is_str ? (cv.len != 0) : (cv.num != 0);
+    if (cond) {
+        if (cur_line_idx < 0) { err("WHILE can only be used inside a program"); return; }
+        if (while_sp >= WHILE_MAX) { err("Too many nested WHILE loops"); return; }
+        while_stack[while_sp].line = kw_line;
+        while_stack[while_sp].off  = kw_off;
+        while_sp++;                              // run the loop body
+    } else {
+        skip_to_close(KW_WHILE, KW_ENDWHILE, "WHILE without a matching ENDWHILE");
+    }
+}
+
+static void stmt_endwhile(void) {
+    if (while_sp <= 0) { err("ENDWHILE without a matching WHILE"); return; }
+    while_sp--;
+    retaddr_t r = while_stack[while_sp];
+    g_branch = 1; g_branch_line = r.line; g_branch_off = r.off;  // back to WHILE
+}
+
+// CASE <expr> OF / WHEN <e>[,<e>...] / OTHERWISE / ENDCASE : multi-way select.
+// The selector is matched immediately by scanning the WHEN clauses; control then
+// jumps into the matching clause (or OTHERWISE, or past ENDCASE if none match).
+// Falling through into a later WHEN/OTHERWISE means the chosen clause finished,
+// so those jump to ENDCASE.
+static void stmt_case(void) {
+    lex_next();                                  // consume CASE
+    value_t sel = eval_expr();
+    if (g_err) return;
+    // Copy a string selector somewhere stable: evaluating WHEN expressions reuses
+    // scratch and may trigger a GC that relocates heap strings.
+    static char selbuf[MAX_STR];
+    if (sel.is_str) {
+        if (sel.len > MAX_STR) { err("Text string is too long"); return; }
+        for (int i = 0; i < sel.len; i++) selbuf[i] = sel.str[i];
+        sel.str = selbuf;
+    }
+    if (tok != T_KW || tok_kw != KW_OF) { err("Expected OF after CASE"); return; }
+    if (cur_line_idx < 0) { err("CASE can only be used inside a program"); return; }
+    if (case_sp >= 16) { err("Too many nested CASE statements"); return; }
+    case_sp++;
+
+    // Scan forward for the matching WHEN/OTHERWISE/ENDCASE.
+    int pc = cur_line_idx;
+    int depth = 0;
+    for (;;) {
+        while (tok != T_EOL) {
+            if (tok == T_KW && tok_kw == KW_CASE) depth++;
+            else if (tok == T_KW && tok_kw == KW_ENDCASE) {
+                if (depth == 0) {                // no clause matched, no OTHERWISE
+                    case_sp--;
+                    g_branch = 1; g_branch_line = pc; g_branch_off = cur_off();
+                    return;
+                }
+                depth--;
+            } else if (depth == 0 && tok == T_KW && tok_kw == KW_OTHERWISE) {
+                g_branch = 1; g_branch_line = pc; g_branch_off = cur_off();  // run OTHERWISE body
+                return;
+            } else if (depth == 0 && tok == T_KW && tok_kw == KW_WHEN) {
+                lex_next();                      // evaluate this clause's value list
+                int matched = 0;
+                for (;;) {
+                    value_t v = eval_expr();
+                    if (g_err) return;
+                    if (val_equal(sel, v)) matched = 1;
+                    if (tok == T_COMMA) { lex_next(); continue; }
+                    break;
+                }
+                if (matched) {                   // run this clause's body
+                    g_branch = 1; g_branch_line = pc; g_branch_off = cur_off();
+                    return;
+                }
+                continue;                        // no match: keep scanning this line
+            }
+            lex_next();
+        }
+        if (++pc >= prog_n) { err("CASE without a matching ENDCASE"); case_sp--; return; }
+        lex_at(pc, 0);
+    }
+}
+
+// Reached by falling through after a chosen clause's body finished: jump past
+// the matching ENDCASE. (Encountered as a statement, not during the CASE scan.)
+static void case_skip_to_end(void) {
+    if (case_sp <= 0) { err("WHEN/OTHERWISE without a matching CASE"); return; }
+    if (skip_to_close(KW_CASE, KW_ENDCASE, "CASE without a matching ENDCASE"))
+        case_sp--;
+}
+
+static void stmt_endcase(void) {
+    lex_next();                                  // consume ENDCASE
+    if (case_sp > 0) case_sp--;
 }
 
 static void stmt_colour(void) {
@@ -1359,15 +1653,16 @@ static void stmt_local(void) {
 
 static void stmt_gosub(void) {
     lex_next();
-    if (tok != T_NUM) { err("Expected a line number"); return; }
-    int target = (int)tok_num;
-    lex_next();
+    char label[NAME_LEN]; int is_label = 0; int target = 0;
+    if (tok == T_LABEL || tok == T_VAR) { s_copy(label, tok_var, NAME_LEN); is_label = 1; lex_next(); }
+    else if (tok == T_NUM) { target = (int)tok_num; lex_next(); }
+    else { err("Expected a line number or label"); return; }
     if (cur_line_idx < 0) { err("This can only be used inside a program"); return; }
     if (gosub_sp >= GOSUB_MAX) { err("Out of memory"); return; }
     gosub_stack[gosub_sp].line = cur_line_idx;   // resume after the GOSUB
     gosub_stack[gosub_sp].off  = cur_off();
     gosub_sp++;
-    branch_to_line(target);
+    if (is_label) branch_to_label(label); else branch_to_line(target);
     if (g_err) gosub_sp--;                        // undefined target: undo push
 }
 
@@ -1505,12 +1800,65 @@ static void stmt_input(void) {
 
 static void run_program(int start_pc, int start_off);
 
+// Print a program line for LIST with the classic look: keywords are shown in
+// UPPERCASE, while variable names, numbers, string literals and REM comments are
+// left exactly as the user typed them. This is display-only; the stored text and
+// the way the line runs are unchanged.
+static void list_text(const char *t) {
+    int i = 0;
+    while (t[i]) {
+        char c = t[i];
+        if (c == '"') {                          // string literal: copy verbatim
+            con_putc(c); i++;
+            while (t[i] && t[i] != '"') con_putc(t[i++]);
+            if (t[i] == '"') { con_putc('"'); i++; }
+            continue;
+        }
+        if (!is_alpha(c)) { con_putc(c); i++; continue; }   // digits/punctuation/space
+
+        // Gather a word (letters+digits, optional $ or % suffix) and a folded
+        // copy to test against the keyword table.
+        int j = i, wn = 0; char word[16];
+        while (is_alnum(t[j])) { if (wn < 15) word[wn++] = up(t[j]); j++; }
+        if ((t[j] == '$' || t[j] == '%') && wn < 15) word[wn++] = t[j], j++;
+        word[wn] = 0;
+
+        int is_kw = 0;
+        for (int k = 0; k < kwcount; k++)
+            if (s_eq(word, kwtab[k].name)) { is_kw = 1; break; }
+        int is_proc = (word[0]=='P'&&word[1]=='R'&&word[2]=='O'&&word[3]=='C');
+        int is_fn   = (word[0]=='F'&&word[1]=='N'&&wn>2);
+
+        if (is_kw) {
+            for (int p = i; p < j; p++) con_putc(up(t[p]));    // keyword -> UPPERCASE
+            if (s_eq(word, "REM")) { i = j; while (t[i]) con_putc(t[i++]); break; }
+        } else if (is_proc || is_fn) {                         // PROC/FN + name
+            int plen = is_proc ? 4 : 2;
+            for (int p = i; p < i + plen; p++) con_putc(up(t[p]));
+            for (int p = i + plen; p < j; p++) con_putc(t[p]); // name as typed
+        } else {
+            for (int p = i; p < j; p++) con_putc(t[p]);        // variable as typed
+        }
+        i = j;
+    }
+}
+
+// LIST [start][,end] : whole program, a single line (LIST 100), a range
+// (LIST 100,200), from a line (LIST 100,) or up to a line (LIST ,200).
 static void stmt_list(void) {
     lex_next();
+    int lo = 0, hi = 0x7FFFFFFF;
+    if (tok == T_NUM) { lo = (int)tok_num; hi = lo; lex_next(); }   // single line by default
+    if (tok == T_COMMA) {                                           // a range was requested
+        lex_next();
+        hi = 0x7FFFFFFF;
+        if (tok == T_NUM) { hi = (int)tok_num; lex_next(); }
+    }
     for (int i = 0; i < prog_n; i++) {
+        if (prog[i].num < lo || prog[i].num > hi) continue;
         con_putn(prog[i].num);
         con_putc(' ');
-        con_puts(prog[i].text);
+        list_text(prog[i].text);
         con_putc('\n');
     }
 }
@@ -1598,19 +1946,26 @@ static void stmt_on(void) {
     branch_to_line(target);
 }
 
+// VDU n[,n...][;] : send each value's bytes to the VDU driver. A value followed
+// by ';' is sent as a 16-bit word (two bytes, least-significant first); otherwise
+// just its least-significant byte is sent. A trailing '|' (BBC shorthand) sends
+// nine zero bytes, padding out a VDU 23 command.
 static void stmt_vdu(void) {
     lex_next();                                  // consume VDU
+    if (tok == T_EOL || tok == T_COLON) return;  // bare VDU does nothing
     for (;;) {
         int v = (int)need_num();
         if (g_err) return;
-        if (v == 12) con_cls();                  // VDU 12 = clear screen
-        else con_putc((char)v);
-        if (tok == T_COMMA || tok == T_SEMI) {   // both are item separators here
+        if (tok == T_SEMI) {                     // 16-bit: low byte then high byte
+            con_vdu(v & 0xff);
+            con_vdu((v >> 8) & 0xff);
             lex_next();
-            if (tok == T_EOL || tok == T_COLON) break;
-            continue;
+        } else {                                 // 8-bit: low byte only
+            con_vdu(v & 0xff);
+            if (tok == T_COMMA) lex_next();
+            else break;
         }
-        break;
+        if (tok == T_EOL || tok == T_COLON) break;
     }
 }
 
@@ -1768,6 +2123,111 @@ static void stmt_delete(void) {
     if (r) stg_err(r);
 }
 
+// --- RENUMBER ---------------------------------------------------------------
+static int g_renum_start = 10, g_renum_step = 10;
+
+// Map an old line number to its new one. References to a line that does not
+// exist are left unchanged.
+static int remap_line(int old) {
+    for (int i = 0; i < prog_n; i++)
+        if (prog[i].num == old) return g_renum_start + i * g_renum_step;
+    return old;
+}
+
+// Rewrite one line's text into `out`, remapping the line-number references that
+// follow GOTO / GOSUB / RESTORE / THEN / ELSE (including the comma lists of
+// ON ... GOTO / ON ... GOSUB). Numeric literals in expressions are left alone.
+static void renum_fixup_line(const char *in, char *out) {
+    const char *p = in;
+    int oi = 0;
+    int linref = 0;          // 0 none, 1 GOTO/GOSUB/RESTORE list, 2 THEN/ELSE (optional)
+    while (*p && oi < LINE_LEN - 12) {
+        char c = *p;
+        if (c == '"') {                                   // string literal: copy verbatim
+            out[oi++] = c; p++;
+            while (*p && *p != '"' && oi < LINE_LEN - 1) out[oi++] = *p++;
+            if (*p == '"') out[oi++] = *p++;
+            continue;
+        }
+        if (is_alpha(c)) {                                // a word: keyword or identifier
+            char w[16]; int wn = 0;
+            while (is_alnum(*p)) { if (wn < 15) w[wn++] = up(*p); out[oi++] = *p; p++; }
+            w[wn] = 0;
+            if (s_eq(w, "GOTO") || s_eq(w, "GOSUB") || s_eq(w, "RESTORE")) linref = 1;
+            else if (s_eq(w, "THEN") || s_eq(w, "ELSE")) linref = 2;
+            else linref = 0;
+            continue;
+        }
+        if (is_digit(c) && linref) {                      // a line-number reference
+            int num = 0;
+            while (is_digit(*p)) { num = num * 10 + (*p - '0'); p++; }
+            oi += uint_to_str(out + oi, remap_line(num));
+            if (linref == 2) linref = 0;                  // THEN/ELSE take one line ref
+            continue;
+        }
+        if (is_digit(c)) {                                // a plain numeric literal: copy
+            while (is_digit(*p) || *p == '.') out[oi++] = *p++;
+            continue;
+        }
+        if (c != ',' && c != ' ' && c != '\t' && linref == 1) linref = 0;  // list ended
+        out[oi++] = c; p++;
+    }
+    out[oi] = 0;
+}
+
+// RENUMBER [start][,step] : renumber the program (default 10,10) and fix up all
+// line-number references so GOTO/GOSUB/RESTORE/THEN/ELSE/ON still point correctly.
+static void stmt_renumber(void) {
+    lex_next();                                  // consume RENUMBER
+    g_renum_start = 10; g_renum_step = 10;
+    if (tok == T_NUM) { g_renum_start = (int)tok_num; lex_next(); }
+    if (tok == T_COMMA) { lex_next(); if (tok == T_NUM) { g_renum_step = (int)tok_num; lex_next(); } }
+    if (g_renum_start < 0) g_renum_start = 0;
+    if (g_renum_step  < 1) g_renum_step  = 1;
+    char tmp[LINE_LEN];
+    for (int i = 0; i < prog_n; i++) {           // remap references (old numbers still in place)
+        renum_fixup_line(prog[i].text, tmp);
+        s_copy(prog[i].text, tmp, LINE_LEN);
+    }
+    for (int i = 0; i < prog_n; i++)             // then renumber the lines
+        prog[i].num = g_renum_start + i * g_renum_step;
+}
+
+// --- AUTO / EDIT ------------------------------------------------------------
+// State the REPL reads to pre-fill the next input line.
+static int  g_auto_active = 0;        // AUTO mode: auto-number each entered line
+static int  g_auto_num    = 0;        // next line number to offer
+static int  g_auto_step   = 10;
+static char g_prefill[LINE_LEN];      // one-shot prefill for the next line (EDIT)
+static int  g_prefill_len = 0;
+
+// AUTO [start][,step] : enter auto line-numbering. The REPL offers each line
+// number for editing; pressing Return on an empty line leaves AUTO.
+static void stmt_auto(void) {
+    lex_next();
+    int start = 10, step = 10;
+    if (tok == T_NUM) { start = (int)tok_num; lex_next(); }
+    if (tok == T_COMMA) { lex_next(); if (tok == T_NUM) { step = (int)tok_num; lex_next(); } }
+    if (start < 0) start = 0;
+    if (step  < 1) step  = 1;
+    g_auto_num = start; g_auto_step = step; g_auto_active = 1;
+}
+
+// EDIT n : recall line n into the input line, ready to edit and re-enter.
+static void stmt_edit(void) {
+    lex_next();
+    if (tok != T_NUM) { err("Expected a line number"); return; }
+    int num = (int)tok_num; lex_next();
+    int idx = find_line_index(num);
+    if (idx < 0) { err("No such line number"); return; }
+    int n = uint_to_str(g_prefill, num);
+    g_prefill[n++] = ' ';
+    const char *t = prog[idx].text;
+    while (*t && n < LINE_LEN - 1) g_prefill[n++] = *t++;
+    g_prefill[n] = 0;
+    g_prefill_len = n;
+}
+
 // --- Graphics statements ----------------------------------------------------
 static void stmt_mode(void) {
     lex_next();                                  // consume MODE
@@ -1810,7 +2270,8 @@ static void stmt_move_draw(int plotcode) {
 
 static void exec_statement(void) {
     scratch_reset();                             // reclaim previous temporaries
-    if (tok == T_EOL) return;
+    if (tok == T_LABEL) lex_next();              // ".name": a branch label, then run the rest
+    if (tok == T_EOL || tok == T_COLON) return;
     if (tok == T_KW) {
         switch (tok_kw) {
             case KW_PRINT: stmt_print();   return;
@@ -1825,7 +2286,14 @@ static void exec_statement(void) {
             case KW_IF:    stmt_if();      return;
             case KW_REPEAT:stmt_repeat();  return;
             case KW_UNTIL: stmt_until();   return;
-            case KW_ELSE:  tok = T_EOL;    return;   // orphan ELSE: skip rest
+            case KW_WHILE: stmt_while();   return;
+            case KW_ENDWHILE: stmt_endwhile(); return;
+            case KW_CASE:  stmt_case();    return;
+            case KW_WHEN:
+            case KW_OTHERWISE: case_skip_to_end(); return;  // chosen clause finished
+            case KW_ENDCASE: stmt_endcase(); return;
+            case KW_ENDIF: lex_next();     return;   // block-IF join point: no-op
+            case KW_ELSE:  stmt_else_block(); return;   // end of a block-IF THEN branch
             case KW_CLS:   lex_next(); con_cls();   return;
             case KW_COLOUR:stmt_colour();  return;
             case KW_MODE:  stmt_mode();    return;
@@ -1867,7 +2335,10 @@ static void exec_statement(void) {
             case KW_RUN:   lex_next();
                            clear_vars();
                            run_program(0, 0); tok = T_EOL; return;
-            case KW_LIST:  stmt_list();    return;
+            case KW_LIST:     stmt_list();     return;
+            case KW_RENUMBER: stmt_renumber(); return;
+            case KW_AUTO:     stmt_auto();     return;
+            case KW_EDIT:     stmt_edit();     return;
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
                            for_sp = 0; gosub_sp = 0; return;
             default:       err("That keyword can't be used as a command");  return;
@@ -1942,6 +2413,8 @@ static void run_program(int start_pc, int start_off) {
     gosub_sp = 0;
     for_sp = 0;
     repeat_sp = 0;
+    while_sp = 0;
+    case_sp = 0;
     call_sp = 0;
     local_sp = 0;
     scratch_base = 0;
@@ -2140,11 +2613,32 @@ void basic_repl(void) {
     if (!con_splash("BerryBasic (C) 2026 fritzone"))
         con_puts("BerryBasic (C) 2026 fritzone\n\n");
     for (;;) {
-        con_puts(">");                          // BBC BASIC prompt
-        int n = con_getline(line, LINE_LEN);
+        const char *prompt = ">";               // BBC BASIC prompt
+        int pre = 0;                             // editable prefill already in `line`
+        int was_auto = g_auto_active;            // auto-numbering this line?
+        if (g_auto_active) {                     // AUTO: offer the next line number
+            prompt = "";
+            pre = uint_to_str(line, g_auto_num);
+            line[pre++] = ' ';
+            line[pre] = 0;
+        } else if (g_prefill_len) {              // EDIT: offer the recalled line
+            s_copy(line, g_prefill, LINE_LEN);
+            pre = g_prefill_len;
+            g_prefill_len = 0;
+        } else {
+            line[0] = 0;
+        }
+        int n = con_getline_ed(line, LINE_LEN, pre, prompt);
         if (n < 0) return;                      // host EOF
+        if (was_auto) {                          // empty entry (just the number) leaves AUTO
+            const char *q = line;
+            while (is_digit(*q)) q++;
+            while (is_space(*q)) q++;
+            if (*q == 0) { g_auto_active = 0; continue; }
+        }
         g_err = 0;
         g_stop = 0;
         process_line(line);
+        if (was_auto && g_auto_active && !g_err) g_auto_num += g_auto_step;
     }
 }

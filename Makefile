@@ -46,6 +46,14 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.S | $(BUILD_DIR)
 clean:
 	rm -rf $(BUILD_DIR)
 
+# Interactively choose the native resolution and font, regenerating
+# src/buildconfig.h, src/font_data.c and the HDMI block in boot/config.txt.
+# After this, a plain 'make' builds for the new configuration.
+config:
+	tools/configure.sh
+
+.PHONY: config
+
 # SD card image for BASIC LOAD/SAVE. Create a blank FAT16 disk with:
 #   make sdcard
 SDIMG = sd.img
@@ -61,12 +69,18 @@ sdcard: $(SDIMG)
 sdimage: $(KERNEL)
 	tools/mksdimage.sh
 
+# Interactively flash berrybasic-sd.img to a removable card (lists devices,
+# excludes the system disk, confirms before erasing). Avoids flashing the wrong
+# disk. Builds the image first if needed.
+flash: sdimage
+	tools/flashsd.sh
+
 run: $(KERNEL) $(SDIMG)
 	qemu-system-aarch64 -M raspi4b -m 2G -kernel $(KERNEL) \
 	    -serial stdio -display gtk -device usb-kbd \
-	    -drive file=$(SDIMG),if=sd,format=raw
+	    -drive file=berrybasic-sd.img,if=sd,format=raw
 
-.PHONY: sdcard sdimage
+.PHONY: sdcard sdimage flash
 
 # Native build of the interpreter for fast testing/debugging on the host.
 # The interpreter (src/basic.c) is shared with the target; only the console

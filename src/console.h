@@ -8,9 +8,20 @@
 void con_putc(char c);
 void con_puts(const char *s);
 
+// Feed one byte to the VDU driver (the BBC VDU statement). Control codes 0..31
+// and 127 act on the screen (consuming parameter bytes as needed); codes >= 32
+// are printable characters.
+void con_vdu(int b);
+
 // Read one line (without trailing newline) into buf, at most maxlen-1 chars.
 // Returns the length, or -1 on end-of-input (host only; the target never EOFs).
 int  con_getline(char *buf, int maxlen);
+
+// Like con_getline, but prints `prompt` first, starts with `prefill_len`
+// editable characters already in buf, and supports in-line cursor editing and
+// an up/down command history. Used by the REPL (so AUTO/EDIT can pre-fill a line
+// and the arrow keys recall/edit previous input).
+int  con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt);
 
 void con_cls(void);             // clear screen, cursor home
 void con_colour(int c);         // set text foreground colour (BBC COLOUR 0..7)

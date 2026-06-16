@@ -1,11 +1,10 @@
 #include "font.h"
 #include "graphics.h"
 
-extern unsigned char bbc_font[2048];
-
-// Render one 8x8 BBC glyph at (x,y), scaled by FONT_SCALE.
+// Render one glyph at (x,y), scaled by FONT_SCALE. Background is opaque-free here
+// (only set pixels are drawn); the text console fills the cell first.
 void draw_char(char c, int x, int y, uint32_t color) {
-    unsigned char *glyph = &bbc_font[(unsigned char)c * GLYPH_H];
+    unsigned char *glyph = &bbc_font[(unsigned char)c * GLYPH_BYTES];
     for (int row = 0; row < GLYPH_H; row++) {
         unsigned char bits = glyph[row];
         for (int col = 0; col < GLYPH_W; col++) {

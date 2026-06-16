@@ -2,6 +2,7 @@
 #include "usb_kbd.h"
 #include "usb_hid.h"
 #include "uart.h"
+#include "mailbox.h"
 
 // ---------------------------------------------------------------------------
 // DWC2 USB OTG host-mode driver  (Raspberry Pi 4, BCM2711)
@@ -30,6 +31,7 @@
 #define HCINTMSK(n) (*(volatile uint32_t *)(DWC2_BASE + 0x50C + (n)*0x20))
 #define HCTSIZ(n)   (*(volatile uint32_t *)(DWC2_BASE + 0x510 + (n)*0x20))
 #define HCDMA(n)    (*(volatile uint32_t *)(DWC2_BASE + 0x514 + (n)*0x20))
+#define PCGCR       (*(volatile uint32_t *)(DWC2_BASE + 0xE00))   // power/clock gating
 
 #define HCINT_XFERCOMPL  (1u <<  0)
 #define HCINT_CHHLTD     (1u <<  1)
@@ -67,6 +69,24 @@ static void hprt_clr(uint32_t bit) {
 // ---------------------------------------------------------------------------
 // DWC2 core reset / flush
 // ---------------------------------------------------------------------------
+
+// On real Pi 4 hardware the firmware may leave the DWC2 OTG controller powered
+// down with its PHY clock gated, so the core soft reset never completes (it
+// works in QEMU because the clock is always running). Ask the firmware to power
+// the on-SoC USB controller on, then clear the power/clock-gating register.
+static void dwc2_power_on(void) {
+    mbox[0] = 8 * 4; mbox[1] = 0;
+    mbox[2] = 0x00028001;            // SET_POWER_STATE
+    mbox[3] = 8; mbox[4] = 8;
+    mbox[5] = 3;                     // device id 3 = USB HCD
+    mbox[6] = 3;                     // bit0 = on, bit1 = wait until stable
+    mbox[7] = 0;                     // end tag
+    mbox_call();
+    uart_hex("[DWC2] usb power state: ", mbox[6]);
+    usleep(20000);
+    PCGCR = 0;                       // ungate the PHY/AHB clock
+    usleep(10000);
+}
 
 static int dwc2_reset(void) {
     for (uint32_t t = 0; !(GRSTCTL & (1u<<31)); t++)
@@ -431,6 +451,7 @@ static int enumerate_hub(int hub_devaddr, int hub_ep0_mps) {
 int usb_kbd_init(void) {
     uart_puts("[DWC2] init\n");
 
+    dwc2_power_on();                 // power + ungate clock (real hardware)
     if (dwc2_reset() < 0) return 0;
     uart_puts("[DWC2] reset done\n");
 

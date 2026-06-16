@@ -1,0 +1,35 @@
+10 MODE 1
+20 CLG
+30 NUM% = 100
+40 DIM X(NUM%), Y(NUM%), Z(NUM%)
+50 CX = 640 : CY = 512 : MAXZ = 1000
+60 REM Initialize stars
+70 FOR I% = 1 TO NUM%
+80 X(I%) = RND(2000) - 1000
+90 Y(I%) = RND(2000) - 1000
+100 Z(I%) = RND(MAXZ)
+110 NEXT
+120 REM Main Loop
+130 REPEAT
+140 FOR I% = 1 TO NUM%
+150 REM Erase old star (draw in black)
+160 GCOL 0,0
+170 PROCdraw(I%)
+180 REM Move star closer
+190 Z(I%) = Z(I%) - 20
+200 IF Z(I%) <= 0 THEN Z(I%) = MAXZ : X(I%) = RND(2000) - 1000 : Y(I%) = RND(2000) - 1000
+210 REM Draw new star (white)
+220 GCOL 0,7
+230 PROCdraw(I%)
+240 NEXT
+250 UNTIL FALSE
+260 END
+270 DEF PROCdraw(I%)
+280 IF Z(I%) <= 0 THEN ENDPROC
+290 SZ = 500 / Z(I%)
+300 SX = CX + X(I%) * SZ
+310 SY = CY + Y(I%) * SZ
+320 IF SX<0 OR SX>1280 OR SY<0 OR SY>1024 THEN ENDPROC
+330 MOVE SX, SY
+340 DRAW SX+1, SY
+350 ENDPROC
