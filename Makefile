@@ -3,25 +3,44 @@ CC      = $(CROSS)gcc
 LD      = $(CROSS)ld
 OBJCOPY = $(CROSS)objcopy
 
-SRC_DIR   = src
-BUILD_DIR = build
+# Source layout (modular):
+#   kernel/   - boot, CPU/MMU, mailbox, UART, core kernel
+#   drivers/  - SD, FAT, PCIe, xHCI, USB HID, graphics, fonts, logo
+#   basic/    - the BASIC interpreter (shared by target and host)
+#   seed/     - native "seed" extension API, backends, runtime, examples
+#   include/  - shared platform contracts (console.h, storage.h)
+#   host/     - host (Linux) backends for the native test build
+KERNEL_DIR  = kernel
+DRIVERS_DIR = drivers
+BASIC_DIR   = basic
+SEED_DIR    = seed
+INCLUDE_DIR = include
+HOST_DIR    = host
+BUILD_DIR   = build
 
-# -mstrict-align: the MMU is disabled, so all memory is treated as Device
+# Header search path shared by every target object.
+INCLUDES = -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(DRIVERS_DIR) -I$(BASIC_DIR) -I$(SEED_DIR)
+
+# -mstrict-align: the MMU is disabled early, so all memory is treated as Device
 # memory where unaligned 16/32-bit accesses fault. This stops the compiler
 # from synthesising unaligned loads/stores (e.g. merging two byte reads of a
 # USB descriptor field into one ldrh), which otherwise crashes enumeration.
 CFLAGS  = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
-          -I$(SRC_DIR) -mcpu=cortex-a72 -mstrict-align $(CFLAGS_EXTRA)
+          $(INCLUDES) -mcpu=cortex-a72 -mstrict-align $(CFLAGS_EXTRA)
 
-LDFLAGS = -T $(SRC_DIR)/linker.ld
+LDFLAGS = -T $(KERNEL_DIR)/linker.ld
 
-SRC_C = $(wildcard $(SRC_DIR)/*.c)
-SRC_S = $(wildcard $(SRC_DIR)/*.S)
+# Target image = kernel + drivers + the interpreter + the seed target backend.
+TGT_C = $(wildcard $(KERNEL_DIR)/*.c) $(wildcard $(DRIVERS_DIR)/*.c) \
+        $(BASIC_DIR)/basic.c $(SEED_DIR)/seed_target.c
+TGT_S = $(wildcard $(KERNEL_DIR)/*.S)
 
-OBJ_C = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C))
-OBJ_S = $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(SRC_S))
+# Objects are flattened into build/ (every source basename is unique).
+OBJ = $(addprefix $(BUILD_DIR)/,$(notdir $(TGT_C:.c=.o) $(TGT_S:.S=.o)))
 
-OBJ   = $(OBJ_C) $(OBJ_S)
+# Let pattern rules find each source in its directory.
+vpath %.c $(KERNEL_DIR) $(DRIVERS_DIR) $(BASIC_DIR) $(SEED_DIR)
+vpath %.S $(KERNEL_DIR)
 
 ELF    = $(BUILD_DIR)/kernel.elf
 KERNEL = $(BUILD_DIR)/kernel8.img
@@ -37,22 +56,25 @@ $(ELF): $(OBJ) | $(BUILD_DIR)
 $(KERNEL): $(ELF)
 	$(OBJCOPY) $< -O binary $@
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.S | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.S | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
 	rm -rf $(BUILD_DIR)
 
 # Interactively choose the native resolution and font, regenerating
-# src/buildconfig.h, src/font_data.c and the HDMI block in boot/config.txt.
+# kernel/buildconfig.h, drivers/font_data.c and the HDMI block in boot/config.txt.
 # After this, a plain 'make' builds for the new configuration.
 config:
 	tools/configure.sh
 
-.PHONY: config
+# Scaffold a new native seed in seed/garden/<name>/ (starter source + a Makefile
+# that builds the .sed). Prompts for the name, or: make newseed NAME=blur
+newseed:
+	@tools/newseed.sh $(NAME)
 
 # SD card image for BASIC LOAD/SAVE. Create a blank FAT16 disk with:
 #   make sdcard
@@ -66,7 +88,7 @@ sdcard: $(SDIMG)
 
 # Build a bootable Raspberry Pi 4 SD-card image (firmware + kernel + config.txt)
 # that runs BerryBasic on real hardware. See tools/mksdimage.sh and README-realhw.md.
-sdimage: $(KERNEL)
+sdimage: $(KERNEL) seeds
 	tools/mksdimage.sh
 
 # Interactively flash berrybasic-sd.img to a removable card (lists devices,
@@ -80,16 +102,50 @@ run: $(KERNEL) $(SDIMG)
 	    -serial stdio -display gtk -device usb-kbd \
 	    -drive file=berrybasic-sd.img,if=sd,format=raw
 
-.PHONY: sdcard sdimage flash
-
 # Native build of the interpreter for fast testing/debugging on the host.
-# The interpreter (src/basic.c) is shared with the target; only the console
-# backend differs.
+# basic/basic.c is shared with the target; only the backends differ.
 HOSTCC      = cc
 HOST_BIN    = $(BUILD_DIR)/basic_host
-HOST_SRC    = $(SRC_DIR)/basic.c host/console_host.c host/storage_host.c host/main.c
+HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR)
+HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
+              $(SEED_DIR)/seed_host.c $(HOST_DIR)/main.c
 
 host: $(HOST_SRC) | $(BUILD_DIR)
-	$(HOSTCC) -Wall -g -I$(SRC_DIR) -o $(HOST_BIN) $(HOST_SRC)
+	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC)
 
-.PHONY: all clean run host
+# Native "seeds": position-independent AArch64 blobs that BASIC loads with SEED
+# and calls with CALL/CALL$. Built with the same bare-metal toolchain as the
+# kernel, linked flat (seed/seed.ld), and gated on having ZERO relocations left
+# (any survivor means the seed reached for something it can't relocate).
+#   make seeds
+# -I.../include gives seeds the freestanding seed libc (<stdlib.h>, <string.h>,
+# <ctype.h>); -I.../seed finds "seed.h".
+SEED_SRC = $(wildcard $(SEED_DIR)/examples/*.c)
+SEED_OUT = $(patsubst $(SEED_DIR)/examples/%.c,$(BUILD_DIR)/seeds/%.sed,$(SEED_SRC))
+SEED_CFLAGS = -O2 -ffreestanding -nostdlib -fno-builtin -mcpu=cortex-a72 -mstrict-align \
+              -mcmodel=tiny -fno-pic -ffunction-sections -fdata-sections \
+              -I$(SEED_DIR)/include -I$(SEED_DIR)
+
+# The seed C library: every .c under seed/runtime/ is linked into each seed, and
+# --gc-sections drops whatever a given seed doesn't use.
+SEED_RT_SRC = $(wildcard $(SEED_DIR)/runtime/*.c)
+SEED_RT_OBJ = $(patsubst $(SEED_DIR)/runtime/%.c,$(BUILD_DIR)/seeds/rt_%.o,$(SEED_RT_SRC))
+
+seeds: $(SEED_OUT)
+
+$(BUILD_DIR)/seeds/rt_%.o: $(SEED_DIR)/runtime/%.c | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/seeds
+	$(CC) $(SEED_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR)/seed.ld $(SEED_RT_OBJ) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/seeds
+	$(CC) $(SEED_CFLAGS) -c $< -o $(BUILD_DIR)/seeds/$*.o
+	$(LD) --gc-sections -T $(SEED_DIR)/seed.ld \
+	    $(BUILD_DIR)/seeds/$*.o $(SEED_RT_OBJ) -o $(BUILD_DIR)/seeds/$*.elf
+	@if $(CROSS)readelf -r $(BUILD_DIR)/seeds/$*.elf | grep -q '^Relocation section'; then \
+	    echo "SEED ERROR: $< is not self-contained (unresolved relocations):"; \
+	    $(CROSS)readelf -r $(BUILD_DIR)/seeds/$*.elf; rm -f $@; exit 1; fi
+	$(OBJCOPY) -O binary $(BUILD_DIR)/seeds/$*.elf $@
+	@echo "  built seed $@"
+
+.PHONY: all clean config newseed sdcard sdimage flash run host seeds

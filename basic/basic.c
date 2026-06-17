@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "storage.h"
+#include "seed.h"
 #include "basic.h"
 
 // ===========================================================================
@@ -573,6 +574,7 @@ enum {
     KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
     KW_SAVE, KW_LOAD, KW_CAT, KW_DIR, KW_DELETE,                    // storage statements
+    KW_SEED,                                                        // load a native seed
     KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
     // Functions from the "standard library"
@@ -582,7 +584,8 @@ enum {
     KW_CHRS, KW_STRS, KW_LEFTS, KW_RIGHTS, KW_MIDS, KW_STRINGS, KW_GETS, KW_INKEYS,
     KW_POINT,                                         // POINT(x,y) graphics function
     KW_SHL, KW_SHR, KW_ASR, KW_ROL, KW_ROR,           // bitwise shift / rotate functions
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_ROR,
+    KW_CALL, KW_CALLS,                                // CALL()/CALL$(): invoke a native seed
+    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_CALLS,
     KW_TAB, KW_SPC                                    // PRINT-only modifiers
 };
 
@@ -609,7 +612,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "MOVE",  KW_MOVE  }, { "DRAW", KW_DRAW  }, { "CLG",    KW_CLG    },
     { "POINT", KW_POINT },
     { "SAVE",  KW_SAVE  }, { "LOAD", KW_LOAD  }, { "CAT",    KW_CAT    },
-    { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE },
+    { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE }, { "SEED", KW_SEED },
     { "AUTO",  KW_AUTO  }, { "RENUMBER", KW_RENUMBER }, { "EDIT", KW_EDIT },
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },
     { "POS",   KW_POS   }, { "VPOS", KW_VPOS  },
@@ -626,6 +629,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "STRING$", KW_STRINGS }, { "GET$", KW_GETS }, { "INKEY$", KW_INKEYS },
     { "SHL",   KW_SHL   }, { "SHR",  KW_SHR   }, { "ASR",    KW_ASR    },
     { "ROL",   KW_ROL   }, { "ROR",  KW_ROR   },
+    { "CALL",  KW_CALL  }, { "CALL$", KW_CALLS },
     { "TAB",   KW_TAB   }, { "SPC",  KW_SPC   },
 };
 static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
@@ -896,6 +900,230 @@ static double factor_num(void) {
     return v.num;
 }
 
+// ---------------------------------------------------------------------------
+// Native seeds: small chunks of position-independent AArch64 machine code that
+// a program loads (SEED) and calls (CALL / CALL$). The blob is copied into a
+// page-aligned, executable RAM slot; seeds reach the interpreter only through
+// the SeedServices vtable below, which is what keeps them self-contained. See
+// seed/seed.h for the ABI.
+// ---------------------------------------------------------------------------
+#define SEED_MAX        8
+#define SEED_SLOT_SIZE  (16 * 1024)
+enum { SEED_MAX_ARGS = 16 };
+
+static char       seed_pool[SEED_MAX][SEED_SLOT_SIZE] __attribute__((aligned(4096)));
+static int        seed_loaded[SEED_MAX];
+static seed_entry seed_entry_ptr[SEED_MAX];
+
+static char g_seed_retstr[MAX_STR];   // string result staged by set_return_str
+static int  g_seed_retstr_len;        // -1 = the last call set no string
+
+// --- seed heap -------------------------------------------------------------
+// A general-purpose allocator for seeds (BASIC's own string/array storage is
+// separate). Classic K&R first-fit over a fixed arena with coalescing on free;
+// returns 0 when exhausted. The whole arena is reclaimed at each RUN/NEW, so a
+// seed that forgets to free leaks only within the current run. 16-byte aligned
+// blocks, suitable for doubles and NEON.
+#define SEED_HEAP_SIZE  (2u * 1024u * 1024u)   // adjust here if seeds need more
+
+typedef union seed_hdr_u {
+    struct { union seed_hdr_u *next; unsigned size; } s;  // size in header units
+    long double _align;                                   // force 16-byte units
+} seed_blk;
+
+static seed_blk seed_heap[SEED_HEAP_SIZE / sizeof(seed_blk)];
+static seed_blk seed_freelist;        // circular free-list sentinel
+static seed_blk *seed_freep;          // 0 until first use / after a reset
+
+static void seed_heap_reset(void) { seed_freep = 0; }     // lazily re-inited
+
+static void seed_heap_init(void) {
+    seed_blk *base = seed_heap;
+    base->s.size = (unsigned)(sizeof(seed_heap) / sizeof(seed_blk));
+    base->s.next = &seed_freelist;
+    seed_freelist.s.next = base;
+    seed_freelist.s.size = 0;
+    seed_freep = &seed_freelist;
+}
+
+static void *seed_alloc(unsigned nbytes) {
+    if (nbytes == 0) return 0;
+    if (!seed_freep) seed_heap_init();
+    unsigned need = (nbytes + sizeof(seed_blk) - 1) / sizeof(seed_blk) + 1;  // +header
+    seed_blk *prev = seed_freep;
+    for (seed_blk *p = prev->s.next; ; prev = p, p = p->s.next) {
+        if (p->s.size >= need) {                 // big enough
+            if (p->s.size == need) prev->s.next = p->s.next;   // exact: unlink
+            else { p->s.size -= need; p += p->s.size; p->s.size = need; }  // carve tail
+            seed_freep = prev;
+            return (void *)(p + 1);
+        }
+        if (p == seed_freep) return 0;           // wrapped the whole list: no room
+    }
+}
+
+static void seed_free(void *ap) {
+    if (!ap) return;
+    seed_blk *bp = (seed_blk *)ap - 1;
+    if (bp < seed_heap || bp >= seed_heap + sizeof(seed_heap) / sizeof(seed_blk))
+        return;                                  // ignore a wild pointer
+    seed_blk *p = seed_freep;
+    while (!(bp > p && bp < p->s.next)) {         // find the insertion point
+        if (p >= p->s.next && (bp > p || bp < p->s.next)) break;  // at an end
+        p = p->s.next;
+    }
+    if (bp + bp->s.size == p->s.next) {           // coalesce with the next block
+        bp->s.size += p->s.next->s.size;
+        bp->s.next  = p->s.next->s.next;
+    } else bp->s.next = p->s.next;
+    if (p + p->s.size == bp) {                     // coalesce with the previous block
+        p->s.size += bp->s.size;
+        p->s.next  = bp->s.next;
+    } else p->s.next = bp;
+    seed_freep = p;
+}
+
+// Usable payload bytes of an allocated block (its header records the size).
+static unsigned seed_block_bytes(void *ap) {
+    seed_blk *bp = (seed_blk *)ap - 1;
+    if (bp < seed_heap || bp >= seed_heap + sizeof(seed_heap) / sizeof(seed_blk))
+        return 0;
+    return (bp->s.size - 1) * (unsigned)sizeof(seed_blk);
+}
+
+// realloc: grow or shrink a block, preserving its contents. A shrink (or a grow
+// that already fits the rounded-up block) keeps the same pointer; otherwise a new
+// block is allocated, the old bytes copied, and the old block freed. On failure
+// the original block is left untouched and 0 is returned (standard semantics).
+static void *seed_realloc(void *ap, unsigned nbytes) {
+    if (!ap) return seed_alloc(nbytes);
+    if (nbytes == 0) { seed_free(ap); return 0; }
+    unsigned cur = seed_block_bytes(ap);
+    if (cur == 0) return 0;                      // wild pointer
+    if (nbytes <= cur) return ap;                // already fits
+    void *np = seed_alloc(nbytes);
+    if (!np) return 0;                           // old block stays valid
+    const char *s = ap; char *d = np;
+    for (unsigned i = 0; i < cur; i++) d[i] = s[i];
+    seed_free(ap);
+    return np;
+}
+
+// aligned allocation: return a block whose payload is `alignment`-aligned, still
+// freeable with the ordinary free. Blocks are already 16-aligned, so smaller
+// alignments are plain allocs; for larger ones we over-allocate, split off the
+// unaligned prefix as its own free block, and hand back the aligned remainder
+// (which carries a normal block header, so free/realloc work on it unchanged).
+static void *seed_alloc_aligned(unsigned alignment, unsigned nbytes) {
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0) return 0;  // need pow2
+    if (alignment <= sizeof(seed_blk)) return seed_alloc(nbytes);
+    void *raw = seed_alloc(nbytes + alignment);
+    if (!raw) return 0;
+    uintptr_t r = (uintptr_t)raw;
+    uintptr_t a = (r + (alignment - 1)) & ~((uintptr_t)alignment - 1);
+    if (a == r) return raw;                      // already aligned
+    seed_blk *rawh = (seed_blk *)raw - 1;
+    unsigned units1 = (unsigned)((a - r) / sizeof(seed_blk));   // unaligned prefix
+    seed_blk *ah = rawh + units1;                // header for the aligned block
+    ah->s.size   = rawh->s.size - units1;
+    rawh->s.size = units1;
+    seed_free(raw);                              // return the prefix to the heap
+    return (void *)(ah + 1);                     // == a, with a valid header at a-16
+}
+
+// --- service callbacks the seed may invoke (names are uppercase + suffix) ---
+static void svc_putc(int c)                       { con_putc((char)c); }
+static void svc_puts(const char *s, int len)      { con_putsn(s, len); }
+static int  svc_getkey(void)                      { return con_getkey(); }
+static int  svc_inkey(int cs)                     { return con_inkey(cs); }
+
+static int svc_get_num(const char *name, double *out) {
+    for (int i = 0; i < var_n; i++)
+        if (s_eq(vars[i].name, name) && !vars[i].is_str) { *out = vars[i].num; return 1; }
+    *out = 0;
+    return 0;
+}
+static void svc_set_num(const char *name, double val) {
+    var_t *v = var_find(name);
+    if (v && !v->is_str) v->num = trunc_int(v->is_int, val);
+}
+static int svc_get_str(const char *name, char *buf, int buflen) {
+    for (int i = 0; i < var_n; i++)
+        if (s_eq(vars[i].name, name) && vars[i].is_str) {
+            int n = vars[i].s.slen, c = n < buflen ? n : buflen;
+            for (int k = 0; k < c; k++) buf[k] = vars[i].s.sptr[k];
+            return n;                              // full length, even if truncated
+        }
+    return 0;
+}
+static void svc_set_str(const char *name, const char *buf, int len) {
+    var_t *v = var_find(name);
+    if (v && v->is_str) str_store(v, buf, len);
+}
+static double *svc_num_array(const char *name, int *out_len) {
+    arr_t *a = arr_find(name);
+    if (!a || a->is_str) { if (out_len) *out_len = 0; return 0; }
+    if (out_len) *out_len = a->total;
+    return &arr_nums[a->off];                      // pool never moves: safe to hand out
+}
+static void svc_set_return_str(const char *buf, int len) {
+    if (len > MAX_STR) len = MAX_STR;
+    for (int i = 0; i < len; i++) g_seed_retstr[i] = buf[i];
+    g_seed_retstr_len = len;
+}
+static uint32_t svc_time_cs(void) { return (uint32_t)(con_micros() / 10000ULL); }
+static void *svc_alloc(unsigned nbytes) { return seed_alloc(nbytes); }
+static void  svc_free(void *ptr)        { seed_free(ptr); }
+static void *svc_realloc(void *ptr, unsigned nbytes) { return seed_realloc(ptr, nbytes); }
+static void *svc_alloc_aligned(unsigned a, unsigned n) { return seed_alloc_aligned(a, n); }
+
+static const SeedServices g_svc = {
+    SEED_ABI_VERSION,
+    svc_putc, svc_puts, svc_getkey, svc_inkey,
+    svc_get_num, svc_set_num, svc_get_str, svc_set_str,
+    svc_num_array, svc_set_return_str, svc_time_cs,
+    svc_alloc, svc_free,
+    svc_realloc, svc_alloc_aligned,
+};
+
+// Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma
+// token), invoke the seed, and return its numeric result. String arguments are
+// snapshotted into scratch so they stay valid even if the seed triggers GC by
+// writing a variable. g_seed_retstr[_len] receives any string result.
+static double seed_run_collect(void) {
+    double h = need_num();
+    if (g_err) return 0;
+    int slot = (int)h - 1;
+    if (slot < 0 || slot >= SEED_MAX || !seed_loaded[slot]) { err("No such seed"); return 0; }
+
+    seed_arg argv[SEED_MAX_ARGS];
+    int argc = 0;
+    while (tok == T_COMMA) {
+        lex_next();
+        if (argc >= SEED_MAX_ARGS) { err("Too many arguments"); return 0; }
+        value_t v = eval_expr();
+        if (g_err) return 0;
+        if (v.is_str) {
+            value_t snap = str_in_scratch(v.str, v.len);   // GC-stable copy
+            if (g_err) return 0;
+            argv[argc].is_str = 1; argv[argc].num = 0;
+            argv[argc].str = snap.str; argv[argc].len = snap.len;
+        } else {
+            argv[argc].is_str = 0; argv[argc].num = v.num;
+            argv[argc].str = 0; argv[argc].len = 0;
+        }
+        argc++;
+    }
+
+    g_seed_retstr_len = -1;
+    double ret = 0;
+    if (seed_invoke(seed_entry_ptr[slot], &g_svc, argv, argc, &ret) != 0) {
+        err("Native seeds run on the Pi, not the host build");
+        return 0;
+    }
+    return ret;
+}
+
 static value_t eval_function(int fn) {
     lex_next();                         // consume function name
 
@@ -1020,6 +1248,13 @@ static value_t eval_function(int fn) {
         case KW_ROR: { unsigned x = (unsigned)(int)need_num(); if (!expect(T_COMMA)) break;
                        int n = (int)need_num() & 31; if (g_err) break;
                        result = v_num((double)(int)((x >> n) | (x << ((32 - n) & 31)))); break; }
+        // CALL(handle[,arg...]) -> seed's numeric result.
+        // CALL$(handle[,arg...]) -> the string the seed set via set_return_str.
+        case KW_CALL:  result = v_num(seed_run_collect()); break;
+        case KW_CALLS: { double r = seed_run_collect(); (void)r; if (g_err) break;
+                         result = (g_seed_retstr_len >= 0)
+                                  ? str_in_scratch(g_seed_retstr, g_seed_retstr_len)
+                                  : v_str(0, 0); break; }
         default: err("Syntax error in expression"); break;
     }
     if (!g_err) expect(T_RP);
@@ -2148,6 +2383,65 @@ static void stmt_delete(void) {
     if (r) stg_err(r);
 }
 
+// SEED h%, "FILE.SED" : load a native seed from storage into an executable slot
+// and put its handle (1..SEED_MAX) into the numeric variable h%.
+static void stmt_seed(void) {
+    lex_next();                                  // consume SEED
+    if (tok != T_VAR) { err("Expected a variable name"); return; }
+    char hname[NAME_LEN];
+    s_copy(hname, tok_var, NAME_LEN);
+    if (name_is_str(hname)) { err("Seed handle must be a numeric variable"); return; }
+    lex_next();
+    if (!expect(T_COMMA)) return;
+    if (tok != T_STR) { err("Expected a file name"); return; }
+
+    char name[64];
+    int n = 0;
+    while (tok_str[n] && n < (int)sizeof(name) - 1) { name[n] = tok_str[n]; n++; }
+    name[n] = 0;
+    lex_next();
+    int has_dot = 0;                             // default the extension to .SED
+    for (int i = 0; i < n; i++) if (name[i] == '.') has_dot = 1;
+    if (!has_dot && n + 4 < (int)sizeof(name)) {
+        name[n++] = '.'; name[n++] = 'S'; name[n++] = 'E'; name[n++] = 'D'; name[n] = 0;
+    }
+
+    int len = stg_read(name, stg_buf, STG_BUF_SIZE);
+    if (len < 0) { stg_err(len); return; }
+    if (len < (int)sizeof(struct seed_header)) { err("Not a valid seed file"); return; }
+
+    struct seed_header hdr;                       // copy bytewise (-mstrict-align safe)
+    for (int i = 0; i < (int)sizeof(hdr); i++) ((char *)&hdr)[i] = stg_buf[i];
+    if (hdr.magic != SEED_MAGIC)            { err("Not a valid seed file"); return; }
+    if (hdr.version > SEED_ABI_VERSION)     { err("Seed needs a newer interpreter"); return; }
+    if (len > SEED_SLOT_SIZE)               { err("Seed is too big"); return; }
+    if (hdr.entry_off >= (uint32_t)len)     { err("Not a valid seed file"); return; }
+
+    int slot = -1;
+    for (int i = 0; i < SEED_MAX; i++) if (!seed_loaded[i]) { slot = i; break; }
+    if (slot < 0) { err("Too many seeds loaded"); return; }
+
+    for (int i = 0; i < SEED_SLOT_SIZE; i++) seed_pool[slot][i] = 0;   // clears .bss
+    for (int i = 0; i < len; i++) seed_pool[slot][i] = stg_buf[i];
+    icache_sync(seed_pool[slot], (unsigned long)len);                  // make executable
+    seed_entry_ptr[slot] = (seed_entry)(void *)(seed_pool[slot] + hdr.entry_off);
+    seed_loaded[slot] = 1;
+
+    var_t *v = var_find(hname);
+    if (v) v->num = trunc_int(v->is_int, (double)(slot + 1));
+}
+
+// CALL h%, arg... : invoke a seed for its side effects, discarding the result.
+// (CALL(...) and CALL$(...) as functions return the numeric / string result.)
+static void stmt_call(void) {
+    lex_next();                                  // consume CALL
+    int paren = (tok == T_LP);
+    if (paren) lex_next();
+    (void)seed_run_collect();
+    if (g_err) return;
+    if (paren) expect(T_RP);
+}
+
 // --- RENUMBER ---------------------------------------------------------------
 static int g_renum_start = 10, g_renum_step = 10;
 
@@ -2330,6 +2624,8 @@ static void exec_statement(void) {
             case KW_SAVE:  stmt_save();    return;
             case KW_LOAD:  stmt_load();    return;
             case KW_DELETE:stmt_delete();  return;
+            case KW_SEED:  stmt_seed();    return;
+            case KW_CALL:  stmt_call();    return;
             case KW_CAT:
             case KW_DIR:   lex_next(); stg_dir(); return;
             case KW_PROC:  call_proc(0, 0); return;
@@ -2365,6 +2661,8 @@ static void exec_statement(void) {
             case KW_AUTO:     stmt_auto();     return;
             case KW_EDIT:     stmt_edit();     return;
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
+                           for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;
+                           seed_heap_reset();
                            for_sp = 0; gosub_sp = 0; return;
             default:       err("That keyword can't be used as a command");  return;
         }
@@ -2443,6 +2741,8 @@ static void run_program(int start_pc, int start_off) {
     call_sp = 0;
     local_sp = 0;
     scratch_base = 0;
+    for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;   // fresh run reloads its seeds
+    seed_heap_reset();                                       // and starts with a clean heap
     data_pc = 0;
     data_off = -1;
     scan_defs();

@@ -2,8 +2,8 @@
 #
 # Configure BerryBasic's native screen resolution and font, then regenerate the
 # build inputs so a plain 'make' produces a kernel for the chosen setup:
-#   - src/buildconfig.h   (resolution + glyph size + font scale)
-#   - src/font_data.c     (the glyph table, converted from the chosen font file)
+#   - kernel/buildconfig.h   (resolution + glyph size + font scale)
+#   - drivers/font_data.c     (the glyph table, converted from the chosen font file)
 #   - boot/config.txt     (HDMI driven at the chosen resolution)
 #
 # Interactive:  tools/configure.sh
@@ -63,8 +63,8 @@ if [ -z "$SCALE" ]; then
 fi
 case "$SCALE" in 1|2|3) ;; *) echo "error: scale must be 1, 2 or 3"; exit 1;; esac
 
-# --- 4. Generate src/buildconfig.h ------------------------------------------
-cat > src/buildconfig.h <<EOF
+# --- 4. Generate kernel/buildconfig.h ------------------------------------------
+cat > kernel/buildconfig.h <<EOF
 #ifndef BUILDCONFIG_H
 #define BUILDCONFIG_H
 
@@ -85,8 +85,8 @@ cat > src/buildconfig.h <<EOF
 #endif
 EOF
 
-# --- 5. Generate src/font_data.c from the chosen font -----------------------
-tools/genfont.sh "$FONT" src/font_data.c
+# --- 5. Generate drivers/font_data.c from the chosen font -----------------------
+tools/genfont.sh "$FONT" drivers/font_data.c
 
 # --- 6. Patch the resolution block in boot/config.txt -----------------------
 awk -v w="$WIDTH" -v h="$HEIGHT" '

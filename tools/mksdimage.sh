@@ -73,6 +73,11 @@ for bas in "$ROOT"/examples/*.bas; do
     [ -e "$bas" ] || break
     mcopy -i "$DATAPART" "$bas" "::$(basename "$bas" | tr '[:lower:]' '[:upper:]')"
 done
+# Native seeds (built by 'make seeds') so SEED/CALL examples work on hardware.
+for sed in "$ROOT"/build/seeds/*.sed; do
+    [ -e "$sed" ] || break
+    mcopy -i "$DATAPART" "$sed" "::$(basename "$sed" | tr '[:lower:]' '[:upper:]')"
+done
 
 # --- Assemble the final image with a 2-partition MBR ------------------------
 dd if=/dev/zero of="$OUT" bs=1M count="$SIZE_MB" status=none
