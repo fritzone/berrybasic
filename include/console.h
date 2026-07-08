@@ -44,4 +44,24 @@ void con_plot(int code, int x, int y);   // PLOT code,x,y (master graphics primi
 void con_clg(void);                      // CLG: clear graphics area to gfx background
 int  con_point(int x, int y);            // POINT(x,y): logical colour 0..7, or -1 off-screen
 
+// --- graphics library (all in BBC logical coordinates) ----------------------
+void con_gcol_rgb(int r, int g, int b);              // GCOL r,g,b : truecolour foreground
+void con_palette(int logical, int r, int g, int b);  // COLOUR l,r,g,b : redefine a palette slot
+void con_line(int x1, int y1, int x2, int y2);       // LINE
+void con_rectangle(int x, int y, int w, int h, int fill);  // RECTANGLE [FILL] x,y,w,h
+void con_circle(int x, int y, int r, int fill);      // CIRCLE [FILL] x,y,r
+void con_ellipse(int x, int y, int rx, int ry, int fill);  // ELLIPSE [FILL] x,y,rx,ry
+void con_fill(int x, int y);                         // FILL x,y : flood fill
+// Sprites: capture a screen rectangle into a DIM buffer at `addr`, and stamp it
+// back (top-left at the given logical point, honouring the plot op).
+void con_sprite_get(long addr, int x1, int y1, int x2, int y2);
+void con_sprite_put(long addr, int x, int y);
+
+// --- pointer (USB mouse) ----------------------------------------------------
+// Poll the mouse and report the current pointer position in raw framebuffer
+// pixels (origin top-left: x in 0..width-1, y in 0..height-1) and the button
+// bitmask (bit0=left, bit1=right, bit2=middle). When no mouse is present, or on
+// the host backend, position and buttons read back as 0.
+void con_mouse(int *x, int *y, int *buttons);
+
 #endif

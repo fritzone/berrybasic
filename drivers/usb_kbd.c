@@ -115,6 +115,7 @@ static uint8_t setup_pkt[8]    __attribute__((aligned(4)));
 static uint8_t ctrl_buf[256]   __attribute__((aligned(4)));
 static uint8_t status_buf[4]   __attribute__((aligned(4)));
 static uint8_t kbd_report[8]   __attribute__((aligned(4)));
+static uint8_t mouse_report[8] __attribute__((aligned(4)));
 
 // ---------------------------------------------------------------------------
 // Single-channel transfer; returns 0=ok, -4=NAK, -2=STALL, -1=error
@@ -273,15 +274,27 @@ static int  kbd_pid      = PID_DATA0;
 static int  kbd_ready    = 0;
 static uint8_t kbd_prev[8];
 
+// Mouse state (a second HID device on the same hub). Polled on its own DWC2
+// channel so it never disturbs keyboard polling.
+static int  mouse_devaddr  = 0;
+static int  mouse_ep       = 0;
+static int  mouse_mps      = 8;
+static int  mouse_lowspeed = 0;
+static int  mouse_pid      = PID_DATA0;
+static int  mouse_ready    = 0;
+
 // HID keycode tables and decoding now live in usb_hid.c (shared with xHCI).
 
 // ---------------------------------------------------------------------------
-// Configure a keyboard device: get descriptor, assign address, set config+protocol
-// The device starts at address 0; new_addr is what we assign it.
+// Configure a HID device: get descriptor, assign address, find its interrupt IN
+// endpoint, set config + boot protocol. Distinguishes keyboard from mouse by the
+// interface's bInterfaceProtocol (1 = keyboard, 2 = mouse) and stores into the
+// matching slot. The device starts at address 0; new_addr is what we assign it.
+// Returns 1 (keyboard) or 2 (mouse) on success, negative on error.
 // ---------------------------------------------------------------------------
 
-static int setup_keyboard(int new_addr, int ep0_mps, int lowspeed) {
-    uart_puts("[USB] configuring keyboard...\n");
+static int setup_hid(int new_addr, int ep0_mps, int lowspeed) {
+    uart_puts("[USB] configuring HID device...\n");
 
     // GET_DESCRIPTOR (device) — may need retries after reset
     int r = -1;
@@ -289,39 +302,39 @@ static int setup_keyboard(int new_addr, int ep0_mps, int lowspeed) {
         r = ctrl_xfer(0, ep0_mps, lowspeed, 0x80, 6, (1u<<8), 0, 18, ctrl_buf);
         if (r < 0) usleep(10000);
     }
-    if (r < 0) { uart_puts("[USB] kbd GET_DESCRIPTOR failed\n"); return -1; }
+    if (r < 0) { uart_puts("[USB] hid GET_DESCRIPTOR failed\n"); return -1; }
 
     usb_dev_desc_t *dd = (usb_dev_desc_t *)ctrl_buf;
     ep0_mps = dd->bMaxPacketSize0;
-    uart_hex("[USB] kbd VID: ", dd->idVendor);
-    uart_hex("[USB] kbd PID: ", dd->idProduct);
-    uart_dec("[USB] kbd ep0 mps: ", ep0_mps);
+    uart_hex("[USB] hid VID: ", dd->idVendor);
+    uart_hex("[USB] hid PID: ", dd->idProduct);
+    uart_dec("[USB] hid ep0 mps: ", ep0_mps);
 
     // SET_ADDRESS
     r = ctrl_xfer(0, ep0_mps, lowspeed, 0x00, 5, new_addr, 0, 0, 0);
-    if (r < 0) { uart_puts("[USB] kbd SET_ADDRESS failed\n"); return -2; }
+    if (r < 0) { uart_puts("[USB] hid SET_ADDRESS failed\n"); return -2; }
     usleep(5000);
-    kbd_devaddr = new_addr;
 
     // GET_DESCRIPTOR (config, 9 bytes first for wTotalLength)
-    uart_puts("[USB] kbd config(9)...\n");
+    uart_puts("[USB] hid config(9)...\n");
     r = ctrl_xfer(new_addr, ep0_mps, lowspeed, 0x80, 6, (2u<<8), 0, 9, ctrl_buf);
-    if (r < 0) { uart_puts("[USB] kbd config(9) failed\n"); return -3; }
+    if (r < 0) { uart_puts("[USB] hid config(9) failed\n"); return -3; }
     uint16_t tlen = ((usb_cfg_desc_t *)ctrl_buf)->wTotalLength;
-    uart_dec("[USB] kbd config tlen: ", tlen);
+    uart_dec("[USB] hid config tlen: ", tlen);
     if (tlen > sizeof(ctrl_buf)) tlen = sizeof(ctrl_buf);
 
     // GET_DESCRIPTOR (config, full)
-    uart_puts("[USB] kbd config(full)...\n");
+    uart_puts("[USB] hid config(full)...\n");
     r = ctrl_xfer(new_addr, ep0_mps, lowspeed, 0x80, 6, (2u<<8), 0, tlen, ctrl_buf);
-    if (r < 0) { uart_puts("[USB] kbd config(full) failed\n"); return -4; }
-    uart_puts("[USB] kbd config(full) done\n");
+    if (r < 0) { uart_puts("[USB] hid config(full) failed\n"); return -4; }
+    uart_puts("[USB] hid config(full) done\n");
 
-    // Parse: find HID (class=3) interrupt IN endpoint.
+    // Parse: find HID (class=3) interrupt IN endpoint and note the interface's
+    // boot protocol (byte 7: 1 = keyboard, 2 = mouse).
     // NOTE: read multi-byte fields byte-by-byte (the descriptor is not aligned,
     // and with the MMU off an unaligned 16/32-bit access would fault).
-    int ep_found = 0;
-    int in_hid_if = 0;
+    int ep_found = 0, ep_num = 0, ep_mps = 8;
+    int in_hid_if = 0, if_proto = 0, hid_proto = 0;
     uint8_t *p = ctrl_buf, *end = ctrl_buf + tlen;
     while (p < end && !ep_found) {
         if (p + 2 > end) break;
@@ -329,16 +342,19 @@ static int setup_keyboard(int new_addr, int ep0_mps, int lowspeed) {
         if (bLen < 2 || p + bLen > end) break;
         if (bType == 4) {  // interface
             in_hid_if = (p[5] == 3);  // bInterfaceClass == HID
+            if_proto  = p[7];         // bInterfaceProtocol
         } else if (bType == 5 && in_hid_if) {  // endpoint in HID interface
             uint32_t ea = p[2];   // bEndpointAddress
             uint32_t at = p[3];   // bmAttributes
             if ((ea & 0x80) && (at & 3) == 3) {  // IN, interrupt
-                kbd_ep  = ea & 0x0F;
-                kbd_mps = (p[4] | ((uint32_t)p[5] << 8)) & 0x7FF;
-                if (kbd_mps == 0) kbd_mps = 8;
-                ep_found = 1;
-                uart_dec("[USB] kbd EP: ", kbd_ep);
-                uart_dec("[USB] kbd EP mps: ", kbd_mps);
+                ep_num = ea & 0x0F;
+                ep_mps = (p[4] | ((uint32_t)p[5] << 8)) & 0x7FF;
+                if (ep_mps == 0) ep_mps = 8;
+                hid_proto = if_proto;
+                ep_found  = 1;
+                uart_dec("[USB] hid EP: ", ep_num);
+                uart_dec("[USB] hid EP mps: ", ep_mps);
+                uart_dec("[USB] hid proto: ", hid_proto);
             }
         }
         p += bLen;
@@ -347,22 +363,34 @@ static int setup_keyboard(int new_addr, int ep0_mps, int lowspeed) {
     if (!ep_found) { uart_puts("[USB] no HID IN endpoint found\n"); return -5; }
 
     // SET_CONFIGURATION 1
-    uart_puts("[USB] kbd SET_CONFIG...\n");
+    uart_puts("[USB] hid SET_CONFIG...\n");
     r = ctrl_xfer(new_addr, ep0_mps, lowspeed, 0x00, 9, 1, 0, 0, 0);
-    if (r < 0) { uart_puts("[USB] kbd SET_CONFIG failed\n"); return -6; }
-    uart_puts("[USB] kbd SET_CONFIG done\n");
+    if (r < 0) { uart_puts("[USB] hid SET_CONFIG failed\n"); return -6; }
     usleep(5000);
 
     // SET_PROTOCOL 0 (boot protocol, non-fatal if fails)
-    uart_puts("[USB] kbd SET_PROTOCOL...\n");
     ctrl_xfer(new_addr, ep0_mps, lowspeed, 0x21, 0x0B, 0, 0, 0, 0);
-    uart_puts("[USB] kbd SET_PROTOCOL done\n");
 
+    // A boot mouse advertises protocol 2; anything else (keyboards report 1, and
+    // some report 0) is handled on the keyboard path.
+    if (hid_proto == 2) {
+        mouse_devaddr  = new_addr;
+        mouse_ep       = ep_num;
+        mouse_mps      = ep_mps;
+        mouse_lowspeed = lowspeed;
+        mouse_pid      = PID_DATA0;
+        mouse_ready    = 1;
+        uart_puts("[USB] mouse configured and ready\n");
+        return 2;
+    }
+    kbd_devaddr  = new_addr;
+    kbd_ep       = ep_num;
+    kbd_mps      = ep_mps;
     kbd_lowspeed = lowspeed;
     kbd_pid      = PID_DATA0;
     kbd_ready    = 1;
     uart_puts("[USB] keyboard configured and ready\n");
-    return 0;
+    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +398,9 @@ static int setup_keyboard(int new_addr, int ep0_mps, int lowspeed) {
 // hub_devaddr: assign the hub this address
 // hub_ep0_mps: initial EP0 MPS for hub (from device descriptor)
 // ---------------------------------------------------------------------------
+
+// Port status low-speed bit (wPortStatus bit 9).
+#define PORT_STS_LOWSPEED   (1u << 9)
 
 static int enumerate_hub(int hub_devaddr, int hub_ep0_mps) {
     uart_puts("[HUB] enumerating hub...\n");
@@ -397,7 +428,12 @@ static int enumerate_hub(int hub_devaddr, int hub_ep0_mps) {
     }
     usleep(200000);  // bPwrOn2PwrGood * 2ms (max 100ms typically)
 
-    // Find and enumerate keyboard on each port
+    // Enumerate EVERY connected port (not just the first): a machine can have a
+    // keyboard and a mouse on the same hub. Each device gets its own address,
+    // handed out sequentially after the hub's, and setup_hid routes it to the
+    // keyboard or mouse slot by its boot protocol.
+    int next_addr = hub_devaddr + 1;
+    int found = 0;
     for (int p = 1; p <= nports; p++) {
         uint32_t ps = 0;
         if (hub_port_status(hub_devaddr, hub_ep0_mps, p, &ps) < 0) continue;
@@ -427,21 +463,20 @@ static int enumerate_hub(int hub_devaddr, int hub_ep0_mps) {
         hub_clr_feat(hub_devaddr, hub_ep0_mps, p, HUB_FEAT_C_RESET);
         usleep(20000);  // recovery time after reset
 
-        // Re-check port status
+        // Re-check port status (also learn the device's speed).
         if (hub_port_status(hub_devaddr, hub_ep0_mps, p, &ps) == 0) {
             uart_hex("[HUB] port after reset: ", ps);
         }
+        int lowspeed = (ps & PORT_STS_LOWSPEED) ? 1 : 0;
 
-        // Keyboard device is now at addr=0 on this port; next free address = 2
-        int kbd_new_addr = hub_devaddr + 1;
-        r = setup_keyboard(kbd_new_addr, 8, 0);
-        if (r == 0) return 0;
-
-        uart_puts("[HUB] not a keyboard on this port, continuing\n");
+        // Device is now at addr 0 on this port; give it the next free address.
+        r = setup_hid(next_addr, 8, lowspeed);
+        if (r > 0) { next_addr++; found++; }
+        else uart_puts("[HUB] not a HID device on this port, continuing\n");
     }
 
-    uart_puts("[HUB] no keyboard found behind hub\n");
-    return -3;
+    uart_dec("[HUB] HID devices configured: ", found);
+    return found > 0 ? 0 : -3;
 }
 
 // ---------------------------------------------------------------------------
@@ -538,15 +573,18 @@ int usb_kbd_init(void) {
     uart_dec("[USB] effective class: ", dev_class);
 
     if (dev_class == 9) {
-        // USB hub — enumerate it, then find keyboard behind it
-        return enumerate_hub(1, ep0_mps) == 0 ? 1 : 0;
+        // USB hub — enumerate it, then find the keyboard/mouse behind it.
+        enumerate_hub(1, ep0_mps);
     } else if (dev_class == 3) {
-        // HID device directly on root port — try as keyboard
-        return setup_keyboard(1, ep0_mps, 0) == 0 ? 1 : 0;
+        // HID device directly on the root port — configure it (kbd or mouse).
+        setup_hid(1, ep0_mps, 0);
     } else {
-        uart_puts("[USB] unknown device class, trying as keyboard\n");
-        return setup_keyboard(1, ep0_mps, 0) == 0 ? 1 : 0;
+        uart_puts("[USB] unknown device class, trying as HID\n");
+        setup_hid(1, ep0_mps, 0);
     }
+    // We report keyboard presence here; the mouse is queried separately via
+    // usb_mouse_present(). Either device may be present independently.
+    return kbd_ready;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,4 +604,24 @@ char usb_kbd_getchar(void) {
     kbd_pid = (kbd_pid == PID_DATA0) ? PID_DATA1 : PID_DATA0;
 
     return hid_report_char(kbd_report, kbd_prev);
+}
+
+// ---------------------------------------------------------------------------
+// Poll mouse
+// ---------------------------------------------------------------------------
+
+int usb_mouse_present(void) { return mouse_ready; }
+
+int usb_mouse_poll(int *btn, int *dx, int *dy, int *wheel) {
+    if (!mouse_ready) return 0;
+
+    // Own channel (2) so a mouse poll never disturbs the keyboard's channel-1
+    // transfer state.
+    int r = dwc2_xfer(2, mouse_devaddr, mouse_ep, 1 /*IN*/, EP_INTR,
+                      mouse_mps, mouse_pid, mouse_report, mouse_mps, mouse_lowspeed);
+    if (r == -4) return 0;  // NAK = no new movement
+    if (r < 0)   return 0;
+
+    mouse_pid = (mouse_pid == PID_DATA0) ? PID_DATA1 : PID_DATA0;
+    return hid_mouse_decode(mouse_report, mouse_mps, btn, dx, dy, wheel);
 }

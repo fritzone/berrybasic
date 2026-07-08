@@ -78,6 +78,12 @@ for sed in "$ROOT"/build/seeds/*.sed; do
     [ -e "$sed" ] || break
     mcopy -i "$DATAPART" "$sed" "::$(basename "$sed" | tr '[:lower:]' '[:upper:]')"
 done
+# Image files for LOADSPRITE (PNG/JPEG/BMP). Names are upper-cased to match the
+# 8.3 filesystem; keep basenames to 8 chars so e.g. images/ball.png -> BALL.PNG.
+for img in "$ROOT"/images/*.png "$ROOT"/images/*.jpg "$ROOT"/images/*.bmp; do
+    [ -e "$img" ] || continue
+    mcopy -i "$DATAPART" "$img" "::$(basename "$img" | tr '[:lower:]' '[:upper:]')"
+done
 
 # --- Assemble the final image with a 2-partition MBR ------------------------
 dd if=/dev/zero of="$OUT" bs=1M count="$SIZE_MB" status=none

@@ -67,6 +67,7 @@ static uintptr_t db_base;        // doorbell array
 #define TRB_ENABLE_SLOT     9
 #define TRB_ADDRESS_DEVICE  11
 #define TRB_CONFIGURE_EP    12
+#define TRB_EVALUATE_CONTEXT 13
 #define TRB_TRANSFER_EVENT  32
 #define TRB_CMD_COMPLETION  33
 #define TRB_PORT_STATUS     34
@@ -119,16 +120,41 @@ static uint32_t  event_deq;
 static uint32_t  event_cycle;
 static trb_t    *ep0_ring;
 static uint32_t  ep0_enq, ep0_cycle;
-static trb_t    *epint_ring;
+static trb_t    *epint_ring;     // scratch during endpoint setup, then snapshotted
 static uint32_t  epint_enq, epint_cycle;
 static uint8_t  *dev_ctx;
 static uint8_t  *input_ctx;
 static int       ctx_size;       // 32 or 64
 static int       slot_id;
-static int       kbd_dci;        // endpoint DCI of the interrupt IN endpoint
-static int       kbd_ready;
-static uint8_t   kbd_prev[8];
-static uint8_t  *report_buf;     // 8-byte HID report DMA buffer
+static uint8_t  *report_buf;     // HID report DMA buffer (scratch during setup)
+
+// Per-device interrupt-endpoint polling state. Snapshotted from the shared setup
+// scratch (slot_id / epint_ring / report_buf) at the end of each device's
+// enumeration so that configuring a second device (e.g. the mouse) cannot clobber
+// the first device's (the keyboard's) polling registers. The keyboard and mouse
+// interrupt endpoints post to the SAME event ring, so xhci_pump() demultiplexes
+// completions by (slot, endpoint DCI).
+typedef struct {
+    int      ready;
+    int      slot;
+    int      dci;
+    trb_t   *ring;
+    uint32_t enq, cyc;
+    uint8_t *buf;
+    int      len;        // interrupt transfer length (report size)
+} hid_ep_t;
+
+static hid_ep_t kbd_ep_st;
+static hid_ep_t mou_ep_st;
+static uint8_t  kbd_prev[8];
+
+// Pending keyboard characters decoded by xhci_pump() (drained by getchar). Small
+// FIFO so a key decoded while servicing the ring for the mouse is not lost.
+static char     key_fifo[16];
+static int      key_head, key_tail;
+
+// Accumulated mouse movement decoded by xhci_pump() (drained by xhci_mouse_poll).
+static int      mou_have, mou_btn, mou_dx, mou_dy, mou_wheel;
 
 static void usleep(uint32_t us) {
     volatile uint32_t *clo = (volatile uint32_t *)0xFE003004UL;
@@ -485,16 +511,61 @@ static int address_device_on(int root_port, uint32_t route, int speed,
     return sid;
 }
 
+// Update the currently-addressed device's EP0 Max Packet Size via an Evaluate
+// Context command. Needed after learning a full-speed device's real
+// bMaxPacketSize0 (it may be 8/16/32/64, but we address FS/LS at a provisional
+// 8). Reuses the device's input_ctx (still valid from address_device_on).
+static int evaluate_ep0_mps(int mps) {
+    uint32_t *icc = (uint32_t *)input_ctx;
+    icc[0] = 0;
+    icc[1] = (1u << 1);                          // evaluate EP0 (DCI 1) only
+    uint32_t *ep0 = ep_ctx(input_ctx + ctx_size, 1);
+    ep0[1] = (ep0[1] & 0x0000ffffu) | ((uint32_t)mps << 16);   // MPS = bits 31:16
+    return run_command(pa(input_ctx),
+                       TRB_TYPE(TRB_EVALUATE_CONTEXT) | (slot_id << 24));
+}
+
+// Read the 18-byte device descriptor safely. A full-speed device may use an EP0
+// Max Packet Size larger than the provisional 8 we addressed it with; issuing an
+// 18-byte read against MPS 8 makes such a device babble (it answers in one big
+// packet). So fetch the first 8 bytes (always exactly one short reply), take the
+// real bMaxPacketSize0 from byte 7, correct EP0 for FS devices, then read the
+// full descriptor. `speed`: 1=FS 2=LS 3=HS 4=SS. Returns <0 on error.
+static int get_device_descriptor(uint8_t *buf, int speed) {
+    // Only full speed is ambiguous: LS is spec-fixed at 8, HS at 64, SS uses the
+    // 2^n encoding we already set — for those the provisional MPS is already right,
+    // so read straight through exactly as before (no extra traffic/timing change).
+    if (speed != 1)
+        return control_xfer(0x80, 6, (1 << 8), 0, 18, buf);
+    // Full speed: EP0 MPS may be 8/16/32/64 but we addressed at 8. Read 8 bytes
+    // first (always exactly one short reply), correct EP0, then read the full 18.
+    int r = control_xfer(0x80, 6, (1 << 8), 0, 8, buf);
+    if (r < 0) return r;
+    if (buf[7] >= 8 && buf[7] != 8) {
+        uart_dec("[XHCI] EP0 mps fixup ", buf[7]);
+        evaluate_ep0_mps(buf[7]);
+    }
+    return control_xfer(0x80, 6, (1 << 8), 0, 18, buf);
+}
+
 // Configure an already-addressed device as a USB hub and find a device on one of
 // its downstream ports. `hub_slot`/`hub_speed`/`route`/`tt_slot`/`tt_port` are the
 // hub's own slot context (route and TT must be preserved when we re-write the
 // slot context to set the hub bit, or a 2nd-tier hub loses its route). Returns the
 // connected downstream port with *dspeed set; 0 if nothing is connected.
+// `skip_port` (0 = none) is a downstream port to ignore while scanning - used on
+// a second pass to find the OTHER device (e.g. the mouse) on a hub whose first
+// device (the keyboard) is already claimed. `first_time` does the one-shot hub
+// configuration (SET_CONFIG, mark-as-hub, power ports); on a rescan it is skipped
+// (the hub is already up) and the connection scan is brief.
 static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_speed,
                          uint32_t route, int tt_slot, int tt_port,
+                         int skip_port, int first_time,
                          int *dport, int *dspeed) {
-    // Hub must be configured before its ports work.
-    if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[HUB] set config failed\n"); return 0; }
+    if (first_time) {
+        // Hub must be configured before its ports work.
+        if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[HUB] set config failed\n"); return 0; }
+    }
     // Class hub descriptor (type 0x29): bNbrPorts, wHubCharacteristics, pwr-good.
     if (control_xfer(0xA0, 6, (0x29 << 8), 0, 8, buf) < 0) { uart_puts("[HUB] get desc failed\n"); return 0; }
     int nports   = buf[2];
@@ -504,32 +575,35 @@ static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_spee
     uart_dec("[HUB] ports ", nports);
     uart_hex("[HUB] wHubChar ", (uint32_t)wHubChar);
 
-    // Tell the xHC this slot is a hub (route split transactions through it):
-    // Hub=1 (dword0 bit26), NumberOfPorts (dword1 24-31), TTT (dword2 16-17). Keep
-    // the hub's existing route string and TT so deeper hubs stay reachable.
-    uint32_t *icc = (uint32_t *)input_ctx;
-    icc[0] = 0; icc[1] = (1u << 0);                       // evaluate slot context only
-    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
-    slot[0] = (1u << 27) | ((uint32_t)hub_speed << 20) | (1u << 26) | (route & 0xfffff);
-    slot[1] = (root_port << 16) | (nports << 24);
-    slot[2] = (ttt << 16) | (tt_slot ? ((tt_slot & 0xff) | ((tt_port & 0xff) << 8)) : 0);
-    if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (hub_slot << 24)) < 0)
-        uart_puts("[HUB] set-hub config_ep failed (continuing)\n");
+    if (first_time) {
+        // Tell the xHC this slot is a hub (route split transactions through it):
+        // Hub=1 (dword0 bit26), NumberOfPorts (dword1 24-31), TTT (dword2 16-17). Keep
+        // the hub's existing route string and TT so deeper hubs stay reachable.
+        uint32_t *icc = (uint32_t *)input_ctx;
+        icc[0] = 0; icc[1] = (1u << 0);                   // evaluate slot context only
+        uint32_t *slot = slot_ctx(input_ctx + ctx_size);
+        slot[0] = (1u << 27) | ((uint32_t)hub_speed << 20) | (1u << 26) | (route & 0xfffff);
+        slot[1] = (root_port << 16) | (nports << 24);
+        slot[2] = (ttt << 16) | (tt_slot ? ((tt_slot & 0xff) | ((tt_port & 0xff) << 8)) : 0);
+        if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (hub_slot << 24)) < 0)
+            uart_puts("[HUB] set-hub config_ep failed (continuing)\n");
 
-    // Power every downstream port.
-    uart_dec("[HUB] pwr-good ms ", pgood);
-    for (int p = 1; p <= nports; p++)
-        control_xfer(0x23, 3, 8 /*PORT_POWER*/, p, 0, buf);
-    usleep((pgood + 50) * 1000);
+        // Power every downstream port.
+        uart_dec("[HUB] pwr-good ms ", pgood);
+        for (int p = 1; p <= nports; p++)
+            control_xfer(0x23, 3, 8 /*PORT_POWER*/, p, 0, buf);
+        usleep((pgood + 50) * 1000);
+    }
 
-    // Wait for a device to appear. A downstream hub (e.g. a monitor's built-in
-    // hub) can take a while to power up and assert a connection after its upstream
-    // port is powered, so poll all ports for up to ~6 s. Diagnostic: log every
-    // port's status/change word once a second so we can see if anything ever
-    // connects (CONNECTION = status bit 0).
+    // Wait for a device to appear. On the first pass a downstream hub (e.g. a
+    // monitor's built-in hub) can take a while to assert a connection after its
+    // upstream port is powered, so poll for up to ~6 s. On a rescan the ports are
+    // already powered, so scan just briefly and skip the already-claimed port.
+    int max_tries = first_time ? 60 : 3;
     int dp = 0;
-    for (int tries = 0; tries < 60 && !dp; tries++) {
+    for (int tries = 0; tries < max_tries && !dp; tries++) {
         for (int p = 1; p <= nports; p++) {
+            if (p == skip_port) continue;
             if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;       // GET_STATUS
             uint32_t st = buf[0] | (buf[1] << 8);
             uint32_t ch = buf[2] | (buf[3] << 8);
@@ -548,17 +622,29 @@ static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_spee
     }
     if (!dp) { uart_puts("[HUB] no downstream device\n"); return 0; }
 
-    // Reset the connected port and read the new device's speed.
-    control_xfer(0x23, 3, 4 /*PORT_RESET*/, dp, 0, buf);
-    for (int i = 0; i < 50; i++) {
-        usleep(10000);
-        if (control_xfer(0xA3, 0, 0, dp, 4, buf) < 0) continue;
-        uint32_t st = buf[0] | (buf[1] << 8);
-        if (!(st & (1 << 4))) break;                      // PORT_RESET cleared
+    // Reset the connected port until it comes up ENABLED. A cheap multi-tier hub
+    // (e.g. the CrowView's internal hub) sometimes clears PORT_RESET without
+    // enabling the port: status reads back as connect+power but with neither the
+    // enable bit (bit1) nor a speed bit set. Proceeding then misreads the speed
+    // (defaults to FS) and Address Device fails with a transaction error. So retry
+    // the reset a few times, waiting for the enable bit, before giving up.
+    uint32_t st = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        control_xfer(0x23, 3, 4 /*PORT_RESET*/, dp, 0, buf);
+        for (int i = 0; i < 50; i++) {
+            usleep(10000);
+            if (control_xfer(0xA3, 0, 0, dp, 4, buf) < 0) continue;
+            st = buf[0] | (buf[1] << 8);
+            if (!(st & (1 << 4))) break;                  // PORT_RESET cleared
+        }
+        control_xfer(0x23, 1, 20 /*C_PORT_RESET*/, dp, 0, buf);
+        usleep(20000);                                    // let the port settle
+        control_xfer(0xA3, 0, 0, dp, 4, buf);
+        st = buf[0] | (buf[1] << 8);
+        if (st & (1 << 1)) break;                         // PORT_ENABLE set -> good
+        uart_hex("[HUB]   reset retry, status ", st);
+        usleep(50000);
     }
-    control_xfer(0x23, 1, 20 /*C_PORT_RESET*/, dp, 0, buf);
-    control_xfer(0xA3, 0, 0, dp, 4, buf);
-    uint32_t st = buf[0] | (buf[1] << 8);
     uart_hex("[HUB]   post-reset ", st);
     *dport  = dp;
     *dspeed = (st & (1 << 10)) ? 3 : (st & (1 << 9)) ? 2 : 1;   // HS/LS/FS
@@ -567,10 +653,167 @@ static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_spee
     return dp;
 }
 
+// Configure the interrupt IN endpoint of the device currently addressed as
+// slot_id (its ep0_ring / input_ctx are the shared globals). Reads the config
+// descriptor, finds the HID interrupt IN endpoint, issues SET_CONFIG +
+// SET_PROTOCOL(boot) + Configure Endpoint, and fills *out with the polling state
+// (but does NOT prime it yet - priming is deferred until every device is set up,
+// so control transfers during a later device's enumeration are not confused by an
+// already-armed interrupt endpoint). *out_proto gets the boot protocol
+// (1=keyboard, 2=mouse). Returns 1 on success, 0 on failure.
+static int setup_int_endpoint(int dev_speed, uint32_t dev_route, int root_port,
+                              int dev_tt_slot, int dev_tt_port,
+                              hid_ep_t *out, int *out_proto) {
+    uint8_t *buf = dma_alloc(256, 64);
+    if (control_xfer(0x80, 6, (2 << 8), 0, 9, buf) < 0) return 0;
+    int tlen = buf[2] | (buf[3] << 8);
+    if (tlen > 256) tlen = 256;
+    if (control_xfer(0x80, 6, (2 << 8), 0, tlen, buf) < 0) return 0;
+
+    int ep_addr = 0, ep_mps = 8, ep_interval = 8, in_hid = 0, if_proto = 0, proto = 0;
+    for (int p = 0; p + 2 <= tlen; ) {
+        int blen = buf[p], btype = buf[p + 1];
+        if (blen < 2) break;
+        if (btype == 4) { in_hid = (buf[p + 5] == 3); if_proto = buf[p + 7]; }  // interface
+        else if (btype == 5 && in_hid) {                       // endpoint
+            if ((buf[p + 2] & 0x80) && (buf[p + 3] & 3) == 3) {
+                ep_addr = buf[p + 2] & 0x0f;
+                ep_mps  = (buf[p + 4] | (buf[p + 5] << 8)) & 0x7ff;
+                ep_interval = buf[p + 6];
+                proto = if_proto;
+                break;
+            }
+        }
+        p += blen;
+    }
+    if (!ep_addr) { uart_puts("[XHCI] no HID IN endpoint\n"); return 0; }
+    uart_dec("[XHCI] HID EP ", ep_addr);
+    uart_dec("[XHCI] HID proto ", proto);
+
+    // SET_CONFIGURATION 1, SET_PROTOCOL boot(0).
+    if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[XHCI] SET_CONFIG failed\n"); return 0; }
+    control_xfer(0x21, 0x0b, 0, 0, 0, buf);                    // SET_PROTOCOL (boot)
+
+    int dci  = ep_addr * 2 + 1;                                // IN endpoint DCI
+    int rlen = ep_mps < 8 ? ep_mps : 8;                        // report size (kbd=8, mouse 3/4)
+    epint_ring = dma_alloc(RING_TRBS * sizeof(trb_t), 64);
+    epint_enq = 0; epint_cycle = TRB_CYCLE;
+    report_buf = dma_alloc(8, 64);
+
+    for (int i = 0; i < 33 * ctx_size; i++) input_ctx[i] = 0;
+    uint32_t *icc = (uint32_t *)input_ctx;
+    icc[1] = (1u << 0) | (1u << dci);                          // add slot + this EP
+    // Rebuild the FULL slot context (A0 is set, so it is evaluated): keep the
+    // device's route string / speed / TT, and bump Context Entries to this EP.
+    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
+    slot[0] = (dci << 27) | ((uint32_t)dev_speed << 20) | (dev_route & 0xfffff);
+    slot[1] = (root_port << 16);
+    if (dev_tt_slot)
+        slot[2] = (dev_tt_slot & 0xff) | ((dev_tt_port & 0xff) << 8);
+    uint32_t *epi = ep_ctx(input_ctx + ctx_size, dci);
+    int interval = 6;                                          // ~8ms for FS HID
+    if (ep_interval > 0) interval = 3;                         // leave conservative
+    epi[0] = (interval << 16);
+    epi[1] = (7u << 3) | (ep_mps << 16) | (3u << 1);          // EP type 7 = interrupt IN
+    uint64_t itrp = pa(epint_ring) | 1;
+    epi[2] = (uint32_t)itrp;
+    epi[3] = (uint32_t)(itrp >> 32);
+    epi[4] = ep_mps;                                          // average TRB length
+
+    if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (slot_id << 24)) < 0) {
+        uart_puts("[XHCI] configure EP failed\n"); return 0;
+    }
+
+    out->ready = 1; out->slot = slot_id; out->dci = dci;
+    out->ring = epint_ring; out->enq = epint_enq; out->cyc = epint_cycle;
+    out->buf = report_buf; out->len = rlen;
+    if (out_proto) *out_proto = proto;
+    return 1;
+}
+
+// Route a freshly configured HID endpoint to the keyboard or mouse slot by its
+// boot protocol: 1 = keyboard, 2 = mouse. Anything else (notably a touchpad that
+// only implements the HID report protocol and reports bInterfaceProtocol 0) is
+// NOT a boot device, so we ignore it rather than let it clobber a real keyboard
+// or mouse slot (the CrowView touchpad reports proto 0 and used to overwrite the
+// keyboard). Returns 1 if claimed.
+static int claim_hid(hid_ep_t *ep, int proto) {
+    if (proto == 1) { kbd_ep_st = *ep; uart_puts("[XHCI] keyboard found\n"); return 1; }
+    if (proto == 2) { mou_ep_st = *ep; uart_puts("[XHCI] mouse found\n");    return 1; }
+    uart_dec("[XHCI] ignoring non-boot HID, proto ", proto);
+    return 0;
+}
+
+// Prime an interrupt endpoint with one transfer (arms it to receive a report).
+static void hid_prime(hid_ep_t *e) {
+    ring_push(e->ring, &e->enq, &e->cyc, pa(e->buf), e->len,
+              TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    ring_db(e->slot, e->dci);
+}
+
+// Re-arm an interrupt endpoint after a completed transfer.
+static void hid_rearm(hid_ep_t *e) {
+    ring_push(e->ring, &e->enq, &e->cyc, pa(e->buf), e->len,
+              TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    ring_db(e->slot, e->dci);
+}
+
+static void key_push(char c) {
+    if (!c) return;
+    int nt = (key_tail + 1) % (int)sizeof(key_fifo);
+    if (nt == key_head) return;                  // full: drop oldest-avoiding, just drop new
+    key_fifo[key_tail] = c; key_tail = nt;
+}
+static char key_pop(void) {
+    if (key_head == key_tail) return 0;
+    char c = key_fifo[key_head];
+    key_head = (key_head + 1) % (int)sizeof(key_fifo);
+    return c;
+}
+
+// Drain every currently-available transfer event, routing each completion to the
+// keyboard or mouse interrupt endpoint by (slot, DCI) - both post to the single
+// shared event ring, so this demux is what lets two HID devices coexist. Decoded
+// keys go to key_fifo; mouse movement accumulates in mou_*. Also re-rings idle
+// doorbells to survive the VL805 lost-doorbell race (see run_command).
+static void xhci_pump(void) {
+    static uint32_t idle = 0;
+    trb_t ev;
+    int got = 0;
+    while (next_event(&ev, 1)) {
+        if (TRB_GET_TYPE(ev.control) != TRB_TRANSFER_EVENT) continue;
+        got = 1;
+        int sid = (ev.control >> 24) & 0xff;
+        int eid = (ev.control >> 16) & 0x1f;
+        int cc  = COMP_CODE(ev.status);
+        if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
+            if (cc == 1 || cc == 13) key_push(hid_report_char(kbd_ep_st.buf, kbd_prev));
+            hid_rearm(&kbd_ep_st);
+        } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
+            if (cc == 1 || cc == 13) {
+                int b, dx, dy, w;
+                if (hid_mouse_decode(mou_ep_st.buf, mou_ep_st.len, &b, &dx, &dy, &w)) {
+                    mou_btn = b; mou_dx += dx; mou_dy += dy; mou_wheel += w; mou_have = 1;
+                }
+            }
+            hid_rearm(&mou_ep_st);
+        }
+    }
+    if (got) idle = 0;
+    else if (++idle >= 64) {
+        idle = 0;
+        if (kbd_ep_st.ready) ring_db(kbd_ep_st.slot, kbd_ep_st.dci);
+        if (mou_ep_st.ready) ring_db(mou_ep_st.slot, mou_ep_st.dci);
+    }
+}
+
 int xhci_kbd_init(uintptr_t mmio_base) {
     cap_base = mmio_base;
     arena_off = 0;
-    kbd_ready = 0;
+    kbd_ep_st.ready = 0;
+    mou_ep_st.ready = 0;
+    key_head = key_tail = 0;
+    mou_have = 0; mou_dx = 0; mou_dy = 0; mou_wheel = 0;
 
     // The arena must be non-cacheable so the controller sees our writes.
     mmu_set_noncached(pa(arena), ARENA_SIZE);
@@ -603,9 +846,9 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     // the interrupt endpoint.
     int dev_route = 0, dev_speed = speed, dev_tt_slot = 0, dev_tt_port = 0;
 
-    // Get the device descriptor (18 bytes).
+    // Get the device descriptor (18 bytes), correcting EP0 MPS if needed.
     uint8_t *buf = dma_alloc(256, 64);
-    if (control_xfer(0x80, 6, (1 << 8), 0, 18, buf) < 0) {
+    if (get_device_descriptor(buf, speed) < 0) {
         uart_puts("[XHCI] GET_DESCRIPTOR failed\n"); return 0;
     }
     uart_hex("[XHCI] VID ", buf[8] | (buf[9] << 8));
@@ -620,13 +863,40 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     // hub as its Transaction Translator.
     int cur_slot = hub_slot;             // slot of the device we last addressed
     int depth = 0;                       // number of hubs descended so far
+    // Remember the immediate parent hub of the leaf device, so we can rescan it
+    // afterwards for a second HID device (the mouse next to the keyboard). All
+    // USB-A ports on a Pi 4 share the onboard hub, so keyboard and mouse land on
+    // two of its downstream ports.
+    int leaf_hub_slot = 0, leaf_hub_speed = 0, leaf_hub_tt_slot = 0, leaf_hub_tt_port = 0;
+    uint32_t leaf_hub_route = 0;
+    int leaf_dport = 0;
+    // The rescan below issues hub-class control transfers, but control_xfer talks
+    // to whatever device address_device_on last selected (ep0_ring/enq/cycle +
+    // slot_id). After we descend to the leaf device those globals point at the
+    // leaf, not the hub, so we snapshot the hub's control pipe here and restore it
+    // before rescanning - otherwise the hub request goes to the keyboard and STALLs.
+    trb_t   *leaf_hub_ep0_ring  = 0;
+    uint32_t leaf_hub_ep0_enq   = 0, leaf_hub_ep0_cycle = 0;
+    int      leaf_hub_slot_id   = 0;
     while (buf[4] == 0x09) {             // current device is a hub
         if (depth >= 5) { uart_puts("[XHCI] hub chain too deep\n"); return 0; }
+        // Snapshot this hub (cur_slot) as the potential leaf parent before we
+        // descend and overwrite dev_* with the child's topology.
+        leaf_hub_slot = cur_slot; leaf_hub_speed = dev_speed; leaf_hub_route = dev_route;
+        leaf_hub_tt_slot = dev_tt_slot; leaf_hub_tt_port = dev_tt_port;
         int dport = 0, dspeed = 0;
         // Configure cur_slot as a hub (preserving its own route/TT) and find the
         // next device down.
         if (!hub_enumerate(buf, port, cur_slot, dev_speed, dev_route,
-                           dev_tt_slot, dev_tt_port, &dport, &dspeed)) return 0;
+                           dev_tt_slot, dev_tt_port, 0 /*skip*/, 1 /*first_time*/,
+                           &dport, &dspeed)) return 0;
+        leaf_dport = dport;
+        // Freeze the hub's control pipe now (still selected) so the post-descent
+        // rescan can re-target the hub after the leaf device is addressed.
+        leaf_hub_ep0_ring  = ep0_ring;
+        leaf_hub_ep0_enq   = ep0_enq;
+        leaf_hub_ep0_cycle = ep0_cycle;
+        leaf_hub_slot_id   = slot_id;
         dev_route |= (uint32_t)(dport & 0xf) << (4 * depth);   // append this hub's port
         depth++;
         if (dspeed < 3) { dev_tt_slot = cur_slot; dev_tt_port = dport; }  // FS/LS -> TT
@@ -634,7 +904,7 @@ int xhci_kbd_init(uintptr_t mmio_base) {
         cur_slot = address_device_on(port, dev_route, dspeed, dev_tt_slot, dev_tt_port);
         if (!cur_slot) return 0;
         dev_speed = dspeed;
-        if (control_xfer(0x80, 6, (1 << 8), 0, 18, buf) < 0) {
+        if (get_device_descriptor(buf, dspeed) < 0) {
             uart_puts("[XHCI] downstream GET_DESCRIPTOR failed\n"); return 0;
         }
         uart_dec("[XHCI] tier ", depth);
@@ -644,99 +914,73 @@ int xhci_kbd_init(uintptr_t mmio_base) {
         uart_hex("[XHCI]   class ", buf[4]);
     }
 
-    // Get configuration descriptor (first 9 bytes, then full) and find the HID
-    // interrupt IN endpoint.
-    if (control_xfer(0x80, 6, (2 << 8), 0, 9, buf) < 0) return 0;
-    int tlen = buf[2] | (buf[3] << 8);
-    if (tlen > 256) tlen = 256;
-    if (control_xfer(0x80, 6, (2 << 8), 0, tlen, buf) < 0) return 0;
+    // Configure the leaf device's interrupt endpoint and classify it (a keyboard
+    // reports boot protocol 1, a mouse 2). Priming is deferred (see below).
+    int proto = 0;
+    hid_ep_t first;
+    if (!setup_int_endpoint(dev_speed, dev_route, port, dev_tt_slot, dev_tt_port,
+                            &first, &proto)) return 0;
+    claim_hid(&first, proto);
 
-    int ep_addr = 0, ep_mps = 8, ep_interval = 8, in_hid = 0;
-    for (int p = 0; p + 2 <= tlen; ) {
-        int blen = buf[p], btype = buf[p + 1];
-        if (blen < 2) break;
-        if (btype == 4) in_hid = (buf[p + 5] == 3);            // interface, class HID
-        else if (btype == 5 && in_hid) {                       // endpoint
-            if ((buf[p + 2] & 0x80) && (buf[p + 3] & 3) == 3) {
-                ep_addr = buf[p + 2] & 0x0f;
-                ep_mps  = (buf[p + 4] | (buf[p + 5] << 8)) & 0x7ff;
-                ep_interval = buf[p + 6];
-                break;
+    // Look for a SECOND HID device on the same (leaf's parent) hub: the mouse
+    // that sits next to the keyboard (or vice versa). All Pi 4 USB-A ports share
+    // the onboard hub, so both devices are two of its downstream ports.
+    if (leaf_hub_slot) {
+        // Re-select the hub's control pipe: the leaf device is currently selected,
+        // so hub-class requests would otherwise be sent to it (and STALL).
+        ep0_ring  = leaf_hub_ep0_ring;
+        ep0_enq   = leaf_hub_ep0_enq;
+        ep0_cycle = leaf_hub_ep0_cycle;
+        slot_id   = leaf_hub_slot_id;
+        uart_puts("[XHCI] rescanning hub for 2nd HID device\n");
+        int dport2 = 0, dspeed2 = 0;
+        if (hub_enumerate(buf, port, leaf_hub_slot, leaf_hub_speed, leaf_hub_route,
+                          leaf_hub_tt_slot, leaf_hub_tt_port,
+                          leaf_dport /*skip the first device's port*/, 0 /*rescan*/,
+                          &dport2, &dspeed2)) {
+            int child_nibble = depth - 1;                     // last hub's children tier
+            uint32_t route2 = leaf_hub_route | ((uint32_t)(dport2 & 0xf) << (4 * child_nibble));
+            int tt2_slot = leaf_hub_tt_slot, tt2_port = leaf_hub_tt_port;
+            if (dspeed2 < 3) { tt2_slot = leaf_hub_slot; tt2_port = dport2; }  // FS/LS -> TT
+            int s2 = address_device_on(port, route2, dspeed2, tt2_slot, tt2_port);
+            if (s2 && get_device_descriptor(buf, dspeed2) >= 0) {
+                int proto2 = 0;
+                hid_ep_t second;
+                if (setup_int_endpoint(dspeed2, route2, port, tt2_slot, tt2_port,
+                                       &second, &proto2))
+                    claim_hid(&second, proto2);
             }
         }
-        p += blen;
-    }
-    if (!ep_addr) { uart_puts("[XHCI] no HID IN endpoint\n"); return 0; }
-    uart_dec("[XHCI] kbd EP ", ep_addr);
-
-    // SET_CONFIGURATION 1, SET_PROTOCOL boot(0).
-    if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[XHCI] SET_CONFIG failed\n"); return 0; }
-    control_xfer(0x21, 0x0b, 0, 0, 0, buf);                    // SET_PROTOCOL (boot)
-
-    // Configure the interrupt IN endpoint.
-    kbd_dci = ep_addr * 2 + 1;                                 // IN endpoint DCI
-    epint_ring = dma_alloc(RING_TRBS * sizeof(trb_t), 64);
-    epint_enq = 0; epint_cycle = TRB_CYCLE;
-    report_buf = dma_alloc(8, 64);
-
-    for (int i = 0; i < 33 * ctx_size; i++) input_ctx[i] = 0;
-    uint32_t *icc = (uint32_t *)input_ctx;
-    icc[1] = (1u << 0) | (1u << kbd_dci);                      // add slot + this EP
-    // Rebuild the FULL slot context (A0 is set, so it is evaluated): keep the
-    // device's route string / speed / TT, and bump Context Entries to this EP.
-    uint32_t *slot = slot_ctx(input_ctx + ctx_size);
-    slot[0] = (kbd_dci << 27) | ((uint32_t)dev_speed << 20) | (dev_route & 0xfffff);
-    slot[1] = (port << 16);
-    if (dev_tt_slot)
-        slot[2] = (dev_tt_slot & 0xff) | ((dev_tt_port & 0xff) << 8);
-    uint32_t *epi = ep_ctx(input_ctx + ctx_size, kbd_dci);
-    int interval = 6;                                          // ~8ms for FS HID
-    if (ep_interval > 0) interval = 3;                         // leave conservative
-    epi[0] = (interval << 16);
-    epi[1] = (7u << 3) | (ep_mps << 16) | (3u << 1);          // EP type 7 = interrupt IN
-    uint64_t itrp = pa(epint_ring) | 1;
-    epi[2] = (uint32_t)itrp;
-    epi[3] = (uint32_t)(itrp >> 32);
-    epi[4] = ep_mps;                                          // average TRB length
-
-    if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (slot_id << 24)) < 0) {
-        uart_puts("[XHCI] configure EP failed\n"); return 0;
     }
 
-    // Prime the interrupt endpoint with one transfer.
-    ring_push(epint_ring, &epint_enq, &epint_cycle, pa(report_buf), 8,
-              TRB_TYPE(TRB_NORMAL) | TRB_IOC);
-    ring_db(slot_id, kbd_dci);
+    // All devices are configured; NOW arm their interrupt endpoints. Priming
+    // earlier would let an interrupt completion land on the shared event ring
+    // mid-enumeration and be mistaken for a control-transfer completion.
+    if (kbd_ep_st.ready) hid_prime(&kbd_ep_st);
+    if (mou_ep_st.ready) hid_prime(&mou_ep_st);
 
-    kbd_ready = 1;
-    uart_puts("[XHCI] keyboard ready\n");
-    return 1;
+    if (mou_ep_st.ready) uart_puts("[XHCI] mouse ready\n");
+    if (kbd_ep_st.ready) uart_puts("[XHCI] keyboard ready\n");
+    return kbd_ep_st.ready;
 }
 
 char xhci_kbd_getchar(void) {
-    if (!kbd_ready) return 0;
+    if (!kbd_ep_st.ready) return 0;
+    xhci_pump();
+    return key_pop();
+}
 
-    // Poll the event ring briefly; on a completed interrupt transfer, decode the
-    // HID report and re-arm the endpoint for the next one.
-    static uint32_t idle = 0;
-    trb_t ev;
-    char out = 0;
-    if (next_event(&ev, 1)) {
-        idle = 0;
-        if (TRB_GET_TYPE(ev.control) == TRB_TRANSFER_EVENT) {
-            int cc = COMP_CODE(ev.status);
-            if (cc == 1 || cc == 13) out = hid_report_char(report_buf, kbd_prev);
-            // Re-arm the interrupt endpoint for the next report.
-            ring_push(epint_ring, &epint_enq, &epint_cycle, pa(report_buf), 8,
-                      TRB_TYPE(TRB_NORMAL) | TRB_IOC);
-            ring_db(slot_id, kbd_dci);
-        }
-    } else if (++idle >= 64) {
-        // Periodically re-ring the endpoint doorbell. The VL805 can miss a
-        // doorbell (same race as the command/control rings); without this nudge
-        // a lost prime/re-arm doorbell would stall keyboard polling forever.
-        idle = 0;
-        ring_db(slot_id, kbd_dci);
-    }
-    return out;
+// --- mouse (real hardware) --------------------------------------------------
+int xhci_mouse_present(void) { return mou_ep_st.ready; }
+
+int xhci_mouse_poll(int *btn, int *dx, int *dy, int *wheel) {
+    if (!mou_ep_st.ready) return 0;
+    xhci_pump();
+    if (!mou_have) return 0;
+    if (btn)   *btn   = mou_btn;
+    if (dx)    *dx    = mou_dx;
+    if (dy)    *dy    = mou_dy;
+    if (wheel) *wheel = mou_wheel;
+    mou_have = 0; mou_dx = 0; mou_dy = 0; mou_wheel = 0;
+    return 1;
 }

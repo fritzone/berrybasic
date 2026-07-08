@@ -2,6 +2,7 @@
 #include "console.h"
 #include "storage.h"
 #include "seed.h"
+#include "image.h"
 #include "basic.h"
 
 // ===========================================================================
@@ -542,12 +543,47 @@ static void str_store(var_t *v, const char *src, int len) {
     if (!g_err) v->is_str = 1;
 }
 
+// Memory reserved by `DIM name size`: a byte arena that BASIC hands out real
+// addresses into, for use with the ?/!/$ indirection operators and for passing
+// buffers to native seeds. Reset (like the variable/array pools) on RUN/NEW.
+#define DIM_HEAP_SIZE (256 * 1024)   // room for indirection buffers and sprites (GGET/GPUT)
+static unsigned char dim_heap[DIM_HEAP_SIZE];
+static int           dim_top = 0;
+
 static void clear_vars(void) {       // BASIC CLR: scalars + arrays + string heap
     var_n = 0;
     gcheap_top = 0;
     arr_n = 0;
     arr_nums_top = 0;
     arr_strs_top = 0;
+    dim_top = 0;
+    img_sprite_reset();      // free image-loaded sprites
+}
+
+// Reserve `nbytes` from the DIM arena, 8-byte aligned; returns the base address
+// (as an integer that fits exactly in a double), or 0 if the arena is full.
+static long dim_reserve(int nbytes) {
+    dim_top = (dim_top + 7) & ~7;
+    if (nbytes < 0 || dim_top + nbytes > DIM_HEAP_SIZE) { err("Out of memory"); return 0; }
+    long base = (long)(uintptr_t)&dim_heap[dim_top];
+    dim_top += nbytes;
+    return base;
+}
+
+// Alignment-safe peek/poke (byte-wise, so -mstrict-align never faults). Words
+// are little-endian 32-bit; reads sign-extend. `$` strings are CR-terminated.
+static long mem_peekb(long a) { return *(volatile unsigned char *)(uintptr_t)a; }
+static void mem_pokeb(long a, long v) { *(volatile unsigned char *)(uintptr_t)a = (unsigned char)v; }
+static long mem_peekw(long a) {
+    const volatile unsigned char *p = (const volatile unsigned char *)(uintptr_t)a;
+    unsigned w = (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+    return (long)(int)w;
+}
+static void mem_pokew(long a, long v) {
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)a;
+    unsigned w = (unsigned)v;
+    p[0] = (unsigned char)w; p[1] = (unsigned char)(w >> 8);
+    p[2] = (unsigned char)(w >> 16); p[3] = (unsigned char)(w >> 24);
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +594,9 @@ enum {
     T_EOL, T_NUM, T_STR, T_VAR, T_KW, T_LABEL,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_CARET,
     T_LP, T_RP, T_COMMA, T_SEMI, T_COLON, T_SQUOTE,
-    T_EQ, T_NE, T_LT, T_GT, T_LE, T_GE
+    T_EQ, T_NE, T_LT, T_GT, T_LE, T_GE,
+    T_QUERY, T_PLING, T_DOLLAR,         // ? ! $ memory indirection
+    T_HASH                              // # file channel prefix
 };
 
 enum {
@@ -573,10 +611,16 @@ enum {
     KW_DIV, KW_MOD, KW_AND, KW_OR, KW_EOR, KW_NOT,    // operator keywords
     KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
+    KW_LINE, KW_RECTANGLE, KW_CIRCLE, KW_ELLIPSE, KW_FILL,         // shape commands
+    KW_GGET, KW_GPUT, KW_SAVESPRITE,                              // sprite capture / stamp / save
     KW_SAVE, KW_LOAD, KW_CAT, KW_DIR, KW_DELETE,                    // storage statements
+    KW_MKDIR, KW_CD, KW_RMDIR, KW_PWD,                              // directory statements
+    KW_BPUT, KW_CLOSE,                                              // file I/O statements
     KW_SEED,                                                        // load a native seed
     KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
+    KW_MOUSE,                                                       // MOUSE x,y,b statement
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
+    KW_MOUSEX, KW_MOUSEY, KW_MOUSEB,                  // mouse pointer x / y / buttons
     // Functions from the "standard library"
     KW_ABS, KW_INT, KW_SGN, KW_SQR, KW_SIN, KW_COS, KW_TAN, KW_ATN,
     KW_LOG, KW_EXP, KW_DEG, KW_RAD, KW_ACS, KW_ASN,
@@ -585,7 +629,12 @@ enum {
     KW_POINT,                                         // POINT(x,y) graphics function
     KW_SHL, KW_SHR, KW_ASR, KW_ROL, KW_ROR,           // bitwise shift / rotate functions
     KW_CALL, KW_CALLS,                                // CALL()/CALL$(): invoke a native seed
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_CALLS,
+    KW_OPENIN, KW_OPENOUT, KW_OPENUP,                 // open a file -> channel
+    KW_BGET, KW_EOF, KW_EXT, KW_PTR,                  // BGET#/EOF#/EXT#/PTR# channel functions
+    KW_RGB,                                           // RGB(r,g,b) -> packed truecolour value
+    KW_LOADSPRITE,                                    // LOADSPRITE("file") -> sprite address
+    KW_SPRW, KW_SPRH,                                 // SPRW(addr)/SPRH(addr): sprite size
+    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_SPRH,
     KW_TAB, KW_SPC                                    // PRINT-only modifiers
 };
 
@@ -611,11 +660,18 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "MODE",  KW_MODE  }, { "GCOL", KW_GCOL  }, { "PLOT",   KW_PLOT   },
     { "MOVE",  KW_MOVE  }, { "DRAW", KW_DRAW  }, { "CLG",    KW_CLG    },
     { "POINT", KW_POINT },
+    { "LINE",  KW_LINE  }, { "RECTANGLE", KW_RECTANGLE }, { "CIRCLE", KW_CIRCLE },
+    { "ELLIPSE", KW_ELLIPSE }, { "FILL", KW_FILL }, { "RGB", KW_RGB },
+    { "LOADSPRITE", KW_LOADSPRITE }, { "SPRW", KW_SPRW }, { "SPRH", KW_SPRH },
+    { "GGET",  KW_GGET  }, { "GPUT", KW_GPUT }, { "SAVESPRITE", KW_SAVESPRITE },
     { "SAVE",  KW_SAVE  }, { "LOAD", KW_LOAD  }, { "CAT",    KW_CAT    },
     { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE }, { "SEED", KW_SEED },
+    { "MKDIR", KW_MKDIR }, { "CD", KW_CD }, { "RMDIR", KW_RMDIR }, { "PWD", KW_PWD },
     { "AUTO",  KW_AUTO  }, { "RENUMBER", KW_RENUMBER }, { "EDIT", KW_EDIT },
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },
     { "POS",   KW_POS   }, { "VPOS", KW_VPOS  },
+    { "MOUSE", KW_MOUSE }, { "MOUSEX", KW_MOUSEX },
+    { "MOUSEY", KW_MOUSEY }, { "MOUSEB", KW_MOUSEB },
     { "PI",    KW_PI    },
     { "ABS",   KW_ABS   }, { "INT",  KW_INT   }, { "SGN",    KW_SGN    },
     { "SQR",   KW_SQR   }, { "SIN",  KW_SIN   }, { "COS",    KW_COS    },
@@ -630,6 +686,9 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "SHL",   KW_SHL   }, { "SHR",  KW_SHR   }, { "ASR",    KW_ASR    },
     { "ROL",   KW_ROL   }, { "ROR",  KW_ROR   },
     { "CALL",  KW_CALL  }, { "CALL$", KW_CALLS },
+    { "OPENIN", KW_OPENIN }, { "OPENOUT", KW_OPENOUT }, { "OPENUP", KW_OPENUP },
+    { "BGET",  KW_BGET  }, { "BPUT", KW_BPUT }, { "EOF", KW_EOF },
+    { "EXT",   KW_EXT   }, { "PTR",  KW_PTR  }, { "CLOSE", KW_CLOSE },
     { "TAB",   KW_TAB   }, { "SPC",  KW_SPC   },
 };
 static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
@@ -761,6 +820,10 @@ static void lex_next(void) {
         case '>':
             if (*lx == '=') { lx++; tok = T_GE; return; }
             tok = T_GT; return;
+        case '?': tok = T_QUERY;  return;    // byte indirection
+        case '!': tok = T_PLING;  return;    // 32-bit word indirection
+        case '$': tok = T_DOLLAR; return;    // string indirection (a leading $)
+        case '#': tok = T_HASH;   return;    // file channel prefix (BGET#, PTR#, ...)
         default: err("I don't recognise that character"); tok = T_EOL; return;
     }
 }
@@ -887,6 +950,7 @@ static double rnd_float(void) {         // pseudo-random in [0.0, 1.0)
 }
 
 static value_t eval_primary(void);      // a function argument is a factor (primary)
+static value_t prim_base(void);         // a primary without the ?/! indirection postfix
 
 // Parse a single function argument as the next factor: a primary expression,
 // which is either a parenthesised group or a bare value. This makes the
@@ -898,6 +962,21 @@ static double factor_num(void) {
     if (g_err) return 0;
     if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return 0; }
     return v.num;
+}
+
+// Parse a file channel operand: the '#' prefix followed by a numeric factor (so
+// BGET#ch+1 is (BGET#ch)+1, and BGET#(a+1) uses parentheses). Returns the channel.
+static int read_channel(void) {
+    if (tok != T_HASH) { err("Expected '#' before a file channel"); return 0; }
+    lex_next();
+    return (int)factor_num();
+}
+
+// Copy a BASIC string value into a NUL-terminated C filename buffer.
+static void copy_fname(value_t s, char *out, int outsz) {
+    int n = (s.len < outsz - 1) ? s.len : outsz - 1;
+    for (int i = 0; i < n; i++) out[i] = s.str[i];
+    out[n] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,6 +1230,26 @@ static value_t eval_function(int fn) {
         case KW_ACS: { double x = factor_num();         // arccos = pi/2 - arcsin
                        if (x < -1 || x > 1) { err("Invalid argument"); return v_num(0); }
                        return v_num(BAS_HALFPI - datan(x / dsqrt(1 - x * x))); }
+
+        // File I/O value functions. OPEN* take a filename string; the BGET/EOF/
+        // EXT/PTR family take a '#channel'.
+        case KW_OPENIN:  { value_t s = need_str(); if (g_err) return v_num(0);
+                           char nm[64]; copy_fname(s, nm, sizeof nm);
+                           return v_num((double)stg_open(nm, STG_M_READ)); }
+        case KW_OPENOUT: { value_t s = need_str(); if (g_err) return v_num(0);
+                           char nm[64]; copy_fname(s, nm, sizeof nm);
+                           return v_num((double)stg_open(nm, STG_M_WRITE)); }
+        case KW_OPENUP:  { value_t s = need_str(); if (g_err) return v_num(0);
+                           char nm[64]; copy_fname(s, nm, sizeof nm);
+                           return v_num((double)stg_open(nm, STG_M_UPDATE)); }
+        case KW_BGET: { int ch = read_channel(); if (g_err) return v_num(0);
+                        return v_num((double)stg_getb(ch)); }   // -1 at end of file
+        case KW_EOF:  { int ch = read_channel(); if (g_err) return v_num(0);
+                        return v_num(stg_eof(ch) ? -1.0 : 0.0); }
+        case KW_EXT:  { int ch = read_channel(); if (g_err) return v_num(0);
+                        return v_num((double)stg_size(ch)); }
+        case KW_PTR:  { int ch = read_channel(); if (g_err) return v_num(0);
+                        return v_num((double)stg_tell(ch)); }
     }
 
     // All other functions keep the parenthesised form: FUNC(arg[,arg...]).
@@ -1178,6 +1277,14 @@ static value_t eval_function(int fn) {
         case KW_POINT: { int px = (int)need_num(); if (!expect(T_COMMA)) break;
                          int py = (int)need_num(); if (g_err) break;
                          result = v_num((double)con_point(px, py)); break; }
+        case KW_RGB: { int r = (int)need_num(); if (!expect(T_COMMA)) break;
+                       int g = (int)need_num(); if (!expect(T_COMMA)) break;
+                       int b = (int)need_num(); if (g_err) break;
+                       // Tagged (bit 30) so GCOL can tell a packed colour from a
+                       // logical colour index; low 24 bits are 0xRRGGBB.
+                       long v = 0x40000000L | ((long)(r & 255) << 16)
+                              | ((long)(g & 255) << 8) | (long)(b & 255);
+                       result = v_num((double)v); break; }
         case KW_INSTR: { value_t a = need_str(); if (!expect(T_COMMA)) break;
                          value_t b = need_str(); if (g_err) break;
                          int start = 0;
@@ -1255,14 +1362,58 @@ static value_t eval_function(int fn) {
                          result = (g_seed_retstr_len >= 0)
                                   ? str_in_scratch(g_seed_retstr, g_seed_retstr_len)
                                   : v_str(0, 0); break; }
+        // LOADSPRITE("file") decodes an image into a sprite and returns its
+        // address (0 on failure). SPRW/SPRH read the width/height from a sprite's
+        // header, so a program can position or scale it.
+        case KW_LOADSPRITE: { value_t s = need_str(); if (g_err) break;
+                              char nm[64]; copy_fname(s, nm, sizeof nm);
+                              result = v_num((double)img_load_sprite(nm)); break; }
+        case KW_SPRW: case KW_SPRH: {
+                          long a = (long)need_num(); if (g_err) break;
+                          long v = 0;
+                          if (a) {
+                              const unsigned char *p = (const unsigned char *)(uintptr_t)a;
+                              if (fn == KW_SPRH) p += 4;
+                              v = (long)p[0] | ((long)p[1] << 8) |
+                                  ((long)p[2] << 16) | ((long)p[3] << 24);
+                          }
+                          result = v_num((double)v); break; }
         default: err("Syntax error in expression"); break;
     }
     if (!g_err) expect(T_RP);
     return result;
 }
 
-static value_t eval_primary(void) {
+// Read a CR-terminated string from memory (the BBC $ indirection).
+static value_t mem_read_str(long a) {
+    const unsigned char *p = (const unsigned char *)(uintptr_t)a;
+    int n = 0;
+    while (n < MAX_STR && p[n] != 0x0D) n++;
+    return str_in_scratch((const char *)p, n);
+}
+static void mem_write_str(long a, const char *s, int len) {
+    unsigned char *p = (unsigned char *)(uintptr_t)a;
+    if (len > MAX_STR) len = MAX_STR;
+    for (int i = 0; i < len; i++) p[i] = (unsigned char)s[i];
+    p[len] = 0x0D;                                   // carriage-return terminator
+}
+
+static value_t prim_base(void) {
     if (g_err) return v_num(0);
+    // Unary indirection: ?addr (byte), !addr (word), $addr (string). The operand
+    // is a primary, so ?(A+1) needs parentheses; A?1 is the binary form below.
+    if (tok == T_QUERY) { lex_next(); value_t a = prim_base();
+        if (g_err) return v_num(0);
+        if (a.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
+        return v_num((double)mem_peekb((long)a.num)); }
+    if (tok == T_PLING) { lex_next(); value_t a = prim_base();
+        if (g_err) return v_num(0);
+        if (a.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
+        return v_num((double)mem_peekw((long)a.num)); }
+    if (tok == T_DOLLAR) { lex_next(); value_t a = prim_base();
+        if (g_err) return v_num(0);
+        if (a.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
+        return mem_read_str((long)a.num); }
     if (tok == T_NUM) { value_t v = v_num(tok_num); lex_next(); return v; }
     if (tok == T_STR) {
         int n = 0; while (tok_str[n]) n++;
@@ -1292,6 +1443,9 @@ static value_t eval_primary(void) {
             case KW_FALSE: lex_next(); return v_num(0.0);
             case KW_POS:   lex_next(); return v_num(con_pos());
             case KW_VPOS:  lex_next(); return v_num(con_vpos());
+            case KW_MOUSEX: { int x; lex_next(); con_mouse(&x, 0, 0); return v_num(x); }
+            case KW_MOUSEY: { int y; lex_next(); con_mouse(0, &y, 0); return v_num(y); }
+            case KW_MOUSEB: { int b; lex_next(); con_mouse(0, 0, &b); return v_num(b); }
             case KW_TIME:  lex_next();
                            return v_num((double)((long long)(con_micros() / 10000ULL) - time_base));
             case KW_FN:  { value_t v = v_num(0); call_proc(1, &v); return v; }
@@ -1308,6 +1462,24 @@ static value_t eval_primary(void) {
     }
     err("Expected a value or expression");
     return v_num(0);
+}
+
+// A primary, plus the binary indirection postfix: base?offset (byte at base+off)
+// and base!offset (word at base+off). Binds tighter than the arithmetic ops, so
+// P%?I + 1 is (P%?I) + 1, and the offset is itself a primary.
+static value_t eval_primary(void) {
+    value_t a = prim_base();
+    while (!g_err && (tok == T_QUERY || tok == T_PLING)) {
+        int op = tok;
+        lex_next();
+        value_t off = prim_base();
+        if (g_err) return a;
+        if (a.is_str || off.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
+        long addr = (long)a.num + (long)off.num;
+        a = (op == T_QUERY) ? v_num((double)mem_peekb(addr))
+                            : v_num((double)mem_peekw(addr));
+    }
+    return a;
 }
 
 // Exponentiation, tighter than unary minus (so -2^2 = -4), left-associative.
@@ -1581,8 +1753,92 @@ static void exec_statement(void);   // forward decl (IF runs a sub-statement)
 
 // PRINT items separated by ; (close up), , (next field), ' (newline), TAB(n),
 // SPC(n). Column is tracked from the start of this PRINT (assumed column 0).
+// --- typed record I/O (PRINT# / INPUT#) -------------------------------------
+// Each item written by PRINT# is a self-describing record:
+//   number : 0x40, then 8 bytes IEEE-754 double, little-endian
+//   string : 0x00, then a 1-byte length (0..255), then that many bytes
+// INPUT# reads the tag and reconstructs the value into the target variable.
+#define REC_NUM  0x40
+#define REC_STR  0x00
+
+static int rec_put_num(int ch, double x) {
+    union { double d; unsigned char b[8]; } u; u.d = x;
+    if (stg_putb(ch, REC_NUM) < 0) return -1;
+    for (int i = 0; i < 8; i++) if (stg_putb(ch, u.b[i]) < 0) return -1;
+    return 0;
+}
+static int rec_put_str(int ch, const char *s, int len) {
+    if (len < 0) len = 0;
+    if (len > 255) len = 255;
+    if (stg_putb(ch, REC_STR) < 0) return -1;
+    if (stg_putb(ch, len & 0xFF) < 0) return -1;
+    for (int i = 0; i < len; i++) if (stg_putb(ch, (unsigned char)s[i]) < 0) return -1;
+    return 0;
+}
+
+// PRINT# ch, item, item, ... : write each value as a typed record.
+static void stmt_print_file(void) {
+    int ch = read_channel();
+    if (g_err) return;
+    while (tok == T_COMMA || tok == T_SEMI) {
+        lex_next();
+        if (tok == T_EOL || tok == T_COLON) break;      // trailing separator
+        value_t v = eval_expr();
+        if (g_err) return;
+        int r = v.is_str ? rec_put_str(ch, v.str, v.len) : rec_put_num(ch, v.num);
+        if (r < 0) { err("File write error"); return; }
+    }
+}
+
+// INPUT# ch, var, var, ... : read typed records back into variables/array elements.
+static void stmt_input_file(void) {
+    int ch = read_channel();
+    if (g_err) return;
+    while (tok == T_COMMA || tok == T_SEMI) {
+        lex_next();
+        if (tok != T_VAR) { err("Expected a variable name"); return; }
+        char name[NAME_LEN]; s_copy(name, tok_var, NAME_LEN);
+        int isstr = name_is_str(name);
+        lex_next();
+        int is_arr = 0, idx = 0; arr_t *a = 0; var_t *var = 0;
+        if (tok == T_LP) { if (!arr_elem(name, isstr, &idx, &a)) return; is_arr = 1; }
+        else             { var = var_find(name); if (!var) return; }
+
+        int tag = stg_getb(ch);
+        if (tag < 0) { err("End of file"); return; }
+        if (tag == REC_NUM) {
+            if (isstr) { err("Type mismatch: file record is a number"); return; }
+            union { double d; unsigned char b[8]; } u;
+            for (int i = 0; i < 8; i++) {
+                int by = stg_getb(ch);
+                if (by < 0) { err("End of file"); return; }
+                u.b[i] = (unsigned char)by;
+            }
+            if (is_arr) arr_nums[idx] = trunc_int(a->is_int, u.d);
+            else        var->num      = trunc_int(var->is_int, u.d);
+        } else if (tag == REC_STR) {
+            if (!isstr) { err("Type mismatch: file record is a string"); return; }
+            int len = stg_getb(ch);
+            if (len < 0) { err("End of file"); return; }
+            static char sb[MAX_STR];
+            for (int i = 0; i < len; i++) {
+                int by = stg_getb(ch);
+                if (by < 0) { err("End of file"); return; }
+                sb[i] = (char)by;
+            }
+            if (is_arr) str_store_to(&arr_strs[idx], sb, len);
+            else        str_store(var, sb, len);
+        } else {
+            err("File is not a PRINT# record");
+            return;
+        }
+        if (g_err) return;
+    }
+}
+
 static void stmt_print(void) {
     lex_next();                              // consume PRINT
+    if (tok == T_HASH) { stmt_print_file(); return; }
     int col = 0;
     int trailing_sep = 0;                    // line ended with a separator -> no newline
     while (tok != T_EOL && tok != T_COLON && !(tok == T_KW && tok_kw == KW_ELSE)) {
@@ -1640,6 +1896,24 @@ static void stmt_let(int had_let) {
         return;
     }
 
+    if (tok == T_QUERY || tok == T_PLING) {  // poke: P%?off = v (byte) / P%!off = v (word)
+        if (isstr) { err("Type mismatch: numbers and text can't be mixed"); return; }
+        int op = tok;
+        var_t *bv = var_find(name);
+        long base = bv ? (long)bv->num : 0;
+        lex_next();
+        value_t off = prim_base();           // offset is a primary (tight)
+        if (g_err) return;
+        if (off.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
+        long addr = base + (long)off.num;
+        if (tok != T_EQ) { err("Expected '='"); return; }
+        lex_next();
+        double v = need_num();
+        if (g_err) return;
+        if (op == T_QUERY) mem_pokeb(addr, (long)v); else mem_pokew(addr, (long)v);
+        return;
+    }
+
     if (tok != T_EQ) { err("Expected '='"); return; }
     lex_next();
     value_t v = eval_expr();
@@ -1652,6 +1926,29 @@ static void stmt_let(int had_let) {
     } else {
         if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
         var->num = trunc_int(var->is_int, v.num);
+    }
+}
+
+// Unary indirection poke statement: ?addr = v (byte), !addr = v (word),
+// $addr = s$ (CR-terminated string). The address is a primary, so use
+// parentheses for an arithmetic address: ?(P%+1) = v  (or write P%?1 = v).
+static void stmt_poke(void) {
+    int op = tok;                            // T_QUERY / T_PLING / T_DOLLAR
+    lex_next();
+    value_t addrv = prim_base();
+    if (g_err) return;
+    if (addrv.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
+    long addr = (long)addrv.num;
+    if (tok != T_EQ) { err("Expected '='"); return; }
+    lex_next();
+    if (op == T_DOLLAR) {
+        value_t s = need_str();
+        if (g_err) return;
+        mem_write_str(addr, s.str, s.len);
+    } else {
+        double v = need_num();
+        if (g_err) return;
+        if (op == T_QUERY) mem_pokeb(addr, (long)v); else mem_pokew(addr, (long)v);
     }
 }
 
@@ -1885,11 +2182,21 @@ static void stmt_endcase(void) {
     if (case_sp > 0) case_sp--;
 }
 
+// COLOUR n            : text colour (0..7 foreground, 128..135 background)
+// COLOUR l, r, g, b   : redefine logical colour l's palette entry to an RGB value
 static void stmt_colour(void) {
     lex_next();                              // consume COLOUR
-    int c = (int)need_num();
+    int l = (int)need_num();
     if (g_err) return;
-    con_colour(c);                           // BBC COLOUR n (foreground 0..7)
+    if (tok == T_COMMA) {                     // palette redefinition
+        lex_next();
+        int r = (int)need_num(); if (!expect(T_COMMA)) return;
+        int g = (int)need_num(); if (!expect(T_COMMA)) return;
+        int b = (int)need_num(); if (g_err) return;
+        con_palette(l, r, g, b);
+        return;
+    }
+    con_colour(l);                           // BBC COLOUR n (foreground 0..7)
 }
 
 // LOCAL var[,var...] : save the named variables' current values (restored when
@@ -1999,7 +2306,18 @@ static void stmt_dim(void) {
         s_copy(name, tok_var, NAME_LEN);
         int isstr = name_is_str(name);
         lex_next();
-        if (tok != T_LP) { err("Expected '(' after the array name"); return; }
+
+        if (tok != T_LP) {                   // DIM name <size>: reserve a byte block
+            if (isstr) { err("Reserve memory into a numeric variable"); return; }
+            double szd = need_num();         // DIM P% 100 reserves 101 bytes (0..100)
+            if (g_err) return;
+            long base = dim_reserve((int)szd + 1);
+            if (g_err) return;
+            var_t *v = var_find(name);
+            if (v) v->num = trunc_int(v->is_int, (double)base);
+            if (tok == T_COMMA) { lex_next(); continue; }
+            break;
+        }
 
         int subs[MAX_DIMS];
         int nsub;
@@ -2019,6 +2337,7 @@ static void stmt_dim(void) {
 
 static void stmt_input(void) {
     lex_next();                              // consume INPUT
+    if (tok == T_HASH) { stmt_input_file(); return; }   // INPUT# ch, var, ...
     if (tok == T_STR) {                      // optional prompt:  INPUT "NAME"; A$
         int n = 0; while (tok_str[n]) n++;
         con_putsn(tok_str, n);
@@ -2055,6 +2374,28 @@ static void stmt_input(void) {
         if (inbuf[ip] == ',') ip++;
         if (tok == T_COMMA) { lex_next(); continue; }   // more variables to fill
         break;
+    }
+}
+
+// MOUSE x, y, b : read the pointer into three numeric variables at once.
+// x/y are raw framebuffer pixels (origin top-left); b is the button bitmask
+// (bit0=left, bit1=right, bit2=middle). See also the MOUSEX/MOUSEY/MOUSEB
+// functions for reading a single value inside an expression.
+static void stmt_mouse(void) {
+    lex_next();                              // consume MOUSE
+    int px, py, pb;
+    con_mouse(&px, &py, &pb);
+    int vals[3] = { px, py, pb };
+    for (int i = 0; i < 3; i++) {
+        if (tok != T_VAR) { err("Expected a variable name"); return; }
+        char name[NAME_LEN];
+        s_copy(name, tok_var, NAME_LEN);
+        lex_next();
+        var_t *var = var_find(name);
+        if (!var) return;
+        if (var->is_str) { err("MOUSE needs numeric variables"); return; }
+        var->num = (double)vals[i];
+        if (i < 2 && !expect(T_COMMA)) return;
     }
 }
 
@@ -2279,6 +2620,8 @@ static char stg_buf[STG_BUF_SIZE];
 static void stg_err(int code) {
     switch (code) {
         case STG_ENOTFOUND: err("File not found");                 break;
+        case STG_EEXIST:    err("Already exists");                 break;
+        case STG_ENOTEMPTY: err("Directory not empty");            break;
         case STG_EFULL:     err("Storage card is full");           break;
         case STG_ENOFS:     err("No storage card found");          break;
         case STG_ETOOBIG:   err("File is too big to load");        break;
@@ -2381,6 +2724,56 @@ static void stmt_delete(void) {
     if (!read_filename(name, sizeof name)) return;
     int r = stg_delete(name);
     if (r) stg_err(r);
+}
+
+// Directory commands take a quoted path (no ".BAS" default): MKDIR/CD/RMDIR
+// "name", and PWD prints the current directory.
+static void stmt_mkdir(void) {
+    lex_next();
+    value_t s = need_str(); if (g_err) return;
+    char nm[64]; copy_fname(s, nm, sizeof nm);
+    int r = stg_mkdir(nm); if (r) stg_err(r);
+}
+static void stmt_rmdir(void) {
+    lex_next();
+    value_t s = need_str(); if (g_err) return;
+    char nm[64]; copy_fname(s, nm, sizeof nm);
+    int r = stg_rmdir(nm); if (r) stg_err(r);
+}
+static void stmt_cd(void) {
+    lex_next();
+    value_t s = need_str(); if (g_err) return;
+    char nm[64]; copy_fname(s, nm, sizeof nm);
+    int r = stg_chdir(nm); if (r) stg_err(r);
+}
+static void stmt_pwd(void) {
+    lex_next();
+    con_puts(stg_cwd()); con_puts("\n");
+}
+
+// BPUT# ch, value : write a byte (numeric) or a whole string's bytes to a channel.
+static void stmt_bput(void) {
+    lex_next();                              // consume BPUT
+    int ch = read_channel();
+    if (g_err) return;
+    if (!expect(T_COMMA)) return;
+    value_t v = eval_expr();
+    if (g_err) return;
+    if (v.is_str) {                          // BPUT# ch, A$ writes the bytes verbatim
+        for (int i = 0; i < v.len; i++)
+            if (stg_putb(ch, (unsigned char)v.str[i]) < 0) { err("File write error"); return; }
+    } else {
+        if (stg_putb(ch, (int)v.num & 0xFF) < 0) { err("File write error"); return; }
+    }
+}
+
+// CLOSE# ch : close one channel; CLOSE# 0 closes every open channel.
+static void stmt_close(void) {
+    lex_next();                              // consume CLOSE
+    int ch = read_channel();
+    if (g_err) return;
+    if (ch == 0) stg_close_all();
+    else         stg_close(ch);
 }
 
 // SEED h%, "FILE.SED" : load a native seed from storage into an executable slot
@@ -2555,19 +2948,113 @@ static void stmt_mode(void) {
     con_mode(n);
 }
 
-// GCOL action,colour  (or GCOL colour, meaning action 0)
+// A packed colour from RGB() carries bit 30, so it can't be mistaken for a
+// logical colour index (0..15 / 128..143).
+#define RGB_TAG 0x40000000
+static void gcol_apply_packed(int packed) {      // truecolour foreground
+    con_gcol_rgb((packed >> 16) & 255, (packed >> 8) & 255, packed & 255);
+}
+
+// GCOL colour            (action 0)
+// GCOL action, colour    (colour = logical index, or a packed RGB() value)
+// GCOL r, g, b           (24-bit truecolour foreground)
 static void stmt_gcol(void) {
     lex_next();                                  // consume GCOL
-    int a = (int)need_num();
-    if (g_err) return;
-    if (tok == T_COMMA) {
-        lex_next();
-        int c = (int)need_num();
-        if (g_err) return;
-        con_gcol(a, c);
-    } else {
-        con_gcol(0, a);
+    int a = (int)need_num(); if (g_err) return;
+    if (tok != T_COMMA) {                        // GCOL c
+        if (a & RGB_TAG) gcol_apply_packed(a);
+        else             con_gcol(0, a);
+        return;
     }
+    lex_next();
+    int b = (int)need_num(); if (g_err) return;
+    if (tok != T_COMMA) {                         // GCOL action, colour
+        if (b & RGB_TAG) { con_gcol(a, 0); gcol_apply_packed(b); }
+        else             con_gcol(a, b);
+        return;
+    }
+    lex_next();
+    int c = (int)need_num(); if (g_err) return;   // GCOL r, g, b
+    con_gcol_rgb(a, b, c);
+}
+
+// Read `n` more comma-separated numbers into out[]. Returns 0 on error.
+static int read_nums(int *out, int n) {
+    for (int i = 0; i < n; i++) {
+        if (i && !expect(T_COMMA)) return 0;
+        out[i] = (int)need_num();
+        if (g_err) return 0;
+    }
+    return 1;
+}
+
+// LINE x1,y1,x2,y2
+static void stmt_line(void) {
+    lex_next(); int v[4];
+    if (!read_nums(v, 4)) return;
+    con_line(v[0], v[1], v[2], v[3]);
+}
+
+// After a shape keyword, an optional FILL modifier means the solid variant.
+static int shape_fill(void) {
+    if (tok == T_KW && tok_kw == KW_FILL) { lex_next(); return 1; }
+    return 0;
+}
+
+// RECTANGLE [FILL] x,y,w,h
+static void stmt_rectangle(void) {
+    lex_next(); int f = shape_fill(); int v[4];
+    if (!read_nums(v, 4)) return;
+    con_rectangle(v[0], v[1], v[2], v[3], f);
+}
+
+// CIRCLE [FILL] x,y,r
+static void stmt_circle(void) {
+    lex_next(); int f = shape_fill(); int v[3];
+    if (!read_nums(v, 3)) return;
+    con_circle(v[0], v[1], v[2], f);
+}
+
+// ELLIPSE [FILL] x,y,rx,ry
+static void stmt_ellipse(void) {
+    lex_next(); int f = shape_fill(); int v[4];
+    if (!read_nums(v, 4)) return;
+    con_ellipse(v[0], v[1], v[2], v[3], f);
+}
+
+// FILL x,y : flood fill from a point
+static void stmt_fill(void) {
+    lex_next(); int v[2];
+    if (!read_nums(v, 2)) return;
+    con_fill(v[0], v[1]);
+}
+
+// GGET addr, x1,y1,x2,y2 : capture a screen rectangle into a DIM buffer
+static void stmt_gget(void) {
+    lex_next();
+    long addr = (long)need_num(); if (!expect(T_COMMA)) return;
+    int v[4];
+    if (!read_nums(v, 4)) return;
+    con_sprite_get(addr, v[0], v[1], v[2], v[3]);
+}
+
+// GPUT addr, x, y : stamp a captured sprite (top-left at x,y)
+static void stmt_gput(void) {
+    lex_next();
+    long addr = (long)need_num(); if (!expect(T_COMMA)) return;
+    int v[2];
+    if (!read_nums(v, 2)) return;
+    con_sprite_put(addr, v[0], v[1]);
+}
+
+// SAVESPRITE addr, "file" : write a sprite (LOADSPRITE result or GGET capture)
+// out as an image file (PNG, or BMP if the name ends in .bmp).
+static void stmt_savesprite(void) {
+    lex_next();
+    long addr = (long)need_num(); if (!expect(T_COMMA)) return;
+    value_t s = need_str(); if (g_err) return;
+    char nm[64]; copy_fname(s, nm, sizeof nm);
+    if (img_save_sprite(nm, addr) != 0) err("Could not save sprite");
 }
 
 // PLOT code,x,y
@@ -2621,6 +3108,14 @@ static void exec_statement(void) {
             case KW_MOVE:  stmt_move_draw(4); return;   // MOVE = PLOT 4
             case KW_DRAW:  stmt_move_draw(5); return;   // DRAW = PLOT 5
             case KW_CLG:   lex_next(); con_clg();   return;
+            case KW_LINE:      stmt_line();      return;
+            case KW_RECTANGLE: stmt_rectangle(); return;
+            case KW_CIRCLE:    stmt_circle();    return;
+            case KW_ELLIPSE:   stmt_ellipse();   return;
+            case KW_FILL:      stmt_fill();      return;
+            case KW_GGET:      stmt_gget();      return;
+            case KW_GPUT:      stmt_gput();      return;
+            case KW_SAVESPRITE: stmt_savesprite(); return;
             case KW_SAVE:  stmt_save();    return;
             case KW_LOAD:  stmt_load();    return;
             case KW_DELETE:stmt_delete();  return;
@@ -2628,6 +3123,10 @@ static void exec_statement(void) {
             case KW_CALL:  stmt_call();    return;
             case KW_CAT:
             case KW_DIR:   lex_next(); stg_dir(); return;
+            case KW_MKDIR: stmt_mkdir(); return;
+            case KW_CD:    stmt_cd();    return;
+            case KW_RMDIR: stmt_rmdir(); return;
+            case KW_PWD:   stmt_pwd();   return;
             case KW_PROC:  call_proc(0, 0); return;
             case KW_ENDPROC: g_return = 1; return;
             case KW_LOCAL: stmt_local();   return;
@@ -2656,6 +3155,20 @@ static void exec_statement(void) {
             case KW_RUN:   lex_next();
                            clear_vars();
                            run_program(0, 0); tok = T_EOL; return;
+            case KW_MOUSE:    stmt_mouse();    return;
+            case KW_BPUT:     stmt_bput();     return;
+            case KW_CLOSE:    stmt_close();    return;
+            case KW_PTR: {                             // PTR# ch = expr : set file pointer
+                lex_next();                            // consume PTR
+                int ch = read_channel();
+                if (g_err) return;
+                if (tok != T_EQ) { err("Expected '='"); return; }
+                lex_next();
+                long p = (long)need_num();
+                if (g_err) return;
+                stg_seek(ch, p);
+                return;
+            }
             case KW_LIST:     stmt_list();     return;
             case KW_RENUMBER: stmt_renumber(); return;
             case KW_AUTO:     stmt_auto();     return;
@@ -2668,6 +3181,7 @@ static void exec_statement(void) {
         }
     }
     if (tok == T_VAR) { stmt_let(0); return; }   // implicit assignment
+    if (tok == T_QUERY || tok == T_PLING || tok == T_DOLLAR) { stmt_poke(); return; }
     if (tok == T_EQ) {                           // =<expr> : return a value from an FN
         lex_next();
         value_t v = eval_expr();

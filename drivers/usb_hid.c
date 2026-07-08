@@ -52,3 +52,13 @@ char hid_report_char(const uint8_t report[8], uint8_t prev[8]) {
     for (int k = 0; k < 8; k++) prev[k] = report[k];
     return out;
 }
+
+int hid_mouse_decode(const uint8_t *report, int len,
+                     int *btn, int *dx, int *dy, int *wheel) {
+    if (len < 3) return 0;
+    *btn   = report[0] & 0x07;
+    *dx    = (int)(int8_t)report[1];       // sign-extend the movement deltas
+    *dy    = (int)(int8_t)report[2];
+    *wheel = (len >= 4) ? (int)(int8_t)report[3] : 0;
+    return 1;
+}

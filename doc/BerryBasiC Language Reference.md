@@ -20,9 +20,17 @@ BerryBasiC is a BASIC interpreter running on a RaspberryPi4 supporting:
 
 · Console I/O
 
+· USB keyboard and mouse input
+
+· File handling — read/write data files on the SD card (`OPENIN`/`BGET#`/`BPUT#`…)
+
 · Graphics primitives
 
 · BBC BASIC–style VDU commands
+
+· Reserved memory blocks with `?` / `!` / `$` indirection
+
+· Native "seeds" — compiled AArch64 code called from BASIC for speed
 
 
 
@@ -286,6 +294,17 @@ Combine with AND/OR to pack and unpack fields, e.g. an RGB colour:
 ## String Concatenation
 
 FULL$ = FIRST$ + LAST$
+
+
+
+## Indirection
+
+`?`, `!` and `$` read or write memory directly (byte, 32-bit word, and string).
+They are covered in detail under [Memory and Indirection](#memory-and-indirection):
+
+    ?addr            REM the byte at addr
+    addr!4           REM the 32-bit word at addr+4
+    $addr            REM the string at addr (up to a CR)
 
 
 
@@ -659,6 +678,70 @@ A `$` array holds a string in every element:
 
     DIM NAME$(20)
     NAME$(0) = "BERRY"
+
+
+
+# Memory and Indirection
+
+Beyond variables and arrays, a program can reserve a block of raw bytes and read
+or write it directly with the indirection operators `?`, `!` and `$`. This is how
+you build a buffer to hand to a native seed for fast processing.
+
+## Reserving memory
+
+`DIM name size` (a name *without* parentheses) reserves `size + 1` bytes and puts
+the address of the first byte in the variable:
+
+    DIM BUF% 255          : REM 256 bytes; BUF% holds their address
+
+Use a numeric variable (typically a `%` integer). The block lives until the next
+`RUN`/`NEW`. You can reserve several at once: `DIM A% 100, B% 1000`.
+
+## The indirection operators
+
+| Form        | Meaning |
+| ----------- | ------- |
+| `?addr`     | the byte at `addr` (0–255) |
+| `addr?n`    | the byte at `addr + n` |
+| `!addr`     | the 32-bit word at `addr` (little-endian, signed) |
+| `addr!n`    | the word at `addr + n` |
+| `$addr`     | the string at `addr`, up to a carriage-return (`&0D`) terminator |
+
+They work on both sides of `=` — reading (peek) and writing (poke):
+
+    ?BUF% = 65            : REM poke a byte
+    BUF%?1 = 66           : REM poke the next byte
+    PRINT ?BUF%, BUF%?1   : REM 65  66
+    !BUF% = &12345678     : REM poke a 32-bit word (4 bytes, little-endian)
+    PRINT BUF%?0          : REM 120  (&78, the low byte)
+    $BUF% = "BERRY"       : REM write text + a CR terminator
+    PRINT $BUF%           : REM BERRY
+
+Binary `?`/`!` bind tighter than arithmetic, so `BUF%?I + 1` is `(BUF%?I) + 1`.
+For an arithmetic *address* with the unary form, parenthesise it — `?(BUF%+1)` —
+or just use the binary form, `BUF%?1`.
+
+## Passing a buffer to a seed
+
+Because the address is a real pointer, a seed can read or write the same memory.
+Build the buffer in BASIC and pass its address (and length):
+
+    10 DIM B% 9
+    20 FOR I = 0 TO 9 : B%?I = I * I : NEXT
+    30 SEED H%, "BUFSUM.SED"
+    40 PRINT CALL(H%, B%, 10)        : REM the seed sums the 10 bytes -> 285
+
+with the seed dereferencing the address it is given:
+
+    SEED_EXPORT(bufsum) {
+        const unsigned char *p = (const unsigned char *)(uintptr_t)(long)argv[0].num;
+        int len = (int)argv[1].num, sum = 0;
+        for (int i = 0; i < len; i++) sum += p[i];
+        return sum;
+    }
+
+This is the fast path for bulk data: BASIC owns the buffer, the seed crunches it
+natively, and both see the same bytes.
 
 
 
@@ -1080,6 +1163,58 @@ The current text cursor row (Y position), counting from 0.
 
 
 
+# Mouse
+
+A USB mouse (plugged into a USB-A port on real hardware, or supplied with
+`-device usb-mouse` under QEMU) drives an on-screen pointer. Position is reported
+in **raw framebuffer pixels** with the origin at the **top-left** corner: X runs
+`0` to screen-width−1, Y runs `0` to screen-height−1. The pointer starts at the
+centre of the screen and is clamped to the screen edges.
+
+The **button value** is a bitmask:
+
+| Bit | Value | Button |
+|-----|-------|--------|
+| 0   | 1     | Left   |
+| 1   | 2     | Right  |
+| 2   | 4     | Middle |
+
+So a value of `3` means left+right are held together. Test a single button with
+`AND`, e.g. `IF MOUSEB AND 1 THEN ...` for the left button.
+
+If no mouse is present, the position reads back as `0,0` and the buttons as `0`.
+
+When a mouse is connected, the system draws an **arrow pointer** on screen and
+moves it with the mouse automatically — including at the `>` editor prompt and
+while a program waits at `GET`/`INKEY`. You do not have to draw the pointer
+yourself; reading `MOUSEX`/`MOUSEY`/`MOUSE` simply tells you where it is.
+
+> Under QEMU (`make run`), click inside the window once to let it capture the
+> mouse (a relative USB mouse only sends movement while the window has grabbed
+> the pointer); press `Ctrl`+`Alt`+`G` to release it.
+
+## MOUSEX / MOUSEY / MOUSEB
+
+Three parenless value functions that read one component of the pointer, for use
+inside an expression:
+
+    PLOT 69, MOUSEX, MOUSEY          : REM plot a point under the pointer
+    IF MOUSEB AND 1 THEN PROCclick   : REM act on the left button
+
+## MOUSE
+
+The `MOUSE` statement reads all three at once into three numeric variables —
+X, Y, then the button bitmask:
+
+    MOUSE X%, Y%, B%
+    PRINT "pointer at "; X%; ","; Y%; "  buttons="; B%
+
+Reading the mouse (via either form) also polls the hardware, so call it in your
+main loop to keep the pointer up to date. See `examples/mouse.bas` for a small
+drawing demo.
+
+
+
 # Time
 
 `TIME` is a centisecond (hundredth-of-a-second) counter. Read it as a value:
@@ -1332,83 +1467,240 @@ C = POINT(X,Y)
 
 
 
+# Graphics Library
+
+The graphics library adds high-level shape, colour and sprite statements on top
+of the low-level `PLOT`/`MOVE`/`DRAW` primitives. All coordinates are BBC
+logical units (x in 0..1279, y in 0..1023, origin bottom-left). Every shape is
+drawn in the current graphics foreground colour and honours the current `GCOL`
+plot action (store / OR / AND / EOR / invert).
+
+## Truecolour (RGB)
+
+The eight logical colours (0..7) still exist, but you can also draw in any
+24-bit colour. There are two ways:
+
+Give `GCOL` three arguments — red, green and blue, each 0..255:
+
+    GCOL 255,128,0        : orange foreground
+
+Or use the `RGB` function to pack a colour into a single value that `GCOL`
+accepts wherever a colour number is expected:
+
+    GCOL RGB(0,128,255)   : sky-blue foreground
+    C = RGB(255,0,255)
+    GCOL 3,C              : plot action 3 (EOR) in magenta
+
+`RGB(r,g,b)` returns a tagged value that is distinct from the logical colour
+numbers 0..7, so `GCOL c` and `GCOL action,c` recognise it automatically.
+
+## COLOUR l,r,g,b - redefine a palette slot
+
+Redefine one of the eight logical colours to an arbitrary RGB value. After this,
+`GCOL 2` (and text `COLOUR 2`) use the new colour:
+
+    COLOUR 2,255,128,0    : make logical colour 2 orange
+
+(The single-argument `COLOUR n` still selects a text colour, see Screen Control.)
+
+## LINE
+
+Draw a straight line between two points.
+
+    LINE x1,y1,x2,y2
+
+Example:
+
+    LINE 100,100,1100,700
+
+## RECTANGLE
+
+Draw a rectangle whose bottom-left corner is (x,y), `w` wide and `h` high. Add
+`FILL` for a solid rectangle; without it only the outline is drawn.
+
+    RECTANGLE x,y,w,h
+    RECTANGLE FILL x,y,w,h
+
+Example:
+
+    RECTANGLE FILL 500,400,200,150
+
+## CIRCLE
+
+Draw a circle centred at (x,y) with radius `r` (outline, or solid with `FILL`).
+The circle is round on screen regardless of the physical aspect ratio.
+
+    CIRCLE x,y,r
+    CIRCLE FILL x,y,r
+
+Example:
+
+    CIRCLE FILL 300,500,120
+
+## ELLIPSE
+
+Draw an ellipse centred at (x,y) with horizontal radius `rx` and vertical
+radius `ry` (outline, or solid with `FILL`).
+
+    ELLIPSE x,y,rx,ry
+    ELLIPSE FILL x,y,rx,ry
+
+Example:
+
+    ELLIPSE FILL 640,512,300,150
+
+## FILL
+
+Flood-fill the connected region containing the point (x,y) with the current
+foreground colour. The region is bounded by any pixel of a different colour.
+
+    FILL x,y
+
+Example:
+
+    RECTANGLE 200,150,150,120
+    GCOL 255,0,255
+    FILL 275,210          : fill the inside of the outline
+
+## Sprites - GGET and GPUT
+
+A sprite is a rectangular block of pixels captured from the screen into a
+reserved memory buffer (see `DIM`), so it can be stamped back elsewhere.
+
+`GGET` captures the rectangle between the two corners (x1,y1) and (x2,y2) into
+the buffer at `addr`. The buffer must be large enough to hold an 8-byte header
+plus 4 bytes per pixel: `width * height * 4 + 8` bytes.
+
+    GGET addr, x1,y1, x2,y2
+
+`GPUT` stamps a previously captured sprite so that its top-left corner sits at
+the logical point (x,y). The blit honours the current `GCOL` plot action, so an
+EOR sprite can be drawn and un-drawn for flicker-free animation.
+
+    GPUT addr, x, y
+
+Example:
+
+    DIM S% 60000          : reserve a sprite buffer
+    GGET S%, 220,440, 340,560
+    GPUT S%, 800,300
+
+## Loading sprites from image files - LOADSPRITE
+
+`LOADSPRITE` decodes an image file from the SD card into a sprite and returns its address, ready to pass to `GPUT`. Supported formats are **PNG**, **JPEG** and **BMP**. Unlike `GGET`, you do not reserve a buffer with `DIM` - the sprite is stored in a managed pool sized for the image, and the pool is emptied whenever a program is `RUN` or the variables are cleared.
+
+    addr = LOADSPRITE("filename")
+
+`addr` is the sprite address, or **0** if the file is missing, unreadable, of an unsupported format, or too large for the pool. Always check for 0.
+
+`SPRW(addr)` and `SPRH(addr)` return a sprite's width and height in pixels (read from its header), so you can centre or tile it.
+
+The image is drawn at one screen pixel per image pixel (no scaling), with the image's top-left corner placed at the logical point given to `GPUT`. Only images up to the screen size can be stamped.
+
+**Transparency:** `GPUT` honours a sprite's alpha channel. Fully transparent pixels are skipped (the background shows through), fully opaque pixels are drawn normally, and partially transparent pixels (e.g. the smooth edges of a PNG cut-out) are blended over whatever is already on screen. So a PNG of a character on a transparent background draws cleanly over your scene. Images with no alpha channel (JPEG/BMP, or an opaque PNG) are fully opaque, as are `GGET` captures.
+
+Example:
+
+```basic
+128 cat% = LOADSPRITE("CAT.PNG")
+130 IF cat% = 0 THEN PRINT "Could not load CAT.PNG" : END
+140 PRINT "Loaded "; SPRW(cat%); " x "; SPRH(cat%)
+150 GPUT cat%, 500, 700
+```
+
+## Saving sprites to image files - SAVESPRITE
+
+`SAVESPRITE` writes a sprite back out to an image file on the SD card. The sprite can be one loaded with `LOADSPRITE`, or a region of the screen captured with `GGET` - so `GGET` + `SAVESPRITE` is also a way to take a **screenshot**.
+
+```basic
+SAVESPRITE addr, "filename"
+```
+
+The format is **PNG** (which preserves the alpha channel), unless the filename ends in `.bmp`, in which case a 24-bit BMP is written. If the file cannot be written the program stops with a "Could not save sprite" error.
+
+Example - capture part of the screen and save it:
+
+```basic
+200 DIM S% 200000               : REM room for the captured pixels
+210 GGET S%, 100,900, 400,600   : REM grab a rectangle of the screen
+220 SAVESPRITE S%, "SHOT.PNG"
+```
+
+Because PNG round-trips alpha, you can also load a transparent sprite, and save it again without losing its transparency.
+
 # Program Control Commands
 
 ## RUN
 
-Execute program.
+Executes the current program.
 
+```basic
 RUN
+```
 
-RUN clears variables before execution.
-
-
+`RUN` clears variables before execution.
 
 ## LIST
 
-Display the stored program. Keywords are shown in UPPERCASE; variable names,
-strings and REM comments are shown as you typed them.
+Display the stored program. Keywords are shown in UPPERCASE; variable names, strings and `REM` comments are shown as you typed them.
 
+```basic
 LIST
+```
 
 List a single line, a range, from a line, or up to a line:
 
+```basic
 LIST 100
-
 LIST 100,200
-
 LIST 100,
-
 LIST ,200
-
-
+```
 
 ## AUTO
 
-Enter automatic line-numbering. After AUTO, each line you type is given the next
-number automatically, so you can just type the program. Press Return on an empty
-line (i.e. without adding anything after the offered number) to leave AUTO.
+Enter automatic line-numbering. After AUTO, each line you type is given the next number automatically, so you can just type the program. Press Return on an empty line (i.e. without adding anything after the offered number) to leave `AUTO`.
 
+```basic
 AUTO
+```
 
 or, choosing the first number and the step:
 
+```basic
 AUTO 100,10
+```
 
-The default is AUTO 10,10 (start at 10, step 10).
-
-
+The default is `AUTO 10,10` (start at 10, step 10).
 
 ## RENUMBER
 
-Renumber the whole program, and fix up every line-number reference (the targets
-of GOTO, GOSUB, RESTORE, THEN, ELSE and the lists of ON ... GOTO / ON ... GOSUB)
-so the program still runs correctly.
+Renumber the whole program, and fix up every line-number reference (the targets of `GOTO`, `GOSUB`, `RESTORE`, `THEN`, `ELSE` and the lists of `ON ... GOTO` / `ON ... GOSUB`) so the program still runs correctly.
 
+```basic
 RENUMBER
+```
 
 or, choosing the first number and the step:
 
+```basic
 RENUMBER 100,10
+```
 
-The default is RENUMBER 10,10. References to a line that does not exist are left
+The default is `RENUMBER 10,10`. References to a line that does not exist are left
 unchanged.
-
-
 
 ## EDIT
 
-Recall a program line into the input line so you can edit it instead of retyping
-it. The line appears ready to edit; press Return to store the changes.
+Recall a program line into the input line so you can edit it instead of retyping it. The line appears ready to edit; press Return to store the changes.
 
+```BASIC
 EDIT 150
-
-
+```
 
 ## Line editing
 
-While typing a line (at the prompt, during AUTO, or after EDIT) the following
-keys are available:
+While typing a line (at the prompt, during AUTO, or after EDIT) the following keys are available:
 
 | Key            | Action |
 |----------------|--------|
@@ -1445,6 +1737,127 @@ Terminate execution immediately.
 END
 
 
+
+# Storage (SD card)
+
+Programs and data live on the SD card's FAT filesystem. File names may be given quoted or bare; if you give no extension, `.BAS` is assumed (so `LOAD WELCOME` opens `WELCOME.BAS`). Names are 8.3 (up to eight characters, a dot, a three-letter extension), as the card is FAT.
+
+## SAVE
+
+Writes the current program to a file.
+
+    SAVE "GAME"           : REM -> GAME.BAS
+    SAVE "DATA.TXT"
+
+## LOAD
+
+Clears the current program and variables, then loads a program from a file.
+
+    LOAD "GAME"
+
+## CAT / DIR
+
+Lists the current directory. `CAT` and `DIR` are the same command.
+Subdirectories are shown with a `<DIR>` marker.
+
+    CAT
+
+## DELETE
+
+Removes a file from the card.
+
+    DELETE "OLD.BAS"
+
+These commands work on a whole program (or, for `DELETE`, any file). To read and write your own **data files** byte by byte, use the file-handling commands below.
+
+## Directories
+
+The card can hold **subdirectories**, and every file command accepts a **path**.
+Components are separated by `/`. A path starting with `/` is absolute (from the
+top of the card); otherwise it is relative to the **current directory**.
+
+| Command | Meaning |
+|---------|---------|
+| `MKDIR "name"` | Create a directory |
+| `CD "name"`    | Change the current directory (`CD ".."` goes up, `CD "/"` to the top) |
+| `RMDIR "name"` | Remove a directory (it must be empty) |
+| `PWD`          | Print the current directory |
+
+Because file commands take paths, you can read and write anywhere on the card:
+
+    MKDIR "SPRITES"
+    cat% = LOADSPRITE("SPRITES/CAT.PNG")
+    SAVE "LEVELS/LEVEL1"          : REM -> LEVELS/LEVEL1.BAS
+    OPENIN("/DATA/SCORES.DAT")    : REM absolute path
+
+Directory and file names are still 8.3 (up to eight characters, a dot, a
+three-letter extension) since the card is FAT. `MKDIR`, `CD` and `RMDIR` take the
+name as given (no automatic `.BAS`), so quote them: `CD "GAMES"`.
+
+# File Handling
+
+A program can open a file on the SD card as a **channel** and read or write its bytes directly. Writes go straight to the real FAT filesystem, so the files can be read on a PC (and by other programs). Up to four files may be open at once.
+
+Open a file with one of three functions, each returning a channel number (a small
+positive integer), or **0** if it could not be opened:
+
+| Function | Opens a file for… | If the file… |
+|----------|-------------------|--------------|
+| `OPENIN "name"`  | reading            | doesn't exist → returns 0 |
+| `OPENOUT "name"` | writing (creates, or **empties** an existing file) | is created fresh |
+| `OPENUP "name"`  | reading *and* writing | doesn't exist → returns 0 |
+
+All the other file words take a channel after a `#`:
+
+| Command | Meaning |
+|---------|---------|
+| `BGET# ch`         | Read and return the next byte (`0`–`255`), or `-1` at end of file |
+| `BPUT# ch, n`      | Write the byte `n AND 255` |
+| `BPUT# ch, A$`     | Write every byte of the string `A$` |
+| `EOF# ch`          | `TRUE` (`-1`) when the file pointer is at the end, else `FALSE` (`0`) |
+| `EXT# ch`          | The length of the file in bytes |
+| `PTR# ch`          | The current read/write position (0 = start) |
+| `PTR# ch = n`      | Move the position to byte `n` (0 to `EXT#`, so `PTR# ch = EXT# ch` appends) |
+| `CLOSE# ch`        | Close the channel (writes are finalised here); `CLOSE# 0` closes every open channel |
+
+Reading advances the pointer by one byte; so does writing. Seeking with `PTR#` lets you re-read or overwrite any part of the file.
+
+    10 C = OPENOUT "SCORES.DAT"
+    20 FOR I = 1 TO 8 : BPUT# C, I*I : NEXT   : REM write eight bytes
+    30 BPUT# C, "END"                          : REM append the bytes of a string
+    40 CLOSE# C
+    50 C = OPENIN "SCORES.DAT"
+    60 PRINT "length ="; EXT# C
+    70 REPEAT : PRINT BGET# C; " "; : UNTIL EOF# C
+    80 PRINT
+    90 PTR# C = 3 : PRINT "byte 3 ="; BGET# C   : REM random access
+    100 CLOSE# C
+
+> Always `CLOSE#` a file you have written — the final data and the file's length
+> are committed to the card on close. `CLOSE# 0` is a quick way to close everything
+> (for example in an error handler or at the end of a program).
+
+## `PRINT#` and `INPUT#` (typed records)
+
+`BGET#`/`BPUT#` work a byte at a time. When you want to store whole **numbers and strings** and get them back with their types intact, use `PRINT#` to write and `INPUT#` to read. Each value is stored as a self-describing record, so you read them back in the same order you wrote them:
+
+    PRINT# ch, expr, expr, ...   : REM write a list of numbers and/or strings
+    INPUT# ch, var,  var,  ...   : REM read them back into variables
+
+The variables in `INPUT#` may be simple variables or array elements, and their
+types must match the records in the file (a number into a numeric variable, a
+string into a `$` variable).
+
+    10 C = OPENOUT "SAVE.DAT"
+    20 PRINT# C, "Level", 7, SCORE, NAME$      : REM mix strings and numbers freely
+    30 CLOSE# C
+    40 C = OPENIN "SAVE.DAT"
+    50 INPUT# C, TITLE$, LVL, SC, NAME$
+    60 CLOSE# C
+
+On disk each record is a tag byte followed by its data — a number is `&40` plus eight bytes (an IEEE-754 double, little-endian); a string is `&00`, a one-byte length, then the characters. You can freely mix `BPUT#`/`BGET#` and `PRINT#`/`INPUT#` on the same file if you keep track of the layout yourself.
+
+See `examples/fileio.bas` (byte level) and `examples/records.bas` (typed records) for complete demos.
 
 # Native Seeds
 
@@ -1503,23 +1916,14 @@ String *arguments* are snapshots: they are valid for the duration of the call. A
 
 ## Working memory
 
-For tasks that need scratch space — a sorted copy, a lookup table, an image
-buffer — a seed allocates from its own heap with the **ordinary C functions**
-`malloc`, `calloc` and `free`:
+For tasks that need scratch space — a sorted copy, a lookup table, an image buffer — a seed allocates from its own heap with the *ordinary C functions* `malloc`, `calloc` and `free`:
 
     double *tmp = malloc(n * sizeof(double));
     if (!tmp) return 0;                 // heap exhausted
     ... use tmp ...
     free(tmp);
 
-These read like normal C, but they draw from the *seed heap* rather than any
-system allocator (under the hood they route to the services). `malloc` returns a
-16-byte-aligned block (suitable for doubles and NEON), or 0 if the heap is full;
-`calloc` also zeroes it. The seed heap is separate from BASIC's own variable and
-array storage, is 2 MB by default (raise `SEED_HEAP_SIZE` in the interpreter if
-you need more), and is wiped clean at every `RUN`/`NEW` — so a seed that forgets
-to `free` leaks only within the current run, never permanently. Memory does
-persist between calls within a run, so a seed may allocate a table on its first
+These read like normal C, but they draw from the *seed heap* rather than any system allocator (under the hood they route to the services). `malloc` returns a 16-byte-aligned block (suitable for doubles and NEON), or 0 if the heap is full; `calloc` also zeroes it. The seed heap is separate from BASIC's own variable and array storage, is 2 MB by default (raise `SEED_HEAP_SIZE` in the interpreter if you need more), and is wiped clean at every `RUN`/`NEW` — so a seed that forgets to `free` leaks only within the current run, never  permanently. Memory does persist between calls within a run, so a seed may allocate a table on its first
 call and reuse it on later ones.
 
 The full standard allocation set is provided, all backed by the same seed heap:
@@ -1536,17 +1940,11 @@ The full standard allocation set is provided, all backed by the same seed heap:
 | `posix_memalign(&ptr, align, size)`     | POSIX form; returns 0 / `EINVAL` / `ENOMEM` |
 | `free_sized(ptr, size)`, `free_aligned_sized(ptr, align, size)` | C23 sized frees (the size hint is ignored) |
 
-Anything `aligned_alloc`/`posix_memalign` returns can be released with the
-ordinary `free`. The standard `memset`, `memcpy`, `memmove` and `memcmp` are
-available too (a small runtime is linked in for you), so ordinary buffer code
-just works. If you prefer, the raw `svc->alloc` / `svc->free` / `svc->realloc` /
-`svc->alloc_aligned` services are still there and do exactly the same thing.
+Anything `aligned_alloc`/`posix_memalign` returns can be released with the ordinary `free`. The standard `memset`, `memcpy`, `memmove` and `memcmp` are available too (a small runtime is linked in for you), so ordinary buffer code just works. If you prefer, the raw `svc->alloc` / `svc->free` / `svc->realloc` / `svc->alloc_aligned` services are still there and do exactly the same thing.
 
 ## The seed C library
 
-Because a seed is built freestanding (there is no C library to link against),
-any standard function it calls must be provided by the *seed runtime*. A useful,
-OS-independent subset is — just include the familiar headers:
+Because a seed is built freestanding (there is no C library to link against), any standard function it calls must be provided by the *seed runtime*. A useful, OS-independent subset is — just include the familiar headers:
 
     #include <stdlib.h>
     #include <string.h>
@@ -1558,18 +1956,16 @@ OS-independent subset is — just include the familiar headers:
 | `<string.h>` | `memcpy` `memmove` `memset` `memcmp` `memchr`, `strlen` `strnlen` `strcmp` `strncmp` `strcpy` `strncpy` `strcat` `strncat` `strchr` `strrchr` `strstr` `strdup` `strndup` |
 | `<ctype.h>`  | `isdigit` `isalpha` `isalnum` `isspace` `isupper` `islower` `isxdigit` `ispunct` … and `toupper` / `tolower` |
 
-These behave exactly as in standard C; `malloc` and friends draw from the seed
-heap, and `qsort`/`bsearch` take the usual comparator. For example, sorting a
-BASIC array in place:
+These behave exactly as in standard C; `malloc` and friends draw from the seed heap, and `qsort`/`bsearch` take the usual comparator. For example, sorting a BASIC array in place:
 
     #include "seed.h"
     #include <stdlib.h>
-
+    
     static int cmp(const void *a, const void *b) {
         double x = *(const double *)a, y = *(const double *)b;
         return (x > y) - (x < y);
     }
-
+    
     SEED_EXPORT(sortarr) {
         int len = 0;
         double *a = svc->num_array("E", &len);     // direct pointer to E()
@@ -1577,14 +1973,7 @@ BASIC array in place:
         return len;
     }
 
-What is **not** provided is anything that needs an operating system — `printf`,
-file I/O, `getenv`, `exit`, threads, `time`, and so on. Calling one of those is a
-link error (`undefined reference to 'printf'`), which is the build telling you
-the seed reached outside its sandbox. Use the services (`svc`) for I/O instead:
-`svc->puts` to print, `svc->getkey`/`svc->inkey` for the keyboard, `svc->time_cs`
-for timing. The library lives in `seed/include/` and `seed/runtime/`; adding a
-missing pure function is just a declaration in the header and a definition in the
-runtime.
+What is **not** provided is anything that needs an operating system — `printf`, file I/O, `getenv`, `exit`, threads, `time`, and so on. Calling one of those is a link error (`undefined reference to 'printf'`), which is the build telling you the seed reached outside its sandbox. Use the services (`svc`) for I/O instead: `svc->puts` to print, `svc->getkey`/`svc->inkey` for the keyboard, `svc->time_cs` for timing. The library lives in `seed/include/` and `seed/runtime/`; adding a missing pure function is just a declaration in the header and a definition in the runtime.
 
 ## Starting a new seed
 
@@ -1657,11 +2046,10 @@ And one that sums a numeric array passed by name:
         return sum;
     }
 
-And one that needs working memory — the median of an array, computed from an
-allocated sorted copy so the original is left untouched:
+And one that needs working memory — the median of an array, computed from an allocated sorted copy so the original is left untouched:
 
     #include "seed.h"
-
+    
     SEED_EXPORT(seed)
     {
         if (argc < 1 || !argv[0].is_str) return 0;
@@ -1669,21 +2057,21 @@ allocated sorted copy so the original is left untouched:
         if (n > 15) n = 15;
         for (int i = 0; i < n; i++) name[i] = argv[0].str[i];
         name[n] = 0;
-
+    
         int len = 0;
         double *a = svc->num_array(name, &len);
         if (!a || len <= 0) return 0;
-
+    
         double *tmp = malloc(len * sizeof(double));
         if (!tmp) return 0;                 // out of heap
         for (int i = 0; i < len; i++) tmp[i] = a[i];
-
+    
         for (int i = 1; i < len; i++) {     // insertion sort the copy
             double v = tmp[i]; int j = i - 1;
             while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
             tmp[j + 1] = v;
         }
-
+    
         double med = tmp[len / 2];
         free(tmp);
         return med;

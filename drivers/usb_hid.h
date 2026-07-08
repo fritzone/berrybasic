@@ -24,4 +24,13 @@ char hid_to_ascii(uint8_t kc, uint8_t mod);
 // return the ASCII for the first newly-pressed key (0 if none). Updates prev[].
 char hid_report_char(const uint8_t report[8], uint8_t prev[8]);
 
+// Decode a HID boot-protocol mouse report (3 or 4 bytes):
+//   byte0 = buttons  (bit0=left, bit1=right, bit2=middle)
+//   byte1 = dX       (signed, +right)
+//   byte2 = dY       (signed, +down)
+//   byte3 = wheel    (signed, optional; 0 if len < 4)
+// Fills *btn/*dx/*dy/*wheel. Returns 1 if the report was long enough to decode.
+int hid_mouse_decode(const uint8_t *report, int len,
+                     int *btn, int *dx, int *dy, int *wheel);
+
 #endif

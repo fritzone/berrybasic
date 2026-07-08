@@ -62,6 +62,11 @@ $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 $(BUILD_DIR)/%.o: %.S | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# drivers/image.c compiles the vendored stb_image.h, which needs the third_party
+# path and the freestanding <stdlib.h>/<string.h> shims. Disable warnings for the
+# third-party header (it is not our code).
+$(BUILD_DIR)/image.o: CFLAGS += -Ithird_party -Ithird_party/stb_shim -w
+
 clean:
 	rm -rf $(BUILD_DIR)
 
@@ -99,16 +104,16 @@ flash: sdimage
 
 run: $(KERNEL) $(SDIMG)
 	qemu-system-aarch64 -M raspi4b -m 2G -kernel $(KERNEL) \
-	    -serial stdio -display gtk -device usb-kbd \
+	    -serial stdio -display gtk -device usb-kbd -device usb-mouse \
 	    -drive file=berrybasic-sd.img,if=sd,format=raw
 
 # Native build of the interpreter for fast testing/debugging on the host.
 # basic/basic.c is shared with the target; only the backends differ.
 HOSTCC      = cc
 HOST_BIN    = $(BUILD_DIR)/basic_host
-HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR)
+HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -Ithird_party
 HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
-              $(SEED_DIR)/seed_host.c $(HOST_DIR)/main.c
+              $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/main.c
 
 host: $(HOST_SRC) | $(BUILD_DIR)
 	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC)

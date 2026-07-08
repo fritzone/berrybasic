@@ -66,6 +66,8 @@ static void gpix(int x, int y, uint32_t c) {
     }
 }
 
+void putpixel_op(int x, int y, uint32_t color) { gpix(x, y, color); }
+
 // Draw one glyph (GLYPH_BYTES row bytes, MSB = leftmost pixel) at (x,y), each
 // source pixel scaled to `scale`x`scale`, using the current plot op (gfx_set_op)
 // and the clip rectangle. Only set bits are drawn, so the background stays
@@ -235,5 +237,93 @@ void scroll_up(int pixels, uint32_t fill) {
     for (uint32_t y = keep; y < fb_height; y++) {
         uint32_t *dst = fb_buf + (uint64_t)y * fb_pitch_words;
         for (uint32_t x = 0; x < fb_width; x++) dst[x] = fill;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended primitives for the BASIC graphics library: rectangle outline,
+// ellipse (outline + fill), and flood fill. All honour the clip rectangle; the
+// outline/fill shapes go through gpix() so the current plot op (OR/AND/EOR/
+// invert) applies, exactly like the built-in line/rectangle/circle.
+// ---------------------------------------------------------------------------
+
+static long gsqrt(long v) {                 // integer sqrt (Newton), v >= 0
+    if (v <= 0) return 0;
+    long x = v, y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + v / x) / 2; }
+    return x;
+}
+
+void draw_rect(int x0, int y0, int x1, int y1, uint32_t color) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    for (int x = x0; x <= x1; x++) { gpix(x, y0, color); gpix(x, y1, color); }
+    for (int y = y0; y <= y1; y++) { gpix(x0, y, color); gpix(x1, y, color); }
+}
+
+void fill_ellipse(int cx, int cy, int rx, int ry, uint32_t color) {
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    if (ry == 0) { hspan(cx - rx, cx + rx, cy, color); return; }
+    long rx2 = (long)rx * rx, ry2 = (long)ry * ry;
+    for (int dy = 0; dy <= ry; dy++) {
+        int xr = (int)gsqrt(rx2 * (ry2 - (long)dy * dy) / ry2);
+        hspan(cx - xr, cx + xr, cy - dy, color);
+        if (dy != 0) hspan(cx - xr, cx + xr, cy + dy, color);
+    }
+}
+
+void draw_ellipse(int cx, int cy, int rx, int ry, uint32_t color) {
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    if (ry == 0) { hspan(cx - rx, cx + rx, cy, color); return; }
+    if (rx == 0) { for (int y = cy - ry; y <= cy + ry; y++) gpix(cx, y, color); return; }
+    long rx2 = (long)rx * rx, ry2 = (long)ry * ry;
+    // Two scan passes (by dy and by dx) so the outline never has gaps on the
+    // flat top/bottom or the steep sides.
+    for (int dy = 0; dy <= ry; dy++) {
+        int xr = (int)gsqrt(rx2 * (ry2 - (long)dy * dy) / ry2);
+        gpix(cx - xr, cy - dy, color); gpix(cx + xr, cy - dy, color);
+        gpix(cx - xr, cy + dy, color); gpix(cx + xr, cy + dy, color);
+    }
+    for (int dx = 0; dx <= rx; dx++) {
+        int yr = (int)gsqrt(ry2 * (rx2 - (long)dx * dx) / rx2);
+        gpix(cx - dx, cy - yr, color); gpix(cx + dx, cy - yr, color);
+        gpix(cx - dx, cy + yr, color); gpix(cx + dx, cy + yr, color);
+    }
+}
+
+// Scanline flood fill. A fixed span-seed stack bounds memory; seeding one entry
+// per contiguous run keeps it small. Matches by RGB (alpha ignored). Best effort:
+// if the stack fills on a huge region it simply stops early.
+#define FLOOD_CAP 8192
+void flood_fill(int sx, int sy, uint32_t newc) {
+    int cx0, cy0, cx1, cy1;
+    gfx_clip_rect(&cx0, &cy0, &cx1, &cy1);
+    if (sx < cx0 || sx > cx1 || sy < cy0 || sy > cy1) return;
+    uint32_t target = getpixel(sx, sy) & 0x00FFFFFFu;
+    if (target == (newc & 0x00FFFFFFu)) return;         // nothing to do
+
+    static int stk[FLOOD_CAP * 2];
+    int sp = 0;
+    stk[sp++] = sx; stk[sp++] = sy;
+    while (sp) {
+        int y = stk[--sp];
+        int x = stk[--sp];
+        if ((getpixel(x, y) & 0x00FFFFFFu) != target) continue;
+        int xl = x, xr = x;
+        while (xl > cx0 && (getpixel(xl - 1, y) & 0x00FFFFFFu) == target) xl--;
+        while (xr < cx1 && (getpixel(xr + 1, y) & 0x00FFFFFFu) == target) xr++;
+        for (int i = xl; i <= xr; i++) putpixel(i, y, newc);
+        for (int ny = y - 1; ny <= y + 1; ny += 2) {
+            if (ny < cy0 || ny > cy1) continue;
+            int i = xl;
+            while (i <= xr) {
+                if ((getpixel(i, ny) & 0x00FFFFFFu) == target) {
+                    if (sp < FLOOD_CAP * 2 - 2) { stk[sp++] = i; stk[sp++] = ny; }
+                    while (i <= xr && (getpixel(i, ny) & 0x00FFFFFFu) == target) i++;
+                } else i++;
+            }
+        }
     }
 }

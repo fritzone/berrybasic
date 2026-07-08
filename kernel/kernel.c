@@ -164,6 +164,22 @@ static int g_kbd_ok  = 0;   // DWC2 (USB-C) keyboard present
 static int g_xhci_ok = 0;   // xHCI/VL805 (USB-A) keyboard present
 static int g_sd_ready = 0;  // SD filesystem mounted (boot log can be written)
 
+// Mouse pointer state, in raw framebuffer pixels (origin top-left). Deltas from
+// the HID mouse accumulate here; con_mouse() polls and reports it. g_mouse_dwc2
+// / g_mouse_xhci record which backend enumerated a mouse.
+static int g_mouse_dwc2 = 0;
+static int g_mouse_xhci = 0;
+static int g_mouse_x = FB_WIDTH / 2;
+static int g_mouse_y = FB_HEIGHT / 2;
+static int g_mouse_b = 0;
+
+// Software mouse pointer (an arrow sprite drawn on the framebuffer). Defined
+// after the mouse poll helpers; forward-declared here because the input-wait
+// loops (which run earlier in the file) drive it.
+static int  mouse_enabled(void);
+static void pointer_tick(void);   // service mouse + repaint the pointer sprite
+static void pointer_hide(void);   // remove the sprite (call before any FB write)
+
 // Dump the in-RAM UART log to BOOTLOG.TXT on the SD card. Called at the end of
 // boot (to diagnose USB enumeration) and from the exception handler (to surface
 // a crash) on a board with no serial cable. Best-effort: needs the filesystem
@@ -301,11 +317,14 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
             uint32_t now = TIMER_CLO;
             if (now - last_blink >= CURSOR_BLINK_US) {
                 last_blink = now;
+                pointer_hide();                  // hide before drawing the blink cursor
                 edit_cursor_at(sc, sr, pos);
                 cursor_set(!cursor_visible);
             }
+            pointer_tick();                      // move/repaint the pointer on top
             continue;
         }
+        pointer_hide();                          // a key arrived; hide before redrawing
 
         if (c == '\r' || c == '\n') {
             if (fb_ready) { if (cursor_visible) cursor_set(0); edit_cursor_at(sc, sr, len); term_putchar('\n'); }
@@ -405,12 +424,14 @@ int con_getkey(void) {
     uint32_t last_blink = TIMER_CLO;
     for (;;) {
         char c = term_pollchar();
-        if (c) { if (cursor_visible) cursor_set(0); return (unsigned char)c; }
+        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return (unsigned char)c; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
+            pointer_hide();                 // hide before drawing the blink cursor
             cursor_set(!cursor_visible);
         }
+        pointer_tick();                     // move/repaint the pointer on top
     }
 }
 
@@ -429,18 +450,118 @@ int con_inkey(int centiseconds) {
     uint32_t last_blink = TIMER_CLO;
     for (;;) {
         char c = term_pollchar();
-        if (c) { if (cursor_visible) cursor_set(0); return (unsigned char)c; }
-        if (TIMER_CLO - t0 >= limit) return -1;
+        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return (unsigned char)c; }
+        if (TIMER_CLO - t0 >= limit) { pointer_hide(); return -1; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
+            pointer_hide();                 // hide before drawing the blink cursor
             cursor_set(!cursor_visible);
         }
+        pointer_tick();                     // move/repaint the pointer on top
     }
 }
 
 int con_pos(void)  { return cursor_col; }
 int con_vpos(void) { return cursor_row; }
+
+// Poll whichever USB backend enumerated a mouse and fold the relative movement
+// into the absolute pointer position. Raw framebuffer pixels, origin top-left:
+// +dX moves right, +dY moves down. Buttons are latched from the last report.
+static void mouse_service(void) {
+    int btn = 0, dx = 0, dy = 0, wheel = 0, got = 0;
+    if (g_mouse_dwc2) got = usb_mouse_poll(&btn, &dx, &dy, &wheel);
+    if (!got && g_mouse_xhci) got = xhci_mouse_poll(&btn, &dx, &dy, &wheel);
+    if (!got) return;
+
+    g_mouse_b = btn;
+    g_mouse_x += dx;
+    g_mouse_y += dy;
+    if (g_mouse_x < 0) g_mouse_x = 0;
+    if (g_mouse_y < 0) g_mouse_y = 0;
+    if (g_mouse_x > FB_WIDTH  - 1) g_mouse_x = FB_WIDTH  - 1;
+    if (g_mouse_y > FB_HEIGHT - 1) g_mouse_y = FB_HEIGHT - 1;
+}
+
+void con_mouse(int *x, int *y, int *buttons) {
+    mouse_service();
+    if (x)       *x = g_mouse_x;
+    if (y)       *y = g_mouse_y;
+    if (buttons) *buttons = g_mouse_b;
+}
+
+// --- software mouse pointer -------------------------------------------------
+// A small arrow sprite drawn directly on the framebuffer. It is shown only while
+// the console is waiting for input (REPL editor, GET/INKEY), and hidden before
+// any character is echoed, so it never corrupts text: the pixels underneath are
+// saved on show and restored on hide (save-under). The arrow's tip is the hot
+// spot at the top-left, so the sprite's origin is the mouse coordinate.
+#define PTR_W 12
+#define PTR_H 17
+// 'K' = black outline, 'W' = white fill, '.' = transparent (see-through).
+static const char ptr_sprite[PTR_H][PTR_W + 1] = {
+    "K...........",
+    "KK..........",
+    "KWK.........",
+    "KWWK........",
+    "KWWWK.......",
+    "KWWWWK......",
+    "KWWWWWK.....",
+    "KWWWWWWK....",
+    "KWWWWWWWK...",
+    "KWWWWWWWWK..",
+    "KWWWWWKKKKK.",
+    "KWWKWWK.....",
+    "KWK.KWWK....",
+    "KK..KWWK....",
+    "K....KWWK...",
+    ".....KWWK...",
+    "......KK....",
+};
+
+static int      g_ptr_shown = 0;
+static int      g_ptr_x = 0, g_ptr_y = 0;
+static uint32_t g_ptr_save[PTR_W * PTR_H];   // framebuffer pixels under the sprite
+
+static int mouse_enabled(void) { return (g_mouse_dwc2 || g_mouse_xhci) && fb_ready; }
+
+// Restore the pixels the sprite is covering. Must be called before ANY other
+// write to the region the pointer occupies (blink cursor, character echo, etc.).
+static void pointer_hide(void) {
+    if (!g_ptr_shown) return;
+    for (int r = 0; r < PTR_H; r++)
+        for (int c = 0; c < PTR_W; c++)
+            putpixel(g_ptr_x + c, g_ptr_y + r, g_ptr_save[r * PTR_W + c]);
+    g_ptr_shown = 0;
+}
+
+// Save the background at the current mouse position, then draw the arrow on top.
+static void pointer_show(void) {
+    if (g_ptr_shown) return;
+    g_ptr_x = g_mouse_x;
+    g_ptr_y = g_mouse_y;
+    for (int r = 0; r < PTR_H; r++)                       // save first (whole box)
+        for (int c = 0; c < PTR_W; c++)
+            g_ptr_save[r * PTR_W + c] = getpixel(g_ptr_x + c, g_ptr_y + r);
+    for (int r = 0; r < PTR_H; r++)                       // then draw opaque cells
+        for (int c = 0; c < PTR_W; c++) {
+            char p = ptr_sprite[r][c];
+            if (p == 'K')      putpixel(g_ptr_x + c, g_ptr_y + r, COLOR_BLACK);
+            else if (p == 'W') putpixel(g_ptr_x + c, g_ptr_y + r, COLOR_WHITE);
+        }
+    g_ptr_shown = 1;
+}
+
+// Called from input-wait loops: poll the mouse and, if the pointer moved (or is
+// not currently drawn), repaint it. A no-op when the pointer is already up to
+// date, so it is cheap to call at the polling rate.
+static void pointer_tick(void) {
+    if (!mouse_enabled()) return;
+    mouse_service();
+    if (g_ptr_shown && g_ptr_x == g_mouse_x && g_ptr_y == g_mouse_y) return;
+    pointer_hide();
+    pointer_show();
+}
 
 // ---------------------------------------------------------------------------
 // Boot logo (embedded RGB image from logo_data.c)
@@ -512,6 +633,14 @@ int con_splash(const char *banner) {
 static int gfx_fg  = 7;     // graphics foreground (logical colour)
 static int gfx_bg  = 0;     // graphics background
 static int gfx_act = 0;     // GCOL plot action (0=store 1=OR 2=AND 3=EOR 4=invert)
+// RGB truecolour override: when *_true is set, drawing uses the 24-bit *_col
+// instead of the 8-entry logical palette.
+static int      gfx_fg_true = 0;
+static uint32_t gfx_fg_col  = 0;
+static int      gfx_bg_true = 0;
+static uint32_t gfx_bg_col  = 0;
+static uint32_t gcol_fg(void) { return gfx_fg_true ? gfx_fg_col : bbc_palette[gfx_fg & 7]; }
+static uint32_t gcol_bg(void) { return gfx_bg_true ? gfx_bg_col : bbc_palette[gfx_bg & 7]; }
 static int gpx0, gpy0;      // most recent point (logical, origin-relative)
 static int gpx1, gpy1;      // previous point
 static int gpx2, gpy2;      // the one before that
@@ -544,6 +673,7 @@ static void reset_colours(void) {
     text_color = bbc_palette[7];     // COLOUR 7
     text_bg    = bbc_palette[0];     // COLOUR 128
     gfx_fg = 7; gfx_bg = 0; gfx_act = 0;
+    gfx_fg_true = 0; gfx_bg_true = 0;
     gfx_set_op(0);
 }
 
@@ -559,8 +689,19 @@ void con_mode(int n) {
 
 void con_gcol(int action, int colour) {
     gfx_act = action & 7;
-    if (colour >= 128) gfx_bg = (colour - 128) & 7;   // GCOL a,128+c sets background
-    else               gfx_fg = colour & 7;
+    if (colour >= 128) { gfx_bg = (colour - 128) & 7; gfx_bg_true = 0; }   // background
+    else               { gfx_fg = colour & 7;         gfx_fg_true = 0; }   // foreground
+}
+
+// GCOL r,g,b : set the graphics foreground to a 24-bit truecolour.
+void con_gcol_rgb(int r, int g, int b) {
+    gfx_fg_true = 1;
+    gfx_fg_col  = rgb_pixel(r, g, b);
+}
+
+// COLOUR l,r,g,b : redefine logical colour l's palette entry (like VDU 19).
+void con_palette(int logical, int r, int g, int b) {
+    bbc_palette[logical & 7] = rgb_pixel(r, g, b);
 }
 
 void con_clg(void) {
@@ -568,7 +709,7 @@ void con_clg(void) {
     int x0, y0, x1, y1;
     gfx_clip_rect(&x0, &y0, &x1, &y1);         // clear only the graphics viewport
     gfx_set_op(0);
-    fill_rect(x0, y0, x1, y1, bbc_palette[gfx_bg & 7]);
+    fill_rect(x0, y0, x1, y1, gcol_bg());
 }
 
 void con_plot(int code, int x, int y) {
@@ -587,7 +728,7 @@ void con_plot(int code, int x, int y) {
 
     if (group == 0 && cmode == 0) return;          // plain MOVE
 
-    uint32_t col = (cmode == 3) ? bbc_palette[gfx_bg & 7] : bbc_palette[gfx_fg & 7];
+    uint32_t col = (cmode == 3) ? gcol_bg() : gcol_fg();
     int op = (cmode == 2) ? 3 : gfx_act;           // inverse colour -> EOR
     gfx_set_op(op);
 
@@ -619,6 +760,121 @@ int con_point(int x, int y) {
     uint32_t px = getpixel(lx2px(x), ly2py(y));
     for (int i = 0; i < 8; i++) if (bbc_palette[i] == px) return i;
     return -1;
+}
+
+// --- high-level shape commands (BBC logical coordinates) --------------------
+// All draw in the current graphics foreground (logical or truecolour) and honour
+// the GCOL plot op. Filled variants pass fill != 0.
+
+void con_line(int x1, int y1, int x2, int y2) {
+    if (!fb_ready) return;
+    gfx_set_op(gfx_act);
+    draw_line(lx2px(x1), ly2py(y1), lx2px(x2), ly2py(y2), gcol_fg());
+    gfx_set_op(0);
+    gpx0 = x2; gpy0 = y2;                 // leave the graphics cursor at the end
+}
+
+// RECTANGLE x,y,w,h : (x,y) is a corner, w/h are width/height in logical units.
+void con_rectangle(int x, int y, int w, int h, int fill) {
+    if (!fb_ready) return;
+    int x0 = lx2px(x), y0 = ly2py(y), x1 = lx2px(x + w), y1 = ly2py(y + h);
+    gfx_set_op(gfx_act);
+    if (fill) fill_rect(x0, y0, x1, y1, gcol_fg());
+    else      draw_rect(x0, y0, x1, y1, gcol_fg());
+    gfx_set_op(0);
+}
+
+void con_circle(int x, int y, int r, int fill) {
+    if (!fb_ready) return;
+    int cx = lx2px(x), cy = ly2py(y);
+    int rp = r * (int)FB_WIDTH / GFX_LW;             // scale to a screen-round radius
+    if (rp < 0) rp = -rp;
+    gfx_set_op(gfx_act);
+    if (fill) fill_circle(cx, cy, rp, gcol_fg());
+    else      draw_circle(cx, cy, rp, gcol_fg());
+    gfx_set_op(0);
+}
+
+void con_ellipse(int x, int y, int rx, int ry, int fill) {
+    if (!fb_ready) return;
+    int cx = lx2px(x), cy = ly2py(y);
+    int rpx = rx * (int)FB_WIDTH / GFX_LW;
+    int rpy = ry * (int)FB_HEIGHT / GFX_LH;
+    gfx_set_op(gfx_act);
+    if (fill) fill_ellipse(cx, cy, rpx, rpy, gcol_fg());
+    else      draw_ellipse(cx, cy, rpx, rpy, gcol_fg());
+    gfx_set_op(0);
+}
+
+void con_fill(int x, int y) {
+    if (!fb_ready) return;
+    flood_fill(lx2px(x), ly2py(y), gcol_fg());
+}
+
+// --- sprites (screen-rectangle capture / stamp via a DIM buffer) ------------
+// Layout at `addr`: 4 bytes width, 4 bytes height (little-endian), then
+// width*height pixels of 4 bytes each (framebuffer format), top row first.
+// Bytes are accessed one at a time to stay safe under -mstrict-align.
+static void sp_wr32(volatile unsigned char *p, uint32_t v) {
+    p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+}
+static uint32_t sp_rd32(volatile unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+void con_sprite_get(long addr, int x1, int y1, int x2, int y2) {
+    if (!fb_ready || !addr) return;
+    int px1 = lx2px(x1), py1 = ly2py(y1), px2 = lx2px(x2), py2 = ly2py(y2);
+    if (px1 > px2) { int t = px1; px1 = px2; px2 = t; }
+    if (py1 > py2) { int t = py1; py1 = py2; py2 = t; }
+    int w = px2 - px1 + 1, h = py2 - py1 + 1;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    sp_wr32(p, (uint32_t)w);
+    sp_wr32(p + 4, (uint32_t)h);
+    volatile unsigned char *q = p + 8;
+    for (int row = 0; row < h; row++)
+        for (int col = 0; col < w; col++) {
+            sp_wr32(q, getpixel(px1 + col, py1 + row));
+            q += 4;
+        }
+}
+
+// (x,y) is the logical point where the sprite's top-left corner is placed. Each
+// pixel's alpha (the high byte) controls transparency: 0 = fully transparent
+// (skipped, so the background shows through), 255 = opaque (drawn through the
+// current plot op, so EOR animation still works), values in between are
+// alpha-blended over the current screen pixel. GGET captures and images without
+// an alpha channel store 255 everywhere, so they draw fully opaque as before.
+void con_sprite_put(long addr, int x, int y) {
+    if (!fb_ready || !addr) return;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
+    if (w <= 0 || h <= 0 || w > (int)FB_WIDTH || h > (int)FB_HEIGHT) return;
+    int dx = lx2px(x), dy = ly2py(y);
+    volatile unsigned char *q = p + 8;
+    gfx_set_op(gfx_act);
+    for (int row = 0; row < h; row++)
+        for (int col = 0; col < w; col++) {
+            uint32_t src = sp_rd32(q); q += 4;
+            unsigned a = (src >> 24) & 0xFF;
+            if (a == 0) continue;                          // fully transparent
+            int px = dx + col, py = dy + row;
+            if (a == 255) {                                // opaque: honour plot op
+                putpixel_op(px, py, src);
+                continue;
+            }
+            // Partial alpha: blend src over the current screen pixel (store mode).
+            uint32_t dst = getpixel(px, py);
+            unsigned na = 255 - a;
+            unsigned r = (( src        & 0xff) * a + ( dst        & 0xff) * na + 127) / 255;
+            unsigned g = (((src >> 8)  & 0xff) * a + ((dst >> 8)  & 0xff) * na + 127) / 255;
+            unsigned b = (((src >> 16) & 0xff) * a + ((dst >> 16) & 0xff) * na + 127) / 255;
+            gfx_set_op(0);
+            putpixel_op(px, py, 0xFF000000u | (b << 16) | (g << 8) | r);
+            gfx_set_op(gfx_act);
+        }
+    gfx_set_op(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,6 +1265,8 @@ void kernel_main(void) {
     g_kbd_ok = usb_kbd_init();
     boot_msg(g_kbd_ok ? "[USB] keyboard ready\n"
                       : "[USB] no USB-C keyboard\n");
+    g_mouse_dwc2 = usb_mouse_present();
+    if (g_mouse_dwc2) boot_msg("[USB] mouse ready (DWC2)\n");
 
     // On real hardware the USB-A ports are behind the VL805 xHCI on PCIe; bring
     // it up and look for a keyboard there too. QEMU does not model the PCIe
@@ -1019,6 +1277,8 @@ void kernel_main(void) {
         if (xhci_mmio) g_xhci_ok = xhci_kbd_init(xhci_mmio);
         boot_msg(g_xhci_ok ? "[USB] USB-A keyboard ready\n"
                            : "[USB] no USB-A keyboard\n");
+        g_mouse_xhci = xhci_mouse_present();
+        if (g_mouse_xhci) boot_msg("[USB] mouse ready (USB-A)\n");
     }
 
     // Write the full boot log to BOOTLOG.TXT on the data partition so USB

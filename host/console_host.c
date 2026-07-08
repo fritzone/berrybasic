@@ -85,3 +85,21 @@ void con_gcol(int action, int colour) { (void)action; (void)colour; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}
 int  con_point(int x, int y) { (void)x; (void)y; return -1; }
+
+// Graphics library: no framebuffer on the host, so these are no-ops.
+void con_gcol_rgb(int r, int g, int b) { (void)r; (void)g; (void)b; }
+void con_palette(int l, int r, int g, int b) { (void)l; (void)r; (void)g; (void)b; }
+void con_line(int x1, int y1, int x2, int y2) { (void)x1; (void)y1; (void)x2; (void)y2; }
+void con_rectangle(int x, int y, int w, int h, int f) { (void)x; (void)y; (void)w; (void)h; (void)f; }
+void con_circle(int x, int y, int r, int f) { (void)x; (void)y; (void)r; (void)f; }
+void con_ellipse(int x, int y, int rx, int ry, int f) { (void)x; (void)y; (void)rx; (void)ry; (void)f; }
+void con_fill(int x, int y) { (void)x; (void)y; }
+void con_sprite_get(long a, int x1, int y1, int x2, int y2) { (void)a; (void)x1; (void)y1; (void)x2; (void)y2; }
+void con_sprite_put(long a, int x, int y) { (void)a; (void)x; (void)y; }
+
+// No mouse on the host backend; report a parked pointer with no buttons.
+void con_mouse(int *x, int *y, int *buttons) {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (buttons) *buttons = 0;
+}

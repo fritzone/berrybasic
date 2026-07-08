@@ -17,6 +17,7 @@ typedef struct { int x1, y1, x2, y2, clip; } viewport_t;
 
 void init_graphics(uint32_t *fb, uint32_t w, uint32_t h, uint32_t pitch);
 void putpixel(int x, int y, uint32_t color);
+void putpixel_op(int x, int y, uint32_t color);   // like putpixel but applies the plot op
 uint32_t getpixel(int x, int y);
 void bar(int x1, int y1, int x2, int y2, uint32_t color);
 void cleardevice(void);
@@ -35,9 +36,15 @@ void gfx_clip_rect(int *x0, int *y0, int *x1, int *y1);
 void draw_glyph_op(const unsigned char *glyph, int x, int y, int scale, uint32_t color);
 void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
 void fill_rect(int x0, int y0, int x1, int y1, uint32_t color);
+void draw_rect(int x0, int y0, int x1, int y1, uint32_t color);   // outline
 void fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color);
 void draw_circle(int cx, int cy, int r, uint32_t color);
 void fill_circle(int cx, int cy, int r, uint32_t color);
+void draw_ellipse(int cx, int cy, int rx, int ry, uint32_t color); // outline
+void fill_ellipse(int cx, int cy, int rx, int ry, uint32_t color);
+// Flood-fill the connected region of one colour starting at (x,y) with `color`
+// (honours the clip rectangle; writes solid pixels regardless of plot op).
+void flood_fill(int x, int y, uint32_t color);
 
 // Shift the whole framebuffer up by `pixels` rows; fill the exposed bottom
 // `pixels` rows with `fill`. Used by the text console to scroll.

@@ -16,4 +16,8 @@
 106 SEED Z%, "SORTARR.SED"
 108 CALL Z%, "E"
 110 PRINT "sorted E: "; E(0); " "; E(1); " "; E(2); " "; E(3); " "; E(4)
+112 DIM B% 9
+114 FOR I = 0 TO 9 : B%?I = I * I : NEXT
+116 SEED W%, "BUFSUM.SED"
+118 PRINT "buf sum (seed reads BASIC mem): "; CALL(W%, B%, 10)
 120 END
