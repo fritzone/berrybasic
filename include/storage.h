@@ -21,6 +21,22 @@ int  stg_rmdir(const char *path);   // remove an EMPTY directory; 0 ok, <0 error
 int  stg_chdir(const char *path);   // change the current directory; 0 ok, <0 error
 const char *stg_cwd(void);          // current directory path (for PWD / prompts)
 
+// --- directory enumeration --------------------------------------------------
+// One directory scan is active at a time (a single global cursor). stg_diropen
+// points it at a directory (path, absolute or relative; "" or "." = current);
+// each stg_dirnext yields the next entry. This backs the BASIC DIROPEN /
+// DIRNEXT / DIRNAME$ / DIRSIZE / DIRTYPE / DIRDATE$ / DIRTIME$ words.
+typedef struct {
+    char name[13];              // "NAME.EXT" (8.3, uppercased, no path), NUL-terminated
+    int  is_dir;                // 1 = directory, 0 = regular file
+    long size;                  // size in bytes (0 for directories)
+    int  year, month, day;      // last-write date (month/day 1-based; 0 if none)
+    int  hour, minute;          // last-write time
+} stg_dirent;
+
+int  stg_diropen(const char *path);   // begin scanning a directory; 0 ok, <0 error
+int  stg_dirnext(stg_dirent *out);    // 1 = entry filled, 0 = end of dir, <0 error
+
 // --- byte-level channel (file-handle) I/O -----------------------------------
 // Streaming access to individual files, backed directly by the filesystem
 // (writes grow the file live). Used by the BASIC OPENIN/OPENOUT/OPENUP, CLOSE#,

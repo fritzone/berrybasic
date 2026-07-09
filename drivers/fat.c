@@ -778,3 +778,71 @@ int stg_chdir(const char *path) {
     cwd_path[i] = 0;
     return 0;
 }
+
+// Resolve a whole path to a directory's first cluster (0 = root). Unlike
+// resolve_parent this descends into the final component too. "" / "/" / "." => the
+// starting directory (root for a leading '/', otherwise the current directory).
+static int resolve_dir(const char *path, uint32_t *out) {
+    uint32_t cur = (path[0] == '/') ? 0 : cwd_clus;
+    const char *p = path; char comp[16];
+    while (next_comp(&p, comp)) {
+        uint32_t nxt;
+        int r = descend(cur, comp, &nxt);
+        if (r) return r;
+        cur = nxt;
+    }
+    *out = cur;
+    return 0;
+}
+
+// --- directory enumeration (single active scan) -----------------------------
+static uint32_t enum_clus;      // directory being scanned (0 = root)
+static uint32_t enum_n;         // current sector index within that directory
+static int      enum_e;         // current byte offset within the sector
+static int      enum_active;
+
+int stg_diropen(const char *path) {
+    if (!fat_ok) return STG_ENOFS;
+    uint32_t clus;
+    int r = resolve_dir(path, &clus);
+    if (r) return r;
+    enum_clus = clus; enum_n = 0; enum_e = 0; enum_active = 1;
+    return 0;
+}
+
+int stg_dirnext(stg_dirent *out) {
+    if (!fat_ok) return STG_ENOFS;
+    if (!enum_active) return STG_EBADF;
+    uint8_t s[SECSZ];
+    for (;;) {
+        uint32_t l = dir_sector(enum_clus, enum_n);
+        if (!l) { enum_active = 0; return 0; }              // ran off the end
+        if (sd_read(l, 1, s)) return STG_EIO;
+        while (enum_e < SECSZ) {
+            uint8_t *d = s + enum_e;
+            enum_e += 32;
+            if (d[0] == 0x00) { enum_active = 0; return 0; } // end-of-directory marker
+            if (d[0] == 0xE5) continue;                      // deleted
+            if (d[11] == 0x0F) continue;                     // long-file-name fragment
+            if (d[11] & 0x08) continue;                      // volume label
+            if (d[0] == '.') continue;                       // "." / ".."
+            int k = 0;                                       // build "NAME.EXT"
+            for (int i = 0; i < 8 && d[i] != ' '; i++) out->name[k++] = (char)d[i];
+            if (d[8] != ' ' || d[9] != ' ' || d[10] != ' ') {
+                out->name[k++] = '.';
+                for (int i = 8; i < 11 && d[i] != ' '; i++) out->name[k++] = (char)d[i];
+            }
+            out->name[k] = 0;
+            out->is_dir = (d[11] & 0x10) ? 1 : 0;
+            out->size   = (long)rd32(d + 28);
+            uint16_t wt = rd16(d + 22), wd = rd16(d + 24);   // write time / date
+            out->year   = 1980 + (wd >> 9);
+            out->month  = (wd >> 5) & 0x0F;
+            out->day    = wd & 0x1F;
+            out->hour   = wt >> 11;
+            out->minute = (wt >> 5) & 0x3F;
+            return 1;
+        }
+        enum_n++; enum_e = 0;
+    }
+}

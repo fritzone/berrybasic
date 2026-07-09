@@ -288,10 +288,17 @@ static double parse_double(const char *s, int len, int *consumed) {
 // Program storage: sorted-by-line-number table of source lines
 // ---------------------------------------------------------------------------
 
-typedef struct { int num; char text[LINE_LEN]; } progline_t;
+// A program line. `module` is 0 for the main program and 1+ for lines pulled in
+// by IMPORT; line-number lookups (GOTO/GOSUB/labels/DATA) are scoped to the
+// running line's module, so a module's line numbers may freely overlap the main
+// program's. Module lines are appended at RUN and stripped when it ends.
+typedef struct { int num; int module; char text[LINE_LEN]; } progline_t;
 
 static progline_t prog[MAX_LINES];
-static int        prog_n = 0;
+static int        prog_n = 0;            // total lines (main + any imported modules)
+static int        main_n = 0;            // main-program lines only = prog[0..main_n)
+
+static int cur_module(void);             // module of the currently executing line
 
 static int line_is_blank(const char *t) {
     for (; *t; t++) if (!is_space(*t)) return 0;
@@ -316,12 +323,17 @@ static void prog_store(int num, const char *text) {
 
     for (int j = prog_n; j > i; j--) prog[j] = prog[j - 1];  // insert, keep sorted
     prog[i].num = num;
+    prog[i].module = 0;
     s_copy(prog[i].text, text, LINE_LEN);
     prog_n++;
 }
 
+// Resolve a line number within the current module only, so overlapping numbers
+// in the main program and an imported module never clash.
 static int find_line_index(int num) {
-    for (int i = 0; i < prog_n; i++) if (prog[i].num == num) return i;
+    int m = cur_module();
+    for (int i = 0; i < prog_n; i++)
+        if (prog[i].module == m && prog[i].num == num) return i;
     return -1;
 }
 
@@ -608,6 +620,7 @@ enum {
     KW_WHILE, KW_ENDWHILE, KW_ENDIF,                  // structured loops / block IF
     KW_CASE, KW_OF, KW_WHEN, KW_OTHERWISE, KW_ENDCASE, // CASE selection
     KW_DEF, KW_PROC, KW_FN, KW_ENDPROC, KW_LOCAL,     // procedures & functions
+    KW_IMPORT,                                        // IMPORT "module": pull in its PROC/FN
     KW_DIV, KW_MOD, KW_AND, KW_OR, KW_EOR, KW_NOT,    // operator keywords
     KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
@@ -621,6 +634,8 @@ enum {
     KW_MOUSE,                                                       // MOUSE x,y,b statement
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
     KW_MOUSEX, KW_MOUSEY, KW_MOUSEB,                  // mouse pointer x / y / buttons
+    KW_DIRNEXT, KW_DIRSIZE, KW_DIRTYPE,               // directory-scan cursor fields
+    KW_DIRNAMES, KW_DIRDATES, KW_DIRTIMES,            // (DIRNAME$/DIRDATE$/DIRTIME$)
     // Functions from the "standard library"
     KW_ABS, KW_INT, KW_SGN, KW_SQR, KW_SIN, KW_COS, KW_TAN, KW_ATN,
     KW_LOG, KW_EXP, KW_DEG, KW_RAD, KW_ACS, KW_ASN,
@@ -634,7 +649,8 @@ enum {
     KW_RGB,                                           // RGB(r,g,b) -> packed truecolour value
     KW_LOADSPRITE,                                    // LOADSPRITE("file") -> sprite address
     KW_SPRW, KW_SPRH,                                 // SPRW(addr)/SPRH(addr): sprite size
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_SPRH,
+    KW_DIROPEN,                                       // DIROPEN("path") -> start a scan
+    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_DIROPEN,
     KW_TAB, KW_SPC                                    // PRINT-only modifiers
 };
 
@@ -653,6 +669,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "OTHERWISE", KW_OTHERWISE }, { "ENDCASE", KW_ENDCASE },
     { "CLS",   KW_CLS   }, { "COLOUR", KW_COLOUR }, { "COLOR", KW_COLOUR },
     { "DEF",   KW_DEF   }, { "ENDPROC", KW_ENDPROC }, { "LOCAL", KW_LOCAL },
+    { "IMPORT", KW_IMPORT },
     { "DIV",   KW_DIV   }, { "MOD",  KW_MOD   }, { "AND",    KW_AND    },
     { "OR",    KW_OR    }, { "EOR",  KW_EOR   }, { "NOT",    KW_NOT    },
     { "ON",    KW_ON    }, { "DATA", KW_DATA  }, { "READ",   KW_READ   },
@@ -663,6 +680,9 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "LINE",  KW_LINE  }, { "RECTANGLE", KW_RECTANGLE }, { "CIRCLE", KW_CIRCLE },
     { "ELLIPSE", KW_ELLIPSE }, { "FILL", KW_FILL }, { "RGB", KW_RGB },
     { "LOADSPRITE", KW_LOADSPRITE }, { "SPRW", KW_SPRW }, { "SPRH", KW_SPRH },
+    { "DIROPEN", KW_DIROPEN }, { "DIRNEXT", KW_DIRNEXT },
+    { "DIRNAME$", KW_DIRNAMES }, { "DIRSIZE", KW_DIRSIZE }, { "DIRTYPE", KW_DIRTYPE },
+    { "DIRDATE$", KW_DIRDATES }, { "DIRTIME$", KW_DIRTIMES },
     { "GGET",  KW_GGET  }, { "GPUT", KW_GPUT }, { "SAVESPRITE", KW_SAVESPRITE },
     { "SAVE",  KW_SAVE  }, { "LOAD", KW_LOAD  }, { "CAT",    KW_CAT    },
     { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE }, { "SEED", KW_SEED },
@@ -774,11 +794,13 @@ static void lex_next(void) {
         while (is_alnum(*lx)) { if (n < 15) id[n++] = up(*lx); lx++; }
         if ((*lx == '$' || *lx == '%') && n < 15) { id[n++] = *lx; lx++; }  // $=string %=integer
         id[n] = 0;
-        // BBC PROCname / FNname have no space; the name follows the keyword.
-        if (id[0]=='P'&&id[1]=='R'&&id[2]=='O'&&id[3]=='C'&&id[4]) {
+        // BBC PROCname / FNname glue the name to the keyword; the spaced forms
+        // (DEF fn NAME, END proc) leave tok_var empty. Either way, PROC/FN here
+        // set tok_var so callers can tell glued from bare reliably.
+        if (id[0]=='P'&&id[1]=='R'&&id[2]=='O'&&id[3]=='C') {
             tok = T_KW; tok_kw = KW_PROC; s_copy(tok_var, id + 4, NAME_LEN); return;
         }
-        if (id[0]=='F'&&id[1]=='N'&&id[2]) {
+        if (id[0]=='F'&&id[1]=='N') {
             tok = T_KW; tok_kw = KW_FN; s_copy(tok_var, id + 2, NAME_LEN); return;
         }
         for (int i = 0; i < kwcount; i++)
@@ -839,6 +861,8 @@ static void lex_next(void) {
 
 static value_t eval_expr(void);
 static void    call_proc(int is_fn, value_t *retval);   // PROC/FN call (defined later)
+static void    call_named(int is_fn, const char *name, value_t *retval);
+static int     find_fn_def(const char *name);
 
 // Pull a required numeric/string operand, raising TYPE MISMATCH otherwise.
 static double need_num(void) {
@@ -977,6 +1001,22 @@ static void copy_fname(value_t s, char *out, int outsz) {
     int n = (s.len < outsz - 1) ? s.len : outsz - 1;
     for (int i = 0; i < n; i++) out[i] = s.str[i];
     out[n] = 0;
+}
+
+// Directory-scan cursor state, shared by DIROPEN / DIRNEXT and the field words
+// DIRNAME$ / DIRSIZE / DIRTYPE / DIRDATE$ / DIRTIME$. Only one scan runs at a
+// time; g_dir_valid says whether g_dirent holds a live entry.
+static stg_dirent g_dirent;
+static int        g_dir_valid;
+
+static void fmt_u2(char *p, int v) { p[0] = '0' + (v / 10) % 10; p[1] = '0' + v % 10; }
+static void fmt_date(char *b, int y, int m, int d) {   // "YYYY-MM-DD"
+    b[0] = '0' + (y / 1000) % 10; b[1] = '0' + (y / 100) % 10;
+    b[2] = '0' + (y / 10) % 10;   b[3] = '0' + y % 10;
+    b[4] = '-'; fmt_u2(b + 5, m); b[7] = '-'; fmt_u2(b + 8, d); b[10] = 0;
+}
+static void fmt_time(char *b, int h, int m) {          // "HH:MM"
+    fmt_u2(b, h); b[2] = ':'; fmt_u2(b + 3, m); b[5] = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,6 +1290,13 @@ static value_t eval_function(int fn) {
                         return v_num((double)stg_size(ch)); }
         case KW_PTR:  { int ch = read_channel(); if (g_err) return v_num(0);
                         return v_num((double)stg_tell(ch)); }
+        // DIROPEN "path" begins scanning a directory. Returns TRUE if the scan
+        // started, FALSE if the directory could not be opened. Walk it with
+        // DIRNEXT, read each entry via DIRNAME$/DIRSIZE/DIRTYPE/DIRDATE$/DIRTIME$.
+        case KW_DIROPEN: { value_t s = need_str(); if (g_err) return v_num(0);
+                           char nm[128]; copy_fname(s, nm, sizeof nm);
+                           g_dir_valid = 0;
+                           return v_num(stg_diropen(nm) == 0 ? -1.0 : 0.0); }
     }
 
     // All other functions keep the parenthesised form: FUNC(arg[,arg...]).
@@ -1426,7 +1473,14 @@ static value_t prim_base(void) {
         s_copy(name, tok_var, NAME_LEN);
         int isstr = name_is_str(name);
         lex_next();
-        if (tok == T_LP) {                       // array element
+        if (tok == T_LP) {                       // function call or array element
+            // A `name(args)` where `name` is a defined function is a call; only
+            // if no such function exists does it mean an array subscript.
+            if (find_fn_def(name) >= 0) {
+                value_t v = v_num(0);
+                call_named(1, name, &v);
+                return v;
+            }
             int idx; arr_t *a;
             if (!arr_elem(name, isstr, &idx, &a)) return v_num(0);
             return a->is_str ? v_str(arr_strs[idx].sptr, arr_strs[idx].slen)
@@ -1451,6 +1505,30 @@ static value_t prim_base(void) {
             case KW_FN:  { value_t v = v_num(0); call_proc(1, &v); return v; }
             case KW_GET:   lex_next(); return v_num((double)con_getkey());
             case KW_GETS:{ lex_next(); char ch = (char)con_getkey(); return str_in_scratch(&ch, 1); }
+            // Directory-scan cursor (see DIROPEN). DIRNEXT advances to the next
+            // entry, returning TRUE while there is one; the rest read fields of
+            // the entry DIRNEXT last landed on.
+            case KW_DIRNEXT: { lex_next();
+                               int r = stg_dirnext(&g_dirent);
+                               if (r < 0) { err("Disk error"); return v_num(0); }
+                               g_dir_valid = (r == 1);
+                               return v_num(r == 1 ? -1.0 : 0.0); }
+            case KW_DIRNAMES: { lex_next();
+                                if (!g_dir_valid) return v_str(0, 0);
+                                int n = 0; while (g_dirent.name[n]) n++;
+                                return str_in_scratch(g_dirent.name, n); }
+            case KW_DIRSIZE: lex_next();
+                             return v_num(g_dir_valid ? (double)g_dirent.size : 0.0);
+            case KW_DIRTYPE: lex_next();
+                             return v_num(g_dir_valid && g_dirent.is_dir ? -1.0 : 0.0);
+            case KW_DIRDATES: { lex_next(); char b[12];
+                                if (!g_dir_valid) return v_str(0, 0);
+                                fmt_date(b, g_dirent.year, g_dirent.month, g_dirent.day);
+                                return str_in_scratch(b, 10); }
+            case KW_DIRTIMES: { lex_next(); char b[8];
+                                if (!g_dir_valid) return v_str(0, 0);
+                                fmt_time(b, g_dirent.hour, g_dirent.minute);
+                                return str_in_scratch(b, 5); }
         }
     }
     if (tok == T_KW && is_func_kw(tok_kw)) return eval_function(tok_kw);
@@ -1630,6 +1708,11 @@ static value_t eval_expr(void) {                  // OR / EOR: lowest precedence
 static const char *cur_text;     // text of the line currently executing
 static int  cur_line_idx;        // prog[] index of that line, or -1 if immediate
 
+// The module the executing line belongs to (0 = main program, or immediate mode).
+static int cur_module(void) {
+    return (cur_line_idx >= 0 && cur_line_idx < prog_n) ? prog[cur_line_idx].module : 0;
+}
+
 static int  g_stop;              // END encountered -> stop RUN
 static int  g_branch;            // a jump was requested this statement
 static int  g_branch_line;       // target prog[] index
@@ -1668,14 +1751,31 @@ static int       while_sp;
 static int       case_sp;
 
 // Procedures / functions
-static int     g_return;         // ENDPROC or =<expr> ends the current PROC/FN body
-static value_t fn_retval;        // value returned from an FN via =<expr>
+static int     g_return;         // ENDPROC / END FN / =<expr> ends the current body
+static value_t fn_retval;        // value returned from an FN
 static int     call_sp;          // PROC/FN recursion depth
 
+// New-style functions (DEF fn NAME(..) / NAME = expr / END fn) return the value
+// of a local variable named after the function. This stack holds that variable
+// for each active new-style call, so END fn knows what to hand back.
+#define FN_RET_MAX 32
+static var_t  *fn_ret_slot[FN_RET_MAX];
+static int     fn_ret_sp;
+
 #define DEF_MAX 64
-typedef struct { char name[NAME_LEN]; int is_fn; int line; int off; } defrec_t;
+// newstyle: 1 = DEF fn/proc NAME (spaced, END fn/proc-terminated); 0 = glued
+// DEF FNNAME / DEF PROCNAME (=<expr> / ENDPROC-terminated).
+typedef struct { char name[NAME_LEN]; int is_fn; int newstyle; int line; int off; } defrec_t;
 static defrec_t defs[DEF_MAX];
 static int      def_n;
+
+// Is `name` a defined function (either style)? Returns its defs[] index or -1.
+// Lets a bare `name(args)` in an expression be recognised as a call.
+static int find_fn_def(const char *name) {
+    for (int i = 0; i < def_n; i++)
+        if (defs[i].is_fn && s_eq(defs[i].name, name)) return i;
+    return -1;
+}
 
 static int cur_off(void) { return (int)(lx - cur_text); }
 
@@ -1692,7 +1792,9 @@ static int find_label(const char *name) {
     const char *save_lx   = lx;
     int save_tok = tok, save_kw = tok_kw;
     int found = -1;
+    int m = cur_module();
     for (int i = 0; i < prog_n; i++) {
+        if (prog[i].module != m) continue;
         cur_text = prog[i].text; lx = prog[i].text; lex_next();
         if (tok == T_LABEL && s_eq(tok_var, name)) { found = i; break; }
     }
@@ -2456,6 +2558,7 @@ static void stmt_list(void) {
         if (tok == T_NUM) { hi = (int)tok_num; lex_next(); }
     }
     for (int i = 0; i < prog_n; i++) {
+        if (prog[i].module != 0) continue;                         // never list module lines
         if (prog[i].num < lo || prog[i].num > hi) continue;
         con_putn(prog[i].num);
         con_putc(' ');
@@ -2491,8 +2594,10 @@ static int data_next(int *len) {
     for (;;) {
         if (data_off < 0) {                      // locate the next DATA line
             int body;
-            while (data_pc < prog_n && !line_is_data(prog[data_pc].text, &body)) data_pc++;
-            if (data_pc >= prog_n) return 0;
+            int m = cur_module();                // DATA is scoped to the reader's module
+            while (data_pc < prog_n && prog[data_pc].module == m &&
+                   !line_is_data(prog[data_pc].text, &body)) data_pc++;
+            if (data_pc >= prog_n || prog[data_pc].module != m) return 0;
             data_off = body;
         }
         const char *t = prog[data_pc].text;
@@ -2679,6 +2784,7 @@ static void stmt_save(void) {
     if (!read_filename(name, sizeof name)) return;
     int pos = 0;
     for (int i = 0; i < prog_n && pos < STG_BUF_SIZE - LINE_LEN - 16; i++) {
+        if (prog[i].module != 0) continue;                         // never save module lines
         pos += uint_to_str(stg_buf + pos, prog[i].num);
         stg_buf[pos++] = ' ';
         const char *t = prog[i].text;
@@ -2716,6 +2822,90 @@ static void stmt_load(void) {
             while (is_space(*p)) p++;
             prog_store(num, p);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Modules (IMPORT). A module is an ordinary numbered BASIC text file holding
+// DEF PROC / DEF fn definitions. At RUN, every `IMPORT "name"` line in the main
+// program (and, transitively, in imported modules) loads that file and appends
+// its lines to prog[] under a fresh module id. Line numbers may overlap the main
+// program's because line-number lookups are scoped per module (see cur_module).
+// The appended lines are stripped when the run ends, so editing/LIST/SAVE only
+// ever see the main program.
+// ---------------------------------------------------------------------------
+#define MAX_MODULES 16
+static char imported_names[MAX_MODULES][64];
+static int  n_imported;
+
+// Append one line to `module`'s block, keeping that block sorted by line number.
+// Module blocks sit at the tail of prog[] (after main and earlier modules).
+static void module_add_line(int module, int num, const char *text) {
+    if (prog_n >= MAX_LINES) { err("Out of memory"); return; }
+    int i = prog_n;
+    while (i > 0 && prog[i-1].module == module && prog[i-1].num > num) {
+        prog[i] = prog[i-1]; i--;
+    }
+    prog[i].num = num; prog[i].module = module;
+    s_copy(prog[i].text, text, LINE_LEN);
+    prog_n++;
+}
+
+// Load a module file and append its numbered lines under `module`. Returns 0, or
+// a negative STG_* error if the file could not be read.
+static int load_module(const char *name, int module) {
+    int n = stg_read(name, stg_buf, STG_BUF_SIZE);
+    if (n < 0) return n;
+    int i = 0;
+    while (i < n && !g_err) {
+        char line[LINE_LEN];
+        int j = 0;
+        while (i < n && stg_buf[i] != '\n' && stg_buf[i] != '\r') {
+            if (j < LINE_LEN - 1) line[j++] = stg_buf[i];
+            i++;
+        }
+        line[j] = 0;
+        while (i < n && (stg_buf[i] == '\n' || stg_buf[i] == '\r')) i++;
+        char *p = line;
+        while (is_space(*p)) p++;
+        if (is_digit(*p)) {
+            int num = 0;
+            while (is_digit(*p)) { num = num * 10 + (*p - '0'); p++; }
+            while (is_space(*p)) p++;
+            module_add_line(module, num, p);
+        }
+    }
+    return 0;
+}
+
+// If `text` begins with IMPORT "name", copy the (.BAS-defaulted) file name into
+// `out` and return 1; otherwise 0. Uses the global lexer, safe in the pre-pass.
+static int line_import_name(const char *text, char *out, int outsz) {
+    cur_text = text; lx = text; lex_next();
+    if (!(tok == T_KW && tok_kw == KW_IMPORT)) return 0;
+    return read_filename(out, outsz);          // reads from lx, applies the .BAS default
+}
+
+// Pre-pass, run before a program executes: pull in every module reachable via
+// IMPORT and append its lines. prog_n grows as modules are added, so the loop
+// also visits IMPORT lines inside modules (transitive). Dedup by name breaks
+// cycles and avoids importing the same module twice.
+static void import_modules(void) {
+    n_imported = 0;
+    for (int i = 0; i < prog_n && !g_err; i++) {
+        char name[64];
+        if (!line_import_name(prog[i].text, name, sizeof name)) {
+            if (g_err) return;                 // malformed IMPORT (no name)
+            continue;
+        }
+        int dup = 0;
+        for (int k = 0; k < n_imported; k++)
+            if (s_eq(imported_names[k], name)) { dup = 1; break; }
+        if (dup) continue;
+        if (n_imported >= MAX_MODULES) { err("Too many imported modules"); return; }
+        s_copy(imported_names[n_imported], name, 64);
+        if (load_module(name, n_imported + 1) < 0) { err("Imported module not found"); return; }
+        n_imported++;
     }
 }
 
@@ -3131,8 +3321,14 @@ static void exec_statement(void) {
             case KW_ENDPROC: g_return = 1; return;
             case KW_LOCAL: stmt_local();   return;
             case KW_DEF:   tok = T_EOL;    return;   // DEF lines are skipped in normal flow
+            case KW_IMPORT: tok = T_EOL;   return;   // resolved in the pre-pass; a no-op here
             case KW_REM:   tok = T_EOL;    return;   // ignore rest of line
-            case KW_END:   g_stop = 1;     return;
+            case KW_END:                             // END fn/proc = return; bare END = stop
+                lex_next();
+                if (tok == T_KW && (tok_kw == KW_FN || tok_kw == KW_PROC)) {
+                    g_return = 1; return;
+                }
+                g_stop = 1; return;
             case KW_ON:      stmt_on();      return;
             case KW_READ:    stmt_read();    return;
             case KW_RESTORE: stmt_restore(); return;
@@ -3220,10 +3416,18 @@ static void scan_defs(void) {
         if (tok != T_KW || tok_kw != KW_DEF) continue;
         lex_next();
         if (tok == T_KW && (tok_kw == KW_PROC || tok_kw == KW_FN)) {
+            int is_fn = (tok_kw == KW_FN);
+            int newstyle = 0;
+            if (tok_var[0] == 0) {                // spaced: "DEF fn NAME" / "DEF proc NAME"
+                newstyle = 1;
+                lex_next();                       // the name follows as its own word
+                if (tok != T_VAR) continue;       // malformed DEF line
+            }
             s_copy(defs[def_n].name, tok_var, NAME_LEN);
-            defs[def_n].is_fn = (tok_kw == KW_FN);
-            defs[def_n].line  = i;
-            defs[def_n].off   = cur_off();        // just after the name ('(' or body)
+            defs[def_n].is_fn    = is_fn;
+            defs[def_n].newstyle = newstyle;
+            defs[def_n].line     = i;
+            defs[def_n].off      = cur_off();     // just after the name ('(' or body)
             def_n++;
         }
     }
@@ -3245,7 +3449,14 @@ static void run_body(int pc, int off) {
     }
 }
 
+static int run_depth;                          // nested run_program depth (for IMPORT)
+
 static void run_program(int start_pc, int start_off) {
+    int outer = (run_depth == 0);
+    run_depth++;
+    // Only the outermost RUN pulls in modules (and strips them at the end), so a
+    // program that itself issues RUN doesn't re-import on top of the loaded set.
+    if (outer) { main_n = prog_n; import_modules(); }
     g_stop = 0;
     gosub_sp = 0;
     for_sp = 0;
@@ -3253,16 +3464,20 @@ static void run_program(int start_pc, int start_off) {
     while_sp = 0;
     case_sp = 0;
     call_sp = 0;
+    fn_ret_sp = 0;
     local_sp = 0;
     scratch_base = 0;
     for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;   // fresh run reloads its seeds
     seed_heap_reset();                                       // and starts with a clean heap
     data_pc = 0;
     data_off = -1;
-    scan_defs();
+    scan_defs();                                            // now also sees module PROC/FN
     int pc  = start_pc;
     int off = start_off;
-    while (pc >= 0 && pc < prog_n && !g_err && !g_stop) {
+    // Top-level flow runs the MAIN program only (indices [0, main_n)); module
+    // lines live above main_n and are reached solely through PROC/FN calls, so
+    // falling off the end of main must not wander into them.
+    while (pc >= 0 && pc < main_n && !g_err && !g_stop) {
         cur_line_idx = pc;
         g_runline = prog[pc].num;
         g_branch = 0;
@@ -3277,22 +3492,22 @@ static void run_program(int start_pc, int start_off) {
     g_runline = -1;
     g_stop = 0;
     g_branch = 0;
+    run_depth--;
+    if (outer) prog_n = main_n;                // strip imported module lines
 }
 
 // ---------------------------------------------------------------------------
-// PROC / FN call. The current token is KW_PROC or KW_FN with the name in
-// tok_var. Evaluates arguments, binds them (plus any LOCALs) over the callee's
-// parameters, runs the body, then restores the caller's state. FN returns its
-// value (from =<expr>) in *retval.
+// PROC / FN call. `name` is the callee; on entry the current token is at the
+// argument list ('(' or, for a no-arg call, whatever follows the name).
+// Evaluates arguments, binds them (plus any LOCALs) over the callee's
+// parameters, runs the body, then restores the caller's state. A function
+// returns its value in *retval: an old-style FN via =<expr>, a new-style
+// `DEF fn NAME` via the value of its NAME variable at END fn.
 // ---------------------------------------------------------------------------
 
 #define MAX_ARGS 16
 
-static void call_proc(int is_fn, value_t *retval) {
-    char name[NAME_LEN];
-    s_copy(name, tok_var, NAME_LEN);
-    lex_next();                                  // consume PROC/FN token
-
+static void call_named(int is_fn, const char *name, value_t *retval) {
     // Evaluate arguments (copy string args into scratch so a later GC can't move them).
     value_t args[MAX_ARGS];
     int argc = 0;
@@ -3370,10 +3585,37 @@ static void call_proc(int is_fn, value_t *retval) {
     }
     if (ok && pi != argc) { err("Wrong number of arguments"); ok = 0; }
 
+    // New-style functions return the value of a variable named after the
+    // function. Bind it as a fresh local (so it is private and restored on
+    // exit) and remember it so END fn / the post-body read can find it.
+    int pushed_ret = 0;
+    if (ok && is_fn && defs[d].newstyle) {
+        if (fn_ret_sp >= FN_RET_MAX) { err("Too many nested function calls"); ok = 0; }
+        else {
+            var_t *rv = var_find(name);
+            if (!rv) ok = 0;
+            else {
+                local_stack[local_sp].slot = rv;
+                local_stack[local_sp].old  = *rv;
+                local_sp++;
+                rv->is_str = name_is_str(name);
+                rv->num = 0; rv->s.sptr = 0; rv->s.slen = 0;
+                fn_ret_slot[fn_ret_sp++] = rv;
+                pushed_ret = 1;
+            }
+        }
+    }
+
     if (ok) {
         run_body(defs[d].line, body_off);
+        if (is_fn && defs[d].newstyle && !g_err) {    // return = the NAME variable
+            var_t *rv = fn_ret_slot[fn_ret_sp - 1];
+            fn_retval = rv->is_str ? str_in_scratch(rv->s.sptr, rv->s.slen)
+                                   : v_num(rv->num);
+        }
         if (is_fn && retval && !g_err) *retval = fn_retval;
     }
+    if (pushed_ret) fn_ret_sp--;
 
     // Restore locals (parameters + any LOCALs declared in the body).
     while (local_sp > local_mark) {
@@ -3392,6 +3634,15 @@ static void call_proc(int is_fn, value_t *retval) {
     s_copy(tok_var, save_var, NAME_LEN);
     cur_line_idx = save_line; g_runline = save_runline;
     g_branch = save_br; g_branch_line = save_brl; g_branch_off = save_bro;
+}
+
+// PROC / FN call written with the keyword prefix (PROCname / FNname). The current
+// token is KW_PROC or KW_FN with the name in tok_var; consume it, then delegate.
+static void call_proc(int is_fn, value_t *retval) {
+    char name[NAME_LEN];
+    s_copy(name, tok_var, NAME_LEN);
+    lex_next();                                  // consume the PROC/FN token
+    call_named(is_fn, name, retval);
 }
 
 // ---------------------------------------------------------------------------
@@ -3424,6 +3675,9 @@ static int process_line(char *line) {
 
 void basic_init(void) {
     prog_n = 0;
+    main_n = 0;
+    run_depth = 0;
+    n_imported = 0;
     var_n = 0;
     g_err = 0;
     g_runline = -1;

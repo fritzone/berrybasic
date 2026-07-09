@@ -118,6 +118,24 @@ HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storag
 host: $(HOST_SRC) | $(BUILD_DIR)
 	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC)
 
+# Unit tests (Catch2) for the interpreter, configured by basic/CMakeLists.txt.
+#   make test        build + run the test suite
+#   make coverage    build instrumented, run tests, emit an HTML+text report
+TEST_BUILD    = $(BUILD_DIR)/tests
+COV_BUILD     = $(BUILD_DIR)/tests-cov
+
+# The '&&' chaining is intentional: it runs the recipe through the shell (whose
+# PATH search skips a stray directory named 'cmake') and stops on first failure.
+test:
+	cmake -S basic -B $(TEST_BUILD) -DCMAKE_BUILD_TYPE=Debug && \
+	cmake --build $(TEST_BUILD) -j && \
+	ctest --test-dir $(TEST_BUILD) --output-on-failure
+
+coverage:
+	cmake -S basic -B $(COV_BUILD) -DCOVERAGE=ON && \
+	cmake --build $(COV_BUILD) --target coverage && \
+	echo "HTML report: $(COV_BUILD)/coverage/index.html"
+
 # Native "seeds": position-independent AArch64 blobs that BASIC loads with SEED
 # and calls with CALL/CALL$. Built with the same bare-metal toolchain as the
 # kernel, linked flat (seed/seed.ld), and gated on having ZERO relocations left
@@ -153,4 +171,4 @@ $(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR
 	$(OBJCOPY) -O binary $(BUILD_DIR)/seeds/$*.elf $@
 	@echo "  built seed $@"
 
-.PHONY: all clean config newseed sdcard sdimage flash run host seeds
+.PHONY: all clean config newseed sdcard sdimage flash run host seeds test coverage

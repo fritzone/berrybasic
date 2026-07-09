@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include "storage.h"
 #include "console.h"
 
@@ -141,4 +142,46 @@ int stg_chdir(const char *path) {
 const char *stg_cwd(void) {
     static char cwdbuf[1024];
     return getcwd(cwdbuf, sizeof cwdbuf) ? cwdbuf : "/";
+}
+
+// --- directory enumeration --------------------------------------------------
+static DIR *enum_d;
+static char enum_dir[1024];
+
+int stg_diropen(const char *path) {
+    if (enum_d) { closedir(enum_d); enum_d = NULL; }
+    const char *p = (path && path[0]) ? path : ".";
+    enum_d = opendir(p);
+    if (!enum_d) return STG_ENOTFOUND;
+    snprintf(enum_dir, sizeof enum_dir, "%s", p);
+    return 0;
+}
+
+int stg_dirnext(stg_dirent *out) {
+    if (!enum_d) return STG_EBADF;
+    struct dirent *e;
+    while ((e = readdir(enum_d))) {
+        if (e->d_name[0] == '.') continue;                  // skip hidden + "." / ".."
+        char full[2048];
+        snprintf(full, sizeof full, "%s/%s", enum_dir, e->d_name);
+        struct stat st;
+        int have = (stat(full, &st) == 0);
+        int isdir = (e->d_type == DT_DIR) || (have && S_ISDIR(st.st_mode));
+        size_t k = 0;                                       // truncate to the 8.3-sized field
+        for (; e->d_name[k] && k < sizeof out->name - 1; k++) out->name[k] = e->d_name[k];
+        out->name[k] = 0;
+        out->is_dir = isdir ? 1 : 0;
+        out->size   = (have && !isdir) ? (long)st.st_size : 0;
+        if (have) {
+            struct tm tmv;
+            localtime_r(&st.st_mtime, &tmv);
+            out->year = tmv.tm_year + 1900; out->month = tmv.tm_mon + 1; out->day = tmv.tm_mday;
+            out->hour = tmv.tm_hour;        out->minute = tmv.tm_min;
+        } else {
+            out->year = out->month = out->day = out->hour = out->minute = 0;
+        }
+        return 1;
+    }
+    closedir(enum_d); enum_d = NULL;
+    return 0;
 }
