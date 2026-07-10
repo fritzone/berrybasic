@@ -84,6 +84,22 @@ int  con_vpos(void) { return 0; }
 int  con_splash(const char *b) { (void)b; return 0; }
 
 void con_mode(int n) { (void)n; }
+
+// In-memory current resolution, so SCREEN / SCREENW / SCREENH are exercised by
+// the unit tests. Mirrors the kernel clamp and "startup" restore.
+static int host_scr_w = 1280, host_scr_h = 1024;
+int con_screen(int w, int h) {
+    if (w <= 0 || h <= 0) { w = 1280; h = 1024; }
+    if (w < 64)   w = 64;
+    if (h < 64)   h = 64;
+    if (w > 1920) w = 1920;
+    if (h > 1080) h = 1080;
+    host_scr_w = w; host_scr_h = h;
+    return 1;
+}
+int con_screen_w(void) { return host_scr_w; }
+int con_screen_h(void) { return host_scr_h; }
+
 void con_gcol(int a, int c) { (void)a; (void)c; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}

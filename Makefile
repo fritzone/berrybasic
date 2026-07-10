@@ -113,7 +113,8 @@ HOSTCC      = cc
 HOST_BIN    = $(BUILD_DIR)/basic_host
 HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -Ithird_party
 HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
-              $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/main.c
+              $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/sound_host.c \
+              $(HOST_DIR)/main.c
 
 host: $(HOST_SRC) | $(BUILD_DIR)
 	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC)

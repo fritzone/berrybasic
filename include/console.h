@@ -39,6 +39,13 @@ int  con_splash(const char *banner);
 // Coordinates are BBC logical units: x in 0..1279, y in 0..1023, origin at the
 // bottom-left, independent of the physical screen resolution.
 void con_mode(int n);                    // MODE n: clear text+graphics, reset state
+// SCREEN width,height: switch the physical display resolution for the duration of
+// a program. A non-positive w or h restores the startup resolution. Returns 1 on
+// success, 0 on failure (or on backends without a real framebuffer). con_screen_w
+// / con_screen_h report the current physical size (SCREENW / SCREENH).
+int  con_screen(int w, int h);
+int  con_screen_w(void);
+int  con_screen_h(void);
 void con_gcol(int action, int colour);   // GCOL action,colour: graphics fg + plot op
 void con_plot(int code, int x, int y);   // PLOT code,x,y (master graphics primitive)
 void con_clg(void);                      // CLG: clear graphics area to gfx background

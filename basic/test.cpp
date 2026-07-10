@@ -582,3 +582,333 @@ TEST_CASE("directory enumeration reports name, size, date, time") {
     REQUIRE_THAT(out, ContainsSubstring("ENUM-OK"));
     REQUIRE_THAT(out, ContainsSubstring("SZ2@"));   // the 2-byte file was found
 }
+
+// --- Sound: the portable queued/background tone player ----------------------
+// These reach past PRINT into the engine itself (sound_pump / sound_cur_freq /
+// sound_queued from basic.h). run() leaves the enqueued notes un-pumped (the
+// program's last statement queues them after the loop's final pump), so a test
+// pumps explicitly. test_console's con_micros advances 10 ms per call, so a
+// handful of pumps is enough to expire a short note.
+
+TEST_CASE("SOUND and TONE parse and enqueue") {
+    REQUIRE_THAT(run("10 SOUND 1,-15,53,20"), !ContainsSubstring("rror"));
+    REQUIRE(sound_queued() >= 1);
+    REQUIRE_THAT(run("10 TONE 440,100"),      !ContainsSubstring("rror"));
+    REQUIRE(sound_queued() >= 1);
+}
+
+TEST_CASE("BBC pitch maps to the right frequency") {
+    run("10 SOUND 1,-15,89,20");     // pitch 89 = A above middle C
+    sound_pump();                    // start the queued note
+    int f = sound_cur_freq();
+    REQUIRE(f >= 438);               // 440 Hz, allow rounding slack
+    REQUIRE(f <= 442);
+
+    run("10 SOUND 1,-15,53,20");     // pitch 53 = middle C (~261.6 Hz)
+    sound_pump();
+    f = sound_cur_freq();
+    REQUIRE(f >= 259);
+    REQUIRE(f <= 264);
+}
+
+TEST_CASE("TONE plays the exact frequency on channel 0") {
+    run("10 TONE 1000,20");
+    sound_pump();
+    REQUIRE(sound_cur_freq() == 1000);
+    REQUIRE(sound_cur_vol()  == 15);   // default volume
+    run("10 TONE 500,20,7");
+    sound_pump();
+    REQUIRE(sound_cur_freq() == 500);
+    REQUIRE(sound_cur_vol()  == 7);
+}
+
+TEST_CASE("a note stops after its duration elapses") {
+    run("10 TONE 800,10");             // 10 ms; test_console adds 10 ms per pump
+    sound_pump();                      // t~=+: note starts
+    REQUIRE(sound_cur_freq() == 800);
+    for (int i = 0; i < 5; i++) sound_pump();   // advance well past 10 ms
+    REQUIRE(sound_cur_freq() == 0);    // silent again
+}
+
+TEST_CASE("notes on one channel play back to back") {
+    // 100 ms notes; test_console advances 10 ms per pump, so the first survives
+    // several pumps before the second takes over.
+    run("10 TONE 400,100\n20 TONE 600,100");
+    REQUIRE(sound_queued() >= 2);
+    sound_pump();
+    REQUIRE(sound_cur_freq() == 400);           // first note still playing
+    for (int i = 0; i < 15; i++) sound_pump();  // let the first expire, start the second
+    REQUIRE(sound_cur_freq() == 600);           // second note
+}
+
+TEST_CASE("lower-numbered channel is the audible one") {
+    run("10 SOUND 3,-15,89,20\n20 SOUND 1,-15,53,20");
+    sound_pump();
+    // Both channels are sounding; channel 1 (middle C) wins over channel 3 (A).
+    int f = sound_cur_freq();
+    REQUIRE(f >= 259);
+    REQUIRE(f <= 264);
+}
+
+TEST_CASE("SOUND OFF flushes the queue and silences") {
+    run("10 SOUND 1,-15,89,20\n20 SOUND 1,-15,53,20\n30 SOUND OFF");
+    REQUIRE(sound_queued() == 0);
+    sound_pump();
+    REQUIRE(sound_cur_freq() == 0);
+}
+
+TEST_CASE("a fresh RUN silences leftover sound") {
+    run("10 TONE 700,20");
+    sound_pump();
+    REQUIRE(sound_cur_freq() == 700);
+    run("10 PRINT 1");                 // a new RUN resets the sound engine
+    REQUIRE(sound_queued() == 0);
+    REQUIRE(sound_cur_freq() == 0);
+}
+
+// --- SCREEN: runtime resolution switch with restore-on-finish ---------------
+// The in-memory console backend (test_console.c) tracks a current resolution and
+// mirrors the kernel's clamp/restore, so these exercise the interpreter's SCREEN
+// statement, the SCREENW/SCREENH functions, and the auto-restore at end of RUN.
+
+TEST_CASE("SCREEN sets the resolution and SCREENW/SCREENH read it back") {
+    REQUIRE_THAT(run("10 SCREEN 640,480\n20 PRINT SCREENW;\"x\";SCREENH"),
+                 ContainsSubstring("640x480"));
+}
+
+TEST_CASE("startup resolution is reported before any SCREEN") {
+    REQUIRE_THAT(run("10 PRINT SCREENW;\"x\";SCREENH"),
+                 ContainsSubstring("1280x1024"));
+}
+
+TEST_CASE("SCREEN resolution is restored when the program finishes") {
+    // The program switches to 320x240; after RUN returns, an immediate query must
+    // see the startup resolution again.
+    std::string out = run_raw(
+        "10 SCREEN 320,240\n"
+        "20 PRINT \"IN \";SCREENW;\"x\";SCREENH\n"
+        "RUN\n"
+        "PRINT \"OUT \";SCREENW;\"x\";SCREENH\n");
+    REQUIRE_THAT(out, ContainsSubstring("IN 320x240"));
+    REQUIRE_THAT(out, ContainsSubstring("OUT 1280x1024"));
+}
+
+TEST_CASE("bare SCREEN restores the startup resolution mid-program") {
+    REQUIRE_THAT(run("10 SCREEN 640,480\n20 SCREEN\n30 PRINT SCREENW;\"x\";SCREENH"),
+                 ContainsSubstring("1280x1024"));
+}
+
+TEST_CASE("SCREEN clamps out-of-range sizes") {
+    REQUIRE_THAT(run("10 SCREEN 5000,4000\n20 PRINT SCREENW;\"x\";SCREENH"),
+                 ContainsSubstring("1920x1080"));
+    REQUIRE_THAT(run("10 SCREEN 8,8\n20 PRINT SCREENW;\"x\";SCREENH"),
+                 ContainsSubstring("64x64"));
+}
+
+// --- Loop control: EXIT / CONTINUE ------------------------------------------
+
+TEST_CASE("EXIT FOR leaves the loop early") {
+    REQUIRE_THAT(run("10 FOR i=1 TO 9\n20 IF i=4 THEN EXIT FOR\n30 PRINT i;\n40 NEXT\n50 PRINT \"|\""),
+                 ContainsSubstring("123|"));
+}
+
+TEST_CASE("CONTINUE FOR skips to the next iteration") {
+    REQUIRE_THAT(run("10 FOR i=1 TO 6\n20 IF i MOD 2=0 THEN CONTINUE FOR\n30 PRINT i;\n40 NEXT"),
+                 ContainsSubstring("135"));
+}
+
+TEST_CASE("EXIT REPEAT and EXIT WHILE") {
+    REQUIRE_THAT(run("10 i=0\n20 REPEAT\n30 i=i+1\n40 IF i=3 THEN EXIT REPEAT\n50 PRINT i;\n60 UNTIL i>9"),
+                 ContainsSubstring("12"));
+    REQUIRE_THAT(run("10 i=0\n20 WHILE 1\n30 i=i+1\n40 IF i=3 THEN EXIT WHILE\n50 PRINT i;\n60 ENDWHILE\n70 PRINT \"|\""),
+                 ContainsSubstring("12|"));
+}
+
+TEST_CASE("bare EXIT breaks only the innermost loop") {
+    // The WHILE is broken each pass; the FOR keeps going.
+    std::string out = run(
+        "10 FOR i=1 TO 3\n"
+        "20 WHILE 1\n"
+        "30 EXIT\n"
+        "40 ENDWHILE\n"
+        "50 PRINT i;\n"
+        "60 NEXT");
+    REQUIRE_THAT(out, ContainsSubstring("123"));
+}
+
+TEST_CASE("CONTINUE re-tests a WHILE condition") {
+    REQUIRE_THAT(run("10 i=0\n20 WHILE i<5\n30 i=i+1\n40 IF i=3 THEN CONTINUE WHILE\n50 PRINT i;\n60 ENDWHILE"),
+                 ContainsSubstring("1245"));
+}
+
+TEST_CASE("EXIT outside any loop is an error") {
+    REQUIRE_THAT(run("10 EXIT"), ContainsSubstring("not inside a loop"));
+}
+
+// --- Structured error handling: TRY / CATCH / RAISE / ERR / ERR$ -------------
+
+TEST_CASE("TRY catches a built-in runtime error") {
+    std::string out = run(
+        "10 TRY\n"
+        "20 x = 1/0\n"
+        "30 PRINT \"unreached\"\n"
+        "40 CATCH\n"
+        "50 PRINT \"caught:\";ERR$\n"
+        "60 ENDTRY\n"
+        "70 PRINT \"after\"");
+    REQUIRE_THAT(out, ContainsSubstring("caught:Division by zero"));
+    REQUIRE_THAT(out, ContainsSubstring("after"));
+    REQUIRE_THAT(out, !ContainsSubstring("unreached"));
+}
+
+TEST_CASE("a successful TRY block skips the handler") {
+    std::string out = run("10 TRY\n20 PRINT \"ok\"\n30 CATCH\n40 PRINT \"BAD\"\n50 ENDTRY\n60 PRINT \"done\"");
+    REQUIRE_THAT(out, ContainsSubstring("ok"));
+    REQUIRE_THAT(out, ContainsSubstring("done"));
+    REQUIRE_THAT(out, !ContainsSubstring("BAD"));
+}
+
+TEST_CASE("RAISE sets ERR and ERR$") {
+    REQUIRE_THAT(run("10 TRY\n20 RAISE 404,\"missing\"\n30 CATCH\n40 PRINT ERR;\":\";ERR$\n50 ENDTRY"),
+                 ContainsSubstring("404:missing"));
+    REQUIRE_THAT(run("10 TRY\n20 RAISE \"oops\"\n30 CATCH\n40 PRINT ERR$\n50 ENDTRY"),
+                 ContainsSubstring("oops"));
+}
+
+TEST_CASE("an error inside a PROC is caught by an enclosing TRY") {
+    std::string out = run(
+        "10 TRY\n"
+        "20 PROCboom\n"
+        "30 PRINT \"unreached\"\n"
+        "40 CATCH\n"
+        "50 PRINT \"caught:\";ERR$\n"
+        "60 ENDTRY\n"
+        "70 PRINT \"ok\"\n"
+        "80 END\n"
+        "90 DEF PROCboom\n"
+        "100 y = 1/0\n"
+        "110 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("caught:Division by zero"));
+    REQUIRE_THAT(out, ContainsSubstring("ok"));
+    REQUIRE_THAT(out, !ContainsSubstring("unreached"));
+}
+
+TEST_CASE("nested TRY: the inner handler catches, the outer is untouched") {
+    std::string out = run(
+        "10 TRY\n"
+        "20 TRY\n"
+        "30 RAISE \"inner\"\n"
+        "40 CATCH\n"
+        "50 PRINT \"in:\";ERR$\n"
+        "60 ENDTRY\n"
+        "70 PRINT \"resumed\"\n"
+        "80 CATCH\n"
+        "90 PRINT \"OUTER-BAD\"\n"
+        "100 ENDTRY");
+    REQUIRE_THAT(out, ContainsSubstring("in:inner"));
+    REQUIRE_THAT(out, ContainsSubstring("resumed"));
+    REQUIRE_THAT(out, !ContainsSubstring("OUTER-BAD"));
+}
+
+TEST_CASE("TRY recovers loop state: a loop still works after catching") {
+    std::string out = run(
+        "10 TRY\n"
+        "20 FOR i=1 TO 3\n"
+        "30 x = 1/0\n"
+        "40 NEXT\n"
+        "50 CATCH\n"
+        "60 PRINT \"caught\"\n"
+        "70 ENDTRY\n"
+        "80 FOR j=1 TO 3\n"
+        "90 PRINT j;\n"
+        "100 NEXT");
+    REQUIRE_THAT(out, ContainsSubstring("caught"));
+    REQUIRE_THAT(out, ContainsSubstring("123"));   // FOR stack was restored cleanly
+}
+
+// --- Modern string library --------------------------------------------------
+
+TEST_CASE("UPPER$ / LOWER$ / TRIM$") {
+    REQUIRE_THAT(run("10 PRINT UPPER$(\"Hello, World\")"), ContainsSubstring("HELLO, WORLD"));
+    REQUIRE_THAT(run("10 PRINT LOWER$(\"Hello, World\")"), ContainsSubstring("hello, world"));
+    REQUIRE_THAT(run("10 PRINT \"[\"+TRIM$(\"   hi there   \")+\"]\""), ContainsSubstring("[hi there]"));
+    REQUIRE_THAT(run("10 PRINT \"[\"+TRIM$(\"\")+\"]\""), ContainsSubstring("[]"));
+}
+
+TEST_CASE("REPLACE$ replaces every occurrence") {
+    REQUIRE_THAT(run("10 PRINT REPLACE$(\"a,b,c\",\",\",\"-\")"), ContainsSubstring("a-b-c"));
+    REQUIRE_THAT(run("10 PRINT REPLACE$(\"aaa\",\"a\",\"xy\")"),  ContainsSubstring("xyxyxy"));
+    REQUIRE_THAT(run("10 PRINT REPLACE$(\"hello\",\"l\",\"\")"),  ContainsSubstring("heo"));
+    REQUIRE_THAT(run("10 PRINT REPLACE$(\"hello\",\"z\",\"Q\")"), ContainsSubstring("hello"));
+}
+
+TEST_CASE("CONTAINS / STARTSWITH / ENDSWITH return TRUE or FALSE") {
+    REQUIRE_THAT(run("10 PRINT CONTAINS(\"hello\",\"ell\")"),     ContainsSubstring("-1"));
+    REQUIRE_THAT(run("10 PRINT CONTAINS(\"hello\",\"xyz\")"),     ContainsSubstring("0"));
+    REQUIRE_THAT(run("10 PRINT STARTSWITH(\"hello\",\"he\")"),    ContainsSubstring("-1"));
+    REQUIRE_THAT(run("10 PRINT STARTSWITH(\"hello\",\"lo\")"),    ContainsSubstring("0"));
+    REQUIRE_THAT(run("10 PRINT ENDSWITH(\"hello\",\"lo\")"),      ContainsSubstring("-1"));
+    REQUIRE_THAT(run("10 PRINT ENDSWITH(\"hello\",\"he\")"),      ContainsSubstring("0"));
+}
+
+TEST_CASE("SPLIT fills a string array and returns the count") {
+    std::string out = run(
+        "10 n = SPLIT(\"apple,banana,cherry\", \",\", f$())\n"
+        "20 PRINT \"n=\"; n\n"
+        "30 FOR i = 0 TO n-1 : PRINT f$(i); \"|\"; : NEXT");
+    REQUIRE_THAT(out, ContainsSubstring("n=3"));
+    REQUIRE_THAT(out, ContainsSubstring("apple|banana|cherry|"));
+}
+
+TEST_CASE("SPLIT keeps empty fields, including a trailing one") {
+    std::string out = run(
+        "10 n = SPLIT(\"a,,c,\", \",\", p$())\n"
+        "20 PRINT \"n=\"; n\n"
+        "30 FOR i = 0 TO n-1 : PRINT \"[\"; p$(i); \"]\"; : NEXT");
+    REQUIRE_THAT(out, ContainsSubstring("n=4"));
+    REQUIRE_THAT(out, ContainsSubstring("[a][][c][]"));
+}
+
+TEST_CASE("SPLIT with an empty separator yields one piece per character") {
+    REQUIRE_THAT(run("10 n = SPLIT(\"abc\", \"\", c$())\n20 PRINT n; c$(0); c$(1); c$(2)"),
+                 ContainsSubstring("3abc"));
+}
+
+TEST_CASE("JOIN$ is the inverse of SPLIT") {
+    REQUIRE_THAT(run("10 n = SPLIT(\"one two three\", \" \", w$())\n20 PRINT JOIN$(w$(), \"-\", n)"),
+                 ContainsSubstring("one-two-three"));
+    REQUIRE_THAT(run("10 n = SPLIT(\"a:b:c\", \":\", w$())\n20 PRINT JOIN$(w$(), \", \", n)"),
+                 ContainsSubstring("a, b, c"));
+}
+
+TEST_CASE("string helpers compose in one expression") {
+    // A tiny CSV-ish pipeline: trim, upper-case, test membership.
+    std::string out = run(
+        "10 n = SPLIT(\"  red , green , blue \", \",\", c$())\n"
+        "20 FOR i = 0 TO n-1 : c$(i) = UPPER$(TRIM$(c$(i))) : NEXT\n"
+        "30 PRINT JOIN$(c$(), \"/\", n)\n"
+        "40 PRINT CONTAINS(JOIN$(c$(), \",\", n), \"GREEN\")");
+    REQUIRE_THAT(out, ContainsSubstring("RED/GREEN/BLUE"));
+    REQUIRE_THAT(out, ContainsSubstring("-1"));
+}
+
+// --- PEEK / POKE (familiar aliases over the ?/! indirection) -----------------
+
+TEST_CASE("POKE writes a byte and PEEK reads it back") {
+    REQUIRE_THAT(run("10 DIM b 8\n20 POKE b, 65\n30 POKE b+1, 66\n40 PRINT PEEK(b); PEEK(b+1)"),
+                 ContainsSubstring("6566"));
+}
+
+TEST_CASE("POKE truncates to a byte") {
+    REQUIRE_THAT(run("10 DIM b 8\n20 POKE b, 300\n30 PRINT PEEK(b)"),
+                 ContainsSubstring("44"));   // 300 AND 255
+}
+
+TEST_CASE("PEEK/POKE and ? indirection share the same memory") {
+    REQUIRE_THAT(run("10 DIM b 8\n20 POKE b, 7\n30 PRINT b?0"),   ContainsSubstring("7"));
+    REQUIRE_THAT(run("10 DIM b 8\n20 b?0 = 9\n30 PRINT PEEK(b)"), ContainsSubstring("9"));
+}
+
+TEST_CASE("PEEK composes inside expressions") {
+    REQUIRE_THAT(run("10 DIM b 8\n20 POKE b, 40\n30 PRINT PEEK(b) + 2"), ContainsSubstring("42"));
+}

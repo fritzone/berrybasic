@@ -27,8 +27,9 @@
 #endif
 
 // CHAR_W / CHAR_H come from font.h (BBC 8x8 glyph scaled by FONT_SCALE).
-#define TERM_COLS (FB_WIDTH  / CHAR_W)
-#define TERM_ROWS (FB_HEIGHT / CHAR_H)
+// FB_WIDTH/FB_HEIGHT are only the *startup* resolution now; the live resolution
+// is g_fb_w/g_fb_h and the text grid g_term_cols/g_term_rows (see below), which a
+// program can change with SCREEN and which reset to startup when it finishes.
 
 // Free-running 1 MHz system timer (low 32 bits); used to pace the cursor blink.
 #define TIMER_CLO       (*(volatile uint32_t *)(0xFE003004UL))
@@ -39,6 +40,16 @@ static int cursor_row     = 0;
 static int fb_ready       = 0;
 static uint32_t g_fb_phys = 0;   // framebuffer physical base (for non-cacheable remap)
 static uint32_t g_fb_size = 0;   // framebuffer size in bytes
+
+// Live display resolution (physical pixels) and the derived text grid. These
+// start at the compile-time defaults and are updated whenever the framebuffer is
+// reconfigured (SCREEN). g_start_* remembers the boot resolution to restore to.
+static uint32_t g_fb_w    = FB_WIDTH;
+static uint32_t g_fb_h    = FB_HEIGHT;
+static uint32_t g_start_w = FB_WIDTH;
+static uint32_t g_start_h = FB_HEIGHT;
+static int g_term_cols    = FB_WIDTH  / CHAR_W;
+static int g_term_rows    = FB_HEIGHT / CHAR_H;
 static int cursor_visible = 0;   // whether the cursor glyph is currently drawn
 static uint32_t text_color = COLOR_WHITE;   // current foreground (BBC COLOUR)
 static uint32_t text_bg    = COLOR_BLACK;   // current text background (VDU 17,128+c)
@@ -48,7 +59,7 @@ static int vdu_enabled    = 1;   // VDU 6 / VDU 21: is screen output enabled?
 static int vdu5_mode      = 0;   // VDU 5: write text at the graphics cursor
 static int cursor_enabled = 1;   // VDU 23,1: is the text cursor (caret) shown?
 // Text viewport, in character cells (inclusive). Default = whole screen.
-static int tv_l = 0, tv_t = 0, tv_r = TERM_COLS - 1, tv_b = TERM_ROWS - 1;
+static int tv_l = 0, tv_t = 0, tv_r = FB_WIDTH / CHAR_W - 1, tv_b = FB_HEIGHT / CHAR_H - 1;
 
 // VDU 5 (text at the graphics cursor) helpers, defined with the graphics code
 // further down but used by term_putchar above it.
@@ -164,6 +175,11 @@ static int g_kbd_ok  = 0;   // DWC2 (USB-C) keyboard present
 static int g_xhci_ok = 0;   // xHCI/VL805 (USB-A) keyboard present
 static int g_sd_ready = 0;  // SD filesystem mounted (boot log can be written)
 
+// Real Pi hardware vs QEMU (nonzero board serial). Read once at boot. The PWM
+// audio driver (drivers/sound.c) gates its register access on this, because
+// QEMU's raspi4b does not model the PWM peripheral and faults on access.
+int g_real_hw = 0;
+
 // Mouse pointer state, in raw framebuffer pixels (origin top-left). Deltas from
 // the HID mouse accumulate here; con_mouse() polls and reports it. g_mouse_dwc2
 // / g_mouse_xhci record which backend enumerated a mouse.
@@ -270,9 +286,9 @@ static char read_esc_seq(void) {
 // Position the framebuffer cursor at editable offset `off` from start (sc,sr).
 static void edit_cursor_at(int sc, int sr, int off) {
     int t = sc + off;
-    cursor_col = t % TERM_COLS;
-    cursor_row = sr + t / TERM_COLS;
-    if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+    cursor_col = t % g_term_cols;
+    cursor_row = sr + t / g_term_cols;
+    if (cursor_row >= g_term_rows) cursor_row = g_term_rows - 1;
 }
 
 // Redraw the editable region (screen + serial) and place the cursor at `pos`.
@@ -322,6 +338,7 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
                 cursor_set(!cursor_visible);
             }
             pointer_tick();                      // move/repaint the pointer on top
+            sound_pump();                        // keep queued notes playing while idle
             continue;
         }
         pointer_hide();                          // a key arrived; hide before redrawing
@@ -432,6 +449,7 @@ int con_getkey(void) {
             cursor_set(!cursor_visible);
         }
         pointer_tick();                     // move/repaint the pointer on top
+        sound_pump();                       // keep queued notes playing while idle
     }
 }
 
@@ -459,6 +477,7 @@ int con_inkey(int centiseconds) {
             cursor_set(!cursor_visible);
         }
         pointer_tick();                     // move/repaint the pointer on top
+        sound_pump();                       // keep queued notes playing while idle
     }
 }
 
@@ -479,8 +498,8 @@ static void mouse_service(void) {
     g_mouse_y += dy;
     if (g_mouse_x < 0) g_mouse_x = 0;
     if (g_mouse_y < 0) g_mouse_y = 0;
-    if (g_mouse_x > FB_WIDTH  - 1) g_mouse_x = FB_WIDTH  - 1;
-    if (g_mouse_y > FB_HEIGHT - 1) g_mouse_y = FB_HEIGHT - 1;
+    if (g_mouse_x > (int)g_fb_w - 1) g_mouse_x = (int)g_fb_w - 1;
+    if (g_mouse_y > (int)g_fb_h - 1) g_mouse_y = (int)g_fb_h - 1;
 }
 
 void con_mouse(int *x, int *y, int *buttons) {
@@ -646,11 +665,11 @@ static int gpx1, gpy1;      // previous point
 static int gpx2, gpy2;      // the one before that
 static int gfx_ox = 0, gfx_oy = 0;   // graphics origin (VDU 29 / ORIGIN)
 
-static int lx2px(int x) { return (x + gfx_ox) * FB_WIDTH  / GFX_LW; }
-static int ly2py(int y) { return (FB_HEIGHT - 1) - ((y + gfx_oy) * FB_HEIGHT / GFX_LH); }
+static int lx2px(int x) { return (x + gfx_ox) * (int)g_fb_w  / GFX_LW; }
+static int ly2py(int y) { return ((int)g_fb_h - 1) - ((y + gfx_oy) * (int)g_fb_h / GFX_LH); }
 // Inverse transforms (physical pixel -> logical, origin-relative).
-static int px2lx(int px) { return px * GFX_LW / FB_WIDTH - gfx_ox; }
-static int py2ly(int py) { return (FB_HEIGHT - 1 - py) * GFX_LH / FB_HEIGHT - gfx_oy; }
+static int px2lx(int px) { return px * GFX_LW / (int)g_fb_w - gfx_ox; }
+static int py2ly(int py) { return ((int)g_fb_h - 1 - py) * GFX_LH / (int)g_fb_h - gfx_oy; }
 
 static int isqrt_i(int v) {
     if (v <= 0) return 0;
@@ -661,7 +680,7 @@ static int isqrt_i(int v) {
 
 // Reset the default text/graphics viewports and graphics origin (VDU 26).
 static void reset_viewports(void) {
-    tv_l = 0; tv_t = 0; tv_r = TERM_COLS - 1; tv_b = TERM_ROWS - 1;
+    tv_l = 0; tv_t = 0; tv_r = g_term_cols - 1; tv_b = g_term_rows - 1;
     gfx_clear_clip();
     gfx_ox = 0; gfx_oy = 0;
     gpx0 = gpy0 = gpx1 = gpy1 = gpx2 = gpy2 = 0;
@@ -787,7 +806,7 @@ void con_rectangle(int x, int y, int w, int h, int fill) {
 void con_circle(int x, int y, int r, int fill) {
     if (!fb_ready) return;
     int cx = lx2px(x), cy = ly2py(y);
-    int rp = r * (int)FB_WIDTH / GFX_LW;             // scale to a screen-round radius
+    int rp = r * (int)g_fb_w / GFX_LW;             // scale to a screen-round radius
     if (rp < 0) rp = -rp;
     gfx_set_op(gfx_act);
     if (fill) fill_circle(cx, cy, rp, gcol_fg());
@@ -798,8 +817,8 @@ void con_circle(int x, int y, int r, int fill) {
 void con_ellipse(int x, int y, int rx, int ry, int fill) {
     if (!fb_ready) return;
     int cx = lx2px(x), cy = ly2py(y);
-    int rpx = rx * (int)FB_WIDTH / GFX_LW;
-    int rpy = ry * (int)FB_HEIGHT / GFX_LH;
+    int rpx = rx * (int)g_fb_w / GFX_LW;
+    int rpy = ry * (int)g_fb_h / GFX_LH;
     gfx_set_op(gfx_act);
     if (fill) fill_ellipse(cx, cy, rpx, rpy, gcol_fg());
     else      draw_ellipse(cx, cy, rpx, rpy, gcol_fg());
@@ -850,7 +869,7 @@ void con_sprite_put(long addr, int x, int y) {
     if (!fb_ready || !addr) return;
     volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
     int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
-    if (w <= 0 || h <= 0 || w > (int)FB_WIDTH || h > (int)FB_HEIGHT) return;
+    if (w <= 0 || h <= 0 || w > (int)g_fb_w || h > (int)g_fb_h) return;
     int dx = lx2px(x), dy = ly2py(y);
     volatile unsigned char *q = p + 8;
     gfx_set_op(gfx_act);
@@ -894,8 +913,8 @@ static int vdu_qn = 0, vdu_qneed = 0, vdu_cmd = -1;
 
 static int vdu_word(int i)  { return vdu_q[i] | (vdu_q[i+1] << 8); }
 static int vdu_sword(int i) { int v = vdu_word(i); return v >= 32768 ? v - 65536 : v; }
-static int gfx_char_w(void) { return CHAR_W * GFX_LW / FB_WIDTH; }
-static int gfx_char_h(void) { return CHAR_H * GFX_LH / FB_HEIGHT; }
+static int gfx_char_w(void) { return CHAR_W * GFX_LW / (int)g_fb_w; }
+static int gfx_char_h(void) { return CHAR_H * GFX_LH / (int)g_fb_h; }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 // --- VDU 5: text at the graphics cursor -------------------------------------
@@ -1025,8 +1044,8 @@ static void vdu_execute(int cmd) {
         case 26: reset_viewports(); cursor_col = tv_l; cursor_row = tv_t; break;
         case 27: vdu_putchar(vdu_q[0]); break;             // print next byte literally
         case 28: {                                          // text viewport
-            int l = clampi(vdu_q[0],0,TERM_COLS-1), bm = clampi(vdu_q[1],0,TERM_ROWS-1);
-            int r = clampi(vdu_q[2],0,TERM_COLS-1), t  = clampi(vdu_q[3],0,TERM_ROWS-1);
+            int l = clampi(vdu_q[0],0,g_term_cols-1), bm = clampi(vdu_q[1],0,g_term_rows-1);
+            int r = clampi(vdu_q[2],0,g_term_cols-1), t  = clampi(vdu_q[3],0,g_term_rows-1);
             tv_l = l < r ? l : r; tv_r = l < r ? r : l;
             tv_t = t < bm ? t : bm; tv_b = t < bm ? bm : t;
             cursor_col = tv_l; cursor_row = tv_t;
@@ -1122,7 +1141,7 @@ void exception_handler(uint64_t type, uint64_t esr, uint64_t elr, uint64_t far) 
     // flush_boot_log() uses is itself wedged by the fault (e.g. a pending PCIe
     // SError that re-fires during the SD write). Read these off the screen.
     if (fb_ready) {
-        fill_rect(0, 0, FB_WIDTH - 1, FB_HEIGHT - 1, COLOR_BLACK);
+        fill_rect(0, 0, (int)g_fb_w - 1, (int)g_fb_h - 1, COLOR_BLACK);
         cursor_col = 0; cursor_row = 0; cursor_visible = 0;
         text_color = COLOR_WHITE;
         // Recent boot progress first (shows the [PCIE]/[XHCI] lines), then the
@@ -1167,15 +1186,19 @@ static int board_real_hw(void) {
 // Framebuffer setup via mailbox
 // ---------------------------------------------------------------------------
 
-static int setup_fb(void) {
+// Ask the GPU to (re)allocate the framebuffer at w x h, 32bpp, RGB order, and
+// wire it into the graphics driver. Updates g_fb_* and the text grid. Returns 1
+// on success. Shared by the boot path and by SCREEN (con_screen); the caller is
+// responsible for (re-)marking the buffer non-cacheable once the MMU is up.
+static int fb_configure(uint32_t w, uint32_t h) {
     mbox[ 0] = 35 * 4;
     mbox[ 1] = 0;
     mbox[ 2] = 0x00048003; mbox[ 3] = 8; mbox[ 4] = 8;   // set physical w/h
-    mbox[ 5] = FB_WIDTH;
-    mbox[ 6] = FB_HEIGHT;
+    mbox[ 5] = w;
+    mbox[ 6] = h;
     mbox[ 7] = 0x00048004; mbox[ 8] = 8; mbox[ 9] = 8;   // set virtual w/h
-    mbox[10] = FB_WIDTH;
-    mbox[11] = FB_HEIGHT;
+    mbox[10] = w;
+    mbox[11] = h;
     mbox[12] = 0x00048005; mbox[13] = 4; mbox[14] = 4;   // set depth
     mbox[15] = 32;
     // Force pixel order to RGB (1). Without this each platform uses its own
@@ -1193,12 +1216,9 @@ static int setup_fb(void) {
 
     int ok = mbox_call();
     uart_dec("[FB] mbox_call returned: ", (uint32_t)ok);
-    uart_hex("[FB] mbox[1] response:   ", mbox[1]);
     uart_dec("[FB] width:  ", mbox[5]);
     uart_dec("[FB] height: ", mbox[6]);
-    uart_hex("[FB] pixel order: ", mbox[19]);
     uart_hex("[FB] bus addr: ", mbox[23]);
-    uart_dec("[FB] size:   ", mbox[24]);
     uart_dec("[FB] pitch:  ", mbox[28]);
 
     if (!ok || mbox[28] == 0) return 0;
@@ -1210,13 +1230,53 @@ static int setup_fb(void) {
     uint32_t *fb     = (uint32_t *)(uintptr_t)fb_phys;
 
     uart_hex("[FB] physical: ", fb_phys);
-    // The framebuffer is brought up before the MMU (see kernel_main), so we just
-    // record its extent here; kernel_main re-marks it non-cacheable once the MMU
-    // page tables exist, so CPU pixel writes stay coherent with the GPU scan-out.
     g_fb_phys = fb_phys;
     g_fb_size = fb_size;
+    g_fb_w    = mbox[5];                     // the GPU may round to a supported size
+    g_fb_h    = mbox[6];
+    g_term_cols = (int)g_fb_w / CHAR_W;
+    g_term_rows = (int)g_fb_h / CHAR_H;
     init_graphics(fb, mbox[5], mbox[6], pitch);
     fb_ready = 1;
+    return 1;
+}
+
+// SCREEN width,height : switch the display to a new resolution mid-session. A
+// non-positive w or h means "restore the startup resolution". Returns 1 on
+// success. Reconfigures the framebuffer, re-marks it non-cacheable for the live
+// MMU, rebuilds the text grid, clears the screen and re-homes the cursor/pointer.
+// A no-op (no clear) when the requested size already matches the current one, so
+// restoring at the end of a program that never changed resolution costs nothing.
+int con_screen(int w, int h) {
+    if (!fb_ready) return 0;
+    if (w <= 0 || h <= 0) { w = (int)g_start_w; h = (int)g_start_h; }
+    if (w < 64)   w = 64;                        // keep the GPU request sane
+    if (h < 64)   h = 64;
+    if (w > 1920) w = 1920;
+    if (h > 1080) h = 1080;
+    if ((uint32_t)w == g_fb_w && (uint32_t)h == g_fb_h) return 1;   // already there
+
+    if (!fb_configure((uint32_t)w, (uint32_t)h)) return 0;
+    mmu_set_noncached(g_fb_phys, g_fb_size);   // the new buffer must be non-cacheable too
+
+    reset_viewports();
+    cleardevice();
+    cursor_col = 0; cursor_row = 0; cursor_visible = 0;
+    g_mouse_x = (int)g_fb_w / 2; g_mouse_y = (int)g_fb_h / 2;
+    return 1;
+}
+
+int con_screen_w(void) { return (int)g_fb_w; }
+int con_screen_h(void) { return (int)g_fb_h; }
+
+static int setup_fb(void) {
+    // Boot: bring the framebuffer up at the compile-time startup resolution and
+    // remember it as the resolution SCREEN restores to. The MMU is still off here,
+    // so the buffer is naturally coherent; kernel_main marks it non-cacheable once
+    // the page tables exist.
+    if (!fb_configure(FB_WIDTH, FB_HEIGHT)) return 0;
+    g_start_w = g_fb_w;
+    g_start_h = g_fb_h;
     return 1;
 }
 
@@ -1251,6 +1311,7 @@ void kernel_main(void) {
     // Show the BerryBasic boot logo (con_splash draws it when the REPL banner
     // prints; clearing the boot-progress text first).
     int real_hw = board_real_hw();
+    g_real_hw = real_hw;                        // let the audio driver know (skips PWM on QEMU)
     g_show_logo = 1;
 
     // Mount the SD card (the data partition holds the user's BASIC programs).

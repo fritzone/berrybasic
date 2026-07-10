@@ -81,6 +81,22 @@ int con_splash(const char *banner) { (void)banner; return 0; }   // no logo on h
 // Graphics are framebuffer-only; the host backend has no display, so these are
 // no-ops (POINT always reports "off-screen").
 void con_mode(int n) { (void)n; }
+
+// No real framebuffer on the host, but keep a plausible current resolution so
+// SCREEN / SCREENW / SCREENH behave (and are testable). Mirrors the kernel clamp.
+static int host_scr_w = 1280, host_scr_h = 1024;
+int con_screen(int w, int h) {
+    if (w <= 0 || h <= 0) { w = 1280; h = 1024; }        // restore "startup"
+    if (w < 64)   w = 64;
+    if (h < 64)   h = 64;
+    if (w > 1920) w = 1920;
+    if (h > 1080) h = 1080;
+    host_scr_w = w; host_scr_h = h;
+    return 1;
+}
+int con_screen_w(void) { return host_scr_w; }
+int con_screen_h(void) { return host_scr_h; }
+
 void con_gcol(int action, int colour) { (void)action; (void)colour; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}

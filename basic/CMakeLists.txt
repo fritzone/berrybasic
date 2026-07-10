@@ -31,6 +31,7 @@ add_executable(unit_tests
   ${REPO}/host/storage_host.c
   ${REPO}/seed/seed_host.c
   ${REPO}/host/image_host.c
+  ${REPO}/host/sound_host.c
 )
 target_include_directories(unit_tests PRIVATE
   ${REPO}/include ${REPO}/basic ${REPO}/seed ${REPO}/third_party)

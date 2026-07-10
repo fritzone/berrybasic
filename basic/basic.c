@@ -3,6 +3,7 @@
 #include "storage.h"
 #include "seed.h"
 #include "image.h"
+#include "sound.h"
 #include "basic.h"
 
 // ===========================================================================
@@ -69,6 +70,22 @@ static int s_eqn(const char *a, const char *b, int n) {
 static int g_err     = 0;    // set by err(); unwinds the current operation
 static int g_runline = -1;   // line number currently executing, or -1 immediate
 
+// Structured error handling (TRY/CATCH). When a TRY handler is active, an error
+// is recorded here and its printing is deferred to the handler (or to the end of
+// RUN if nothing catches it) instead of being printed immediately by err().
+#define ERRMSG_MAX 128
+static char g_errmsg[ERRMSG_MAX];  // message of the most recent error (for ERR$)
+static int  g_errcode = 0;         // numeric code (for ERR): 0 = none / built-in
+static int  g_errline = -1;        // line the error happened on (for deferred report)
+static int  g_err_reported = 0;    // has the pending error already been printed?
+static int  try_sp    = 0;         // depth of active TRY handlers (0 = none)
+
+static void set_errmsg(const char *msg) {
+    int i = 0;
+    if (msg) while (msg[i] && i < ERRMSG_MAX - 1) { g_errmsg[i] = msg[i]; i++; }
+    g_errmsg[i] = 0;
+}
+
 // Print the " (line N)" suffix and the trailing newline of an error report.
 static void err_tail(void) {
     if (g_runline >= 0) {
@@ -87,9 +104,14 @@ static void err_tail(void) {
 static void err(const char *msg) {
     if (g_err) return;       // keep the first error
     g_err = 1;
+    set_errmsg(msg);
+    g_errcode = 0;           // built-in error: no user code
+    g_errline = g_runline;
+    if (try_sp > 0) { g_err_reported = 0; return; }  // a TRY may report it: defer
     con_putc('\n');
     con_puts(msg);
     err_tail();
+    g_err_reported = 1;
 }
 
 // Two-part error, for a fixed prefix plus a dynamic name, e.g.
@@ -97,10 +119,18 @@ static void err(const char *msg) {
 static void err2(const char *a, const char *b) {
     if (g_err) return;
     g_err = 1;
+    set_errmsg(a);
+    { int n = 0; while (g_errmsg[n]) n++;             // append b onto the message
+      for (int i = 0; b[i] && n < ERRMSG_MAX - 1; i++) g_errmsg[n++] = b[i];
+      g_errmsg[n] = 0; }
+    g_errcode = 0;
+    g_errline = g_runline;
+    if (try_sp > 0) { g_err_reported = 0; return; }
     con_putc('\n');
     con_puts(a);
     con_puts(b);
     err_tail();
+    g_err_reported = 1;
 }
 
 static void con_putn(long v) {
@@ -619,10 +649,14 @@ enum {
     KW_REPEAT, KW_UNTIL, KW_ELSE, KW_CLS, KW_COLOUR,
     KW_WHILE, KW_ENDWHILE, KW_ENDIF,                  // structured loops / block IF
     KW_CASE, KW_OF, KW_WHEN, KW_OTHERWISE, KW_ENDCASE, // CASE selection
+    KW_EXIT, KW_CONTINUE,                              // loop control (break / continue)
+    KW_TRY, KW_CATCH, KW_ENDTRY, KW_RAISE,             // structured error handling
     KW_DEF, KW_PROC, KW_FN, KW_ENDPROC, KW_LOCAL,     // procedures & functions
     KW_IMPORT,                                        // IMPORT "module": pull in its PROC/FN
     KW_DIV, KW_MOD, KW_AND, KW_OR, KW_EOR, KW_NOT,    // operator keywords
     KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
+    KW_POKE,                                                        // POKE addr,byte (alias for ?addr=byte)
+    KW_SOUND, KW_TONE,                                             // audio statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
     KW_LINE, KW_RECTANGLE, KW_CIRCLE, KW_ELLIPSE, KW_FILL,         // shape commands
     KW_GGET, KW_GPUT, KW_SAVESPRITE,                              // sprite capture / stamp / save
@@ -633,6 +667,8 @@ enum {
     KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
     KW_MOUSE,                                                       // MOUSE x,y,b statement
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
+    KW_SCREEN, KW_SCREENW, KW_SCREENH,                // SCREEN statement + current-resolution values
+    KW_ERR, KW_ERRS,                                  // ERR / ERR$ : code + message of a caught error
     KW_MOUSEX, KW_MOUSEY, KW_MOUSEB,                  // mouse pointer x / y / buttons
     KW_DIRNEXT, KW_DIRSIZE, KW_DIRTYPE,               // directory-scan cursor fields
     KW_DIRNAMES, KW_DIRDATES, KW_DIRTIMES,            // (DIRNAME$/DIRDATE$/DIRTIME$)
@@ -649,6 +685,10 @@ enum {
     KW_RGB,                                           // RGB(r,g,b) -> packed truecolour value
     KW_LOADSPRITE,                                    // LOADSPRITE("file") -> sprite address
     KW_SPRW, KW_SPRH,                                 // SPRW(addr)/SPRH(addr): sprite size
+    KW_UPPERS, KW_LOWERS, KW_TRIMS, KW_REPLACES,      // string library: case, trim, replace
+    KW_CONTAINS, KW_STARTSWITH, KW_ENDSWITH,          // string predicates -> TRUE/FALSE
+    KW_SPLIT, KW_JOINS,                               // SPLIT(...) -> array ; JOIN$(array,...)
+    KW_PEEK,                                          // PEEK(addr) -> byte (alias for ?addr)
     KW_DIROPEN,                                       // DIROPEN("path") -> start a scan
     KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_DIROPEN,
     KW_TAB, KW_SPC                                    // PRINT-only modifiers
@@ -667,6 +707,9 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "WHILE", KW_WHILE }, { "ENDWHILE", KW_ENDWHILE }, { "ENDIF", KW_ENDIF },
     { "CASE",  KW_CASE  }, { "OF", KW_OF }, { "WHEN", KW_WHEN },
     { "OTHERWISE", KW_OTHERWISE }, { "ENDCASE", KW_ENDCASE },
+    { "EXIT", KW_EXIT }, { "CONTINUE", KW_CONTINUE },
+    { "TRY", KW_TRY }, { "CATCH", KW_CATCH }, { "ENDTRY", KW_ENDTRY }, { "RAISE", KW_RAISE },
+    { "ERR", KW_ERR }, { "ERR$", KW_ERRS },
     { "CLS",   KW_CLS   }, { "COLOUR", KW_COLOUR }, { "COLOR", KW_COLOUR },
     { "DEF",   KW_DEF   }, { "ENDPROC", KW_ENDPROC }, { "LOCAL", KW_LOCAL },
     { "IMPORT", KW_IMPORT },
@@ -674,6 +717,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "OR",    KW_OR    }, { "EOR",  KW_EOR   }, { "NOT",    KW_NOT    },
     { "ON",    KW_ON    }, { "DATA", KW_DATA  }, { "READ",   KW_READ   },
     { "RESTORE", KW_RESTORE }, { "STOP", KW_STOP }, { "VDU",  KW_VDU    },
+    { "SOUND", KW_SOUND }, { "TONE", KW_TONE  },
     { "MODE",  KW_MODE  }, { "GCOL", KW_GCOL  }, { "PLOT",   KW_PLOT   },
     { "MOVE",  KW_MOVE  }, { "DRAW", KW_DRAW  }, { "CLG",    KW_CLG    },
     { "POINT", KW_POINT },
@@ -690,6 +734,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "AUTO",  KW_AUTO  }, { "RENUMBER", KW_RENUMBER }, { "EDIT", KW_EDIT },
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },
     { "POS",   KW_POS   }, { "VPOS", KW_VPOS  },
+    { "SCREEN", KW_SCREEN }, { "SCREENW", KW_SCREENW }, { "SCREENH", KW_SCREENH },
     { "MOUSE", KW_MOUSE }, { "MOUSEX", KW_MOUSEX },
     { "MOUSEY", KW_MOUSEY }, { "MOUSEB", KW_MOUSEB },
     { "PI",    KW_PI    },
@@ -703,6 +748,11 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "VAL",   KW_VAL   }, { "CHR$", KW_CHRS  }, { "STR$",   KW_STRS   },
     { "LEFT$", KW_LEFTS }, { "RIGHT$", KW_RIGHTS }, { "MID$",  KW_MIDS  },
     { "STRING$", KW_STRINGS }, { "GET$", KW_GETS }, { "INKEY$", KW_INKEYS },
+    { "UPPER$", KW_UPPERS }, { "LOWER$", KW_LOWERS }, { "TRIM$", KW_TRIMS },
+    { "REPLACE$", KW_REPLACES }, { "CONTAINS", KW_CONTAINS },
+    { "STARTSWITH", KW_STARTSWITH }, { "ENDSWITH", KW_ENDSWITH },
+    { "SPLIT", KW_SPLIT }, { "JOIN$", KW_JOINS },
+    { "PEEK", KW_PEEK }, { "POKE", KW_POKE },
     { "SHL",   KW_SHL   }, { "SHR",  KW_SHR   }, { "ASR",    KW_ASR    },
     { "ROL",   KW_ROL   }, { "ROR",  KW_ROR   },
     { "CALL",  KW_CALL  }, { "CALL$", KW_CALLS },
@@ -1243,6 +1293,22 @@ static double seed_run_collect(void) {
     return ret;
 }
 
+// Byte-equality of two n-byte spans (used by the string search/replace helpers).
+static int mem_eq(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+// Parse an array reference written with empty parentheses, NAME() , as used by
+// SPLIT and JOIN$. Fills *name and leaves the caller to find/create the array.
+static int parse_array_ref(char *name) {
+    if (tok != T_VAR) { err("Expected an array name like parts$()"); return 0; }
+    s_copy(name, tok_var, NAME_LEN);
+    lex_next();
+    if (!expect(T_LP)) return 0;
+    return expect(T_RP);
+}
+
 static value_t eval_function(int fn) {
     lex_next();                         // consume function name
 
@@ -1380,6 +1446,133 @@ static value_t eval_function(int fn) {
                            for (int i = 0; i < rep; i++)
                                for (int j = 0; j < s.len; j++) p[i * s.len + j] = s.str[j];
                            result = v_str(p, rep * s.len); break; }
+        // --- modern string library ------------------------------------------
+        case KW_UPPERS: case KW_LOWERS: {           // case conversion
+                          value_t s = need_str(); if (g_err) break;
+                          if (s.len == 0) { result = v_str(0, 0); break; }
+                          char *p = scratch_alloc(s.len); if (!p) break;
+                          for (int i = 0; i < s.len; i++) {
+                              char c = s.str[i];
+                              if (fn == KW_UPPERS) { if (c >= 'a' && c <= 'z') c -= 32; }
+                              else                 { if (c >= 'A' && c <= 'Z') c += 32; }
+                              p[i] = c;
+                          }
+                          result = v_str(p, s.len); break; }
+        case KW_TRIMS: {                            // strip leading/trailing whitespace
+                          value_t s = need_str(); if (g_err) break;
+                          int a = 0, b = s.len;
+                          while (a < b && is_space(s.str[a])) a++;
+                          while (b > a && is_space(s.str[b - 1])) b--;
+                          result = str_in_scratch(s.str + a, b - a); break; }
+        case KW_REPLACES: {                         // REPLACE$(s,old,new): all occurrences
+                          value_t s = need_str(); if (!expect(T_COMMA)) break;
+                          value_t o = need_str(); if (!expect(T_COMMA)) break;
+                          value_t nw = need_str(); if (g_err) break;
+                          if (o.len == 0) { result = str_in_scratch(s.str, s.len); break; }
+                          int cnt = 0;
+                          for (int i = 0; i + o.len <= s.len; ) {
+                              if (mem_eq(s.str + i, o.str, o.len)) { cnt++; i += o.len; } else i++;
+                          }
+                          long outlen = (long)s.len + (long)cnt * ((long)nw.len - o.len);
+                          if (outlen > MAX_STR) { err("Text string is too long"); break; }
+                          char *p = outlen > 0 ? scratch_alloc((int)outlen) : 0;
+                          if (outlen > 0 && !p) break;
+                          int w = 0;
+                          for (int i = 0; i < s.len; ) {
+                              if (i + o.len <= s.len && mem_eq(s.str + i, o.str, o.len)) {
+                                  for (int k = 0; k < nw.len; k++) p[w++] = nw.str[k];
+                                  i += o.len;
+                              } else p[w++] = s.str[i++];
+                          }
+                          result = v_str(p, w); break; }
+        case KW_CONTAINS: {                         // CONTAINS(s,sub) -> TRUE/FALSE
+                          value_t s = need_str(); if (!expect(T_COMMA)) break;
+                          value_t sub = need_str(); if (g_err) break;
+                          int found = (sub.len == 0);
+                          for (int i = 0; !found && i + sub.len <= s.len; i++)
+                              if (mem_eq(s.str + i, sub.str, sub.len)) found = 1;
+                          result = v_num(found ? -1.0 : 0.0); break; }
+        case KW_STARTSWITH: {                       // STARTSWITH(s,prefix) -> TRUE/FALSE
+                          value_t s = need_str(); if (!expect(T_COMMA)) break;
+                          value_t pre = need_str(); if (g_err) break;
+                          int r = (pre.len <= s.len) && mem_eq(s.str, pre.str, pre.len);
+                          result = v_num(r ? -1.0 : 0.0); break; }
+        case KW_ENDSWITH: {                         // ENDSWITH(s,suffix) -> TRUE/FALSE
+                          value_t s = need_str(); if (!expect(T_COMMA)) break;
+                          value_t suf = need_str(); if (g_err) break;
+                          int r = (suf.len <= s.len) && mem_eq(s.str + (s.len - suf.len), suf.str, suf.len);
+                          result = v_num(r ? -1.0 : 0.0); break; }
+        case KW_SPLIT: {                            // SPLIT(s,sep,parts$()) -> pieces stored
+                          value_t s = need_str(); if (!expect(T_COMMA)) break;
+                          value_t sep = need_str(); if (!expect(T_COMMA)) break;
+                          if (g_err) break;
+                          char sepbuf[MAX_STR]; int seplen = sep.len;
+                          for (int i = 0; i < seplen; i++) sepbuf[i] = sep.str[i];
+                          char aname[NAME_LEN]; if (!parse_array_ref(aname)) break;
+                          if (!name_is_str(aname)) { err("SPLIT needs a string array, e.g. parts$()"); break; }
+                          // s stays valid: it lives in scratch, which the GC never moves.
+                          int P;                                   // number of pieces
+                          if (seplen == 0) P = s.len;              // empty separator: one per char
+                          else { int c = 0;
+                                 for (int i = 0; i + seplen <= s.len; ) {
+                                     if (mem_eq(s.str + i, sepbuf, seplen)) { c++; i += seplen; } else i++; }
+                                 P = c + 1; }
+                          arr_t *a = arr_find(aname);
+                          if (!a) { int counts[1]; counts[0] = P > 0 ? P : 1;
+                                    a = arr_create(aname, 1, counts, 1); if (!a) break; }
+                          else if (!a->is_str || a->ndim != 1) {
+                                    err("SPLIT needs a one-dimensional string array"); break; }
+                          int off = a->off, cap = a->total, stored = 0;
+                          if (seplen == 0) {
+                              for (int i = 0; i < s.len && stored < cap; i++) {
+                                  str_store_to(&arr_strs[off + stored], s.str + i, 1);
+                                  if (g_err) break;
+                                  stored++;
+                              }
+                          } else {
+                              int start = 0;
+                              for (int i = 0; i + seplen <= s.len; ) {
+                                  if (mem_eq(s.str + i, sepbuf, seplen)) {
+                                      if (stored < cap) {
+                                          str_store_to(&arr_strs[off + stored], s.str + start, i - start);
+                                          if (g_err) break;
+                                          stored++;
+                                      }
+                                      i += seplen; start = i;
+                                  } else i++;
+                              }
+                              if (!g_err && stored < cap) {
+                                  str_store_to(&arr_strs[off + stored], s.str + start, s.len - start); stored++; }
+                          }
+                          if (g_err) break;
+                          result = v_num((double)stored); break; }
+        case KW_JOINS: {                            // JOIN$(parts$(),sep[,count]) -> joined string
+                          char aname[NAME_LEN]; if (!parse_array_ref(aname)) break;
+                          if (!name_is_str(aname)) { err("JOIN$ needs a string array, e.g. parts$()"); break; }
+                          arr_t *a = arr_find(aname);
+                          if (!a || !a->is_str || a->ndim != 1) {
+                              err("JOIN$ needs a one-dimensional string array"); break; }
+                          if (!expect(T_COMMA)) break;
+                          value_t sep = need_str(); if (g_err) break;
+                          char sepbuf[MAX_STR]; int seplen = sep.len;
+                          for (int i = 0; i < seplen; i++) sepbuf[i] = sep.str[i];
+                          int count = a->total;
+                          if (tok == T_COMMA) { lex_next(); count = (int)need_num(); if (g_err) break; }
+                          if (count < 0) count = 0;
+                          if (count > a->total) count = a->total;
+                          long outlen = 0;
+                          for (int i = 0; i < count; i++) outlen += arr_strs[a->off + i].slen;
+                          if (count > 0) outlen += (long)(count - 1) * seplen;
+                          if (outlen > MAX_STR) { err("Text string is too long"); break; }
+                          char *p = outlen > 0 ? scratch_alloc((int)outlen) : 0;
+                          if (outlen > 0 && !p) break;
+                          int w = 0;
+                          for (int i = 0; i < count; i++) {
+                              if (i > 0) for (int k = 0; k < seplen; k++) p[w++] = sepbuf[k];
+                              strdesc_t *d = &arr_strs[a->off + i];
+                              for (int k = 0; k < d->slen; k++) p[w++] = d->sptr[k];
+                          }
+                          result = v_str(p, w); break; }
         // Bitwise shift / rotate on 32-bit integers. SHL/SHR shift in zeros
         // (SHR is logical/unsigned); ASR is an arithmetic right shift that keeps
         // the sign bit; ROL/ROR rotate within 32 bits.
@@ -1415,6 +1608,10 @@ static value_t eval_function(int fn) {
         case KW_LOADSPRITE: { value_t s = need_str(); if (g_err) break;
                               char nm[64]; copy_fname(s, nm, sizeof nm);
                               result = v_num((double)img_load_sprite(nm)); break; }
+        // PEEK(addr) -> the byte at addr (0..255). Familiar alias for ?addr; use
+        // ! for a 32-bit word and $ for a string. See also POKE.
+        case KW_PEEK: { long a = (long)need_num(); if (g_err) break;
+                        result = v_num((double)mem_peekb(a)); break; }
         case KW_SPRW: case KW_SPRH: {
                           long a = (long)need_num(); if (g_err) break;
                           long v = 0;
@@ -1497,6 +1694,12 @@ static value_t prim_base(void) {
             case KW_FALSE: lex_next(); return v_num(0.0);
             case KW_POS:   lex_next(); return v_num(con_pos());
             case KW_VPOS:  lex_next(); return v_num(con_vpos());
+            case KW_ERR:   lex_next(); return v_num(g_errcode);
+            case KW_ERRS:  { lex_next();
+                             int n = 0; while (g_errmsg[n]) n++;
+                             return str_in_scratch(g_errmsg, n); }
+            case KW_SCREENW: lex_next(); return v_num(con_screen_w());
+            case KW_SCREENH: lex_next(); return v_num(con_screen_h());
             case KW_MOUSEX: { int x; lex_next(); con_mouse(&x, 0, 0); return v_num(x); }
             case KW_MOUSEY: { int y; lex_next(); con_mouse(0, &y, 0); return v_num(y); }
             case KW_MOUSEB: { int b; lex_next(); con_mouse(0, 0, &b); return v_num(b); }
@@ -1749,6 +1952,23 @@ static int       while_sp;
 // CASE nesting depth (the selector is matched immediately, so only the depth
 // needs tracking for ENDCASE balancing and nested-CASE skipping).
 static int       case_sp;
+
+// Loop-type tags for EXIT/CONTINUE. The three loop stacks (for_/repeat_/while_)
+// don't record their relative nesting order, so EXIT/CONTINUE find the innermost
+// loop by comparing the source positions of each stack's active frames instead.
+enum { LOOP_FOR = 1, LOOP_REPEAT, LOOP_WHILE };
+
+// TRY/CATCH handler stack. Each active TRY records where its CATCH clause starts
+// and a snapshot of the interpreter's stacks, so catching an error unwinds any
+// loops / PROC frames entered since the TRY and resumes cleanly at the handler.
+#define TRY_MAX 16
+typedef struct {
+    int catch_pc, catch_off;       // where the CATCH handler body begins
+    int call_sp;                   // PROC/FN depth the TRY sits at
+    int for_sp, repeat_sp, while_sp, case_sp, gosub_sp, fn_ret_sp, local_sp;
+    int scratch_base, scratch_top;
+} try_rec_t;
+static try_rec_t try_stack[TRY_MAX];
 
 // Procedures / functions
 static int     g_return;         // ENDPROC / END FN / =<expr> ends the current body
@@ -2398,6 +2618,104 @@ static void stmt_next(void) {
     } else {
         for_sp = idx;                        // loop done: pop it
     }
+}
+
+// --- EXIT / CONTINUE : break out of / restart the innermost loop -------------
+// Is source position (l1,o1) strictly later than (l2,o2)?
+static int pos_gt(int l1, int o1, int l2, int o2) {
+    return (l1 > l2) || (l1 == l2 && o1 > o2);
+}
+
+// From the current lexer position, scan forward for the `need`-th loop terminator
+// (NEXT/UNTIL/ENDWHILE) at nesting depth 0. If `past`, resume just after that
+// terminator's whole statement (EXIT leaves the loop); otherwise resume AT the
+// terminator so it executes (CONTINUE runs the loop's test). Sets g_branch.
+static void loop_break_scan(int need, int past) {
+    int pc = cur_line_idx;
+    int depth = 0;
+    for (;;) {
+        while (tok != T_EOL) {
+            if (tok == T_KW && (tok_kw == KW_FOR || tok_kw == KW_REPEAT || tok_kw == KW_WHILE))
+                depth++;
+            else if (tok == T_KW && (tok_kw == KW_NEXT || tok_kw == KW_UNTIL || tok_kw == KW_ENDWHILE)) {
+                if (depth > 0) depth--;
+                else if (--need == 0) {
+                    if (!past) {                 // CONTINUE: land on the terminator
+                        g_branch = 1; g_branch_line = pc; g_branch_off = (int)(tok_start - cur_text);
+                        return;
+                    }
+                    int ck = tok_kw; lex_next();     // EXIT: step past the terminator statement
+                    if (ck == KW_NEXT) { if (tok == T_VAR) lex_next(); }        // NEXT [var]
+                    else if (ck == KW_UNTIL) { while (tok != T_EOL && tok != T_COLON) lex_next(); }
+                    g_branch = 1; g_branch_line = pc; g_branch_off = (int)(tok_start - cur_text);
+                    return;
+                }
+            }
+            lex_next();
+        }
+        if (++pc >= prog_n) { err("Loop is not closed (missing NEXT/UNTIL/ENDWHILE)"); return; }
+        lex_at(pc, 0);
+    }
+}
+
+// Shared EXIT/CONTINUE core. is_exit: leave the loop (pop its frame, resume after
+// its terminator); else CONTINUE (keep the frame, resume at the terminator's test).
+// want: 0 = innermost loop of any kind, else LOOP_FOR/REPEAT/WHILE.
+static void loop_control(int is_exit, int want) {
+    const char *what = is_exit ? "EXIT" : "CONTINUE";
+    if (for_sp + repeat_sp + while_sp == 0) { err2(what, " is not inside a loop"); return; }
+
+    int t_type, t_line, t_off;
+    if (want == LOOP_FOR) {
+        if (for_sp <= 0) { err2(what, " FOR: no FOR loop is active"); return; }
+        t_type = LOOP_FOR; t_line = for_stack[for_sp-1].line; t_off = for_stack[for_sp-1].off;
+    } else if (want == LOOP_REPEAT) {
+        if (repeat_sp <= 0) { err2(what, " REPEAT: no REPEAT loop is active"); return; }
+        t_type = LOOP_REPEAT; t_line = repeat_stack[repeat_sp-1].line; t_off = repeat_stack[repeat_sp-1].off;
+    } else if (want == LOOP_WHILE) {
+        if (while_sp <= 0) { err2(what, " WHILE: no WHILE loop is active"); return; }
+        t_type = LOOP_WHILE; t_line = while_stack[while_sp-1].line; t_off = while_stack[while_sp-1].off;
+    } else {                                    // innermost loop = latest start position
+        t_type = 0; t_line = -1; t_off = -1;
+        if (for_sp > 0 && pos_gt(for_stack[for_sp-1].line, for_stack[for_sp-1].off, t_line, t_off)) {
+            t_type = LOOP_FOR; t_line = for_stack[for_sp-1].line; t_off = for_stack[for_sp-1].off; }
+        if (repeat_sp > 0 && pos_gt(repeat_stack[repeat_sp-1].line, repeat_stack[repeat_sp-1].off, t_line, t_off)) {
+            t_type = LOOP_REPEAT; t_line = repeat_stack[repeat_sp-1].line; t_off = repeat_stack[repeat_sp-1].off; }
+        if (while_sp > 0 && pos_gt(while_stack[while_sp-1].line, while_stack[while_sp-1].off, t_line, t_off)) {
+            t_type = LOOP_WHILE; t_line = while_stack[while_sp-1].line; t_off = while_stack[while_sp-1].off; }
+    }
+
+    // Pop every loop nested inside the target (a strictly later start position).
+    int inner = 0;
+    while (for_sp > 0    && pos_gt(for_stack[for_sp-1].line,       for_stack[for_sp-1].off,       t_line, t_off)) { for_sp--;    inner++; }
+    while (repeat_sp > 0 && pos_gt(repeat_stack[repeat_sp-1].line, repeat_stack[repeat_sp-1].off, t_line, t_off)) { repeat_sp--; inner++; }
+    while (while_sp > 0  && pos_gt(while_stack[while_sp-1].line,   while_stack[while_sp-1].off,   t_line, t_off)) { while_sp--;  inner++; }
+    if (is_exit) {                              // EXIT also discards the target itself
+        if      (t_type == LOOP_FOR)    for_sp--;
+        else if (t_type == LOOP_REPEAT) repeat_sp--;
+        else                            while_sp--;
+    }
+    loop_break_scan(inner + 1, is_exit);
+}
+
+// EXIT [FOR|REPEAT|WHILE] : leave the innermost (or named) loop.
+static void stmt_exit(void) {
+    lex_next();                                 // consume EXIT
+    int want = 0;
+    if (tok == T_KW && tok_kw == KW_FOR)         { want = LOOP_FOR;    lex_next(); }
+    else if (tok == T_KW && tok_kw == KW_REPEAT) { want = LOOP_REPEAT; lex_next(); }
+    else if (tok == T_KW && tok_kw == KW_WHILE)  { want = LOOP_WHILE;  lex_next(); }
+    loop_control(1, want);
+}
+
+// CONTINUE [FOR|REPEAT|WHILE] : jump to the innermost (or named) loop's next test.
+static void stmt_continue(void) {
+    lex_next();                                 // consume CONTINUE
+    int want = 0;
+    if (tok == T_KW && tok_kw == KW_FOR)         { want = LOOP_FOR;    lex_next(); }
+    else if (tok == T_KW && tok_kw == KW_REPEAT) { want = LOOP_REPEAT; lex_next(); }
+    else if (tok == T_KW && tok_kw == KW_WHILE)  { want = LOOP_WHILE;  lex_next(); }
+    loop_control(0, want);
 }
 
 static void stmt_dim(void) {
@@ -3130,6 +3448,164 @@ static void stmt_edit(void) {
     g_prefill_len = n;
 }
 
+// --- Sound: a portable, queued, background tone player ----------------------
+// The hardware backend (sound.h) plays at most one square-wave tone at a time.
+// Everything that makes it feel like BBC SOUND — four independent channels, a
+// per-channel note queue, note durations, and "play in the background while the
+// program keeps running" — lives here, so it behaves identically on the target
+// and the host and is exercised by the unit tests.
+//
+// Each channel advances on its own clock: at every sound_pump() a channel whose
+// current note has expired starts the next queued note. All channels can be
+// "sounding" at once, but with a single mono voice only the lowest-numbered
+// active channel is actually audible; the rest still count down so they don't
+// starve. sound_pump() must be called often (it is: from the run loop, the REPL,
+// and the target's key-wait idle loop) — but because the tone is sustained in
+// hardware, the current note keeps playing even between pumps.
+
+#define SND_CHANS 4          // BBC channels 0..3
+#define SND_QLEN  9          // per-channel ring buffer (8 usable notes)
+
+typedef struct { int freq, vol; long dur_us; } snd_note;   // dur_us < 0 = play forever
+
+static struct {
+    snd_note q[SND_QLEN];
+    int head, tail;                        // ring buffer indices
+    int active;                            // a note is currently sounding
+    int forever;                           // the current note has no end time
+    int cur_freq, cur_vol;
+    unsigned long long end_us;             // when the current note ends
+} snd_ch[SND_CHANS];
+
+static int snd_out_freq = -1, snd_out_vol = -1;   // last tone handed to the hardware
+
+static void sound_reset(void) {
+    for (int c = 0; c < SND_CHANS; c++) {
+        snd_ch[c].head = snd_ch[c].tail = 0;
+        snd_ch[c].active = snd_ch[c].forever = 0;
+        snd_ch[c].cur_freq = snd_ch[c].cur_vol = 0;
+        snd_ch[c].end_us = 0;
+    }
+    snd_out_freq = snd_out_vol = -1;
+    snd_silence();
+}
+
+static void sound_enqueue(int chan, int freq, int vol, long dur_us) {
+    if (chan < 0 || chan >= SND_CHANS) return;
+    int nt = (snd_ch[chan].tail + 1) % SND_QLEN;
+    if (nt == snd_ch[chan].head) return;               // queue full: drop the note
+    snd_ch[chan].q[snd_ch[chan].tail].freq   = freq;
+    snd_ch[chan].q[snd_ch[chan].tail].vol    = vol;
+    snd_ch[chan].q[snd_ch[chan].tail].dur_us = dur_us;
+    snd_ch[chan].tail = nt;
+}
+
+// Advance every channel's playback and push the audible tone to the hardware.
+// Public so the backends' idle loops can keep the queue moving.
+void sound_pump(void) {
+    unsigned long long now = con_micros();
+    for (int c = 0; c < SND_CHANS; c++) {
+        if (snd_ch[c].active && !snd_ch[c].forever && now >= snd_ch[c].end_us)
+            snd_ch[c].active = 0;                        // this note finished
+        if (!snd_ch[c].active && snd_ch[c].head != snd_ch[c].tail) {
+            snd_note n = snd_ch[c].q[snd_ch[c].head];
+            snd_ch[c].head = (snd_ch[c].head + 1) % SND_QLEN;
+            snd_ch[c].active   = 1;
+            snd_ch[c].forever  = (n.dur_us < 0);
+            snd_ch[c].cur_freq = n.freq;
+            snd_ch[c].cur_vol  = n.vol;
+            snd_ch[c].end_us   = now + (unsigned long long)(n.dur_us < 0 ? 0 : n.dur_us);
+        }
+    }
+    int wf = 0, wv = 0;
+    for (int c = 0; c < SND_CHANS; c++)                  // lowest active channel wins
+        if (snd_ch[c].active) { wf = snd_ch[c].cur_freq; wv = snd_ch[c].cur_vol; break; }
+    if (wf != snd_out_freq || wv != snd_out_vol) {       // only touch hardware on a change
+        snd_out_freq = wf; snd_out_vol = wv;
+        if (wf > 0 && wv > 0) snd_set_tone(wf, wv);
+        else                  snd_silence();
+    }
+}
+
+// Test / introspection helpers (also drive the host `basic_host` build).
+int sound_cur_freq(void) { return snd_out_freq > 0 ? snd_out_freq : 0; }
+int sound_cur_vol(void)  { return snd_out_vol  > 0 ? snd_out_vol  : 0; }
+int sound_queued(void) {
+    int n = 0;
+    for (int c = 0; c < SND_CHANS; c++) {
+        int cnt = snd_ch[c].tail - snd_ch[c].head;
+        if (cnt < 0) cnt += SND_QLEN;
+        n += cnt + (snd_ch[c].active ? 1 : 0);
+    }
+    return n;
+}
+
+// BBC pitch -> Hz: 4 units = 1 semitone (48 = 1 octave), and pitch 89 is the A
+// above middle C (440 Hz), so freq = 440 * 2^((pitch-89)/48).
+static int pitch_to_hz(int pitch) {
+    return (int)(440.0 * dpow(2.0, (pitch - 89) / 48.0) + 0.5);
+}
+
+// SOUND channel, amplitude, pitch, duration   (BBC-style)
+//   channel   0..3
+//   amplitude 0 = silent, else loudness; -15..-1 (BBC) and 1..15 both map to 1..15
+//   pitch     0..255, quarter-semitone steps (53 = middle C, 89 = A 440)
+//   duration  in twentieths of a second; -1 = play until replaced
+// SOUND OFF   silences everything and empties the queues.
+static void stmt_sound(void) {
+    lex_next();                                  // consume SOUND
+    if (tok == T_VAR && s_eq(tok_var, "OFF")) { lex_next(); sound_reset(); return; }
+    int chan = (int)need_num();   if (!expect(T_COMMA)) return;
+    int amp  = (int)need_num();   if (!expect(T_COMMA)) return;
+    int pit  = (int)need_num();   if (!expect(T_COMMA)) return;
+    int dur  = (int)need_num();   if (g_err) return;
+    int vol = amp < 0 ? -amp : amp;              // accept BBC's -15..0 and a plain 0..15
+    if (vol > 15) vol = 15;
+    long dur_us = dur < 0 ? -1L : (long)dur * 50000L;    // a "twentieth" = 50 ms
+    sound_enqueue(chan, pitch_to_hz(pit), vol, dur_us);
+}
+
+// TONE frequency_hz, duration_ms [, volume]   (direct, non-BBC helper)
+// Plays on channel 0. Volume defaults to full (15).
+static void stmt_tone(void) {
+    lex_next();                                  // consume TONE
+    int freq = (int)need_num();   if (!expect(T_COMMA)) return;
+    int ms   = (int)need_num();
+    int vol  = 15;
+    if (tok == T_COMMA) { lex_next(); vol = (int)need_num(); if (vol > 15) vol = 15; }
+    if (g_err) return;
+    long dur_us = ms < 0 ? -1L : (long)ms * 1000L;
+    sound_enqueue(0, freq, vol, dur_us);
+}
+
+// SCREEN width, height : switch the display resolution for this program.
+// SCREEN (no arguments) restores the startup resolution. The system also restores
+// it automatically when the program finishes (see run_program). The BBC logical
+// coordinate system (0..1279 x 0..1023) is unchanged, so graphics keep working;
+// only pixel density and the text grid change. Read the current size with the
+// SCREENW / SCREENH functions.
+static void stmt_screen(void) {
+    lex_next();                                  // consume SCREEN
+    if (tok == T_EOL || tok == T_COLON) {        // bare SCREEN -> restore startup
+        con_screen(0, 0);
+        return;
+    }
+    int w = (int)need_num();   if (!expect(T_COMMA)) return;
+    int h = (int)need_num();   if (g_err) return;
+    if (!con_screen(w, h)) err("Could not set that screen resolution");
+}
+
+// POKE addr, byte : store one byte at a memory address. Familiar alias for the
+// indirection form `?addr = byte`; use `!addr = word` / `$addr = "..."` for a
+// 32-bit word or a string. On this bare-metal machine the address is real, so
+// poke inside a DIMed buffer (see DIM name size) unless you mean a hardware one.
+static void stmt_poke_kw(void) {
+    lex_next();                                  // consume POKE
+    long a = (long)need_num();   if (!expect(T_COMMA)) return;
+    long v = (long)need_num();   if (g_err) return;
+    mem_pokeb(a, v);
+}
+
 // --- Graphics statements ----------------------------------------------------
 static void stmt_mode(void) {
     lex_next();                                  // consume MODE
@@ -3264,6 +3740,125 @@ static void stmt_move_draw(int plotcode) {
     con_plot(plotcode, x, y);
 }
 
+// --- TRY / CATCH / ENDTRY : structured error handling -----------------------
+// Forward-scan from just after TRY for the matching CATCH (honouring nested
+// TRY blocks). Records its position in *pc/*off (the start of the handler body).
+// Returns 1 on success; raises and returns 0 if there is no CATCH.
+static int find_catch(int *out_pc, int *out_off) {
+    int pc = cur_line_idx;
+    int depth = 0;
+    for (;;) {
+        while (tok != T_EOL) {
+            if (tok == T_KW && tok_kw == KW_TRY) depth++;
+            else if (tok == T_KW && tok_kw == KW_ENDTRY) {
+                if (depth == 0) { err("TRY without a matching CATCH"); return 0; }
+                depth--;
+            } else if (tok == T_KW && tok_kw == KW_CATCH && depth == 0) {
+                lex_next();                          // step past CATCH
+                *out_pc = pc; *out_off = (int)(tok_start - cur_text);
+                return 1;
+            }
+            lex_next();
+        }
+        if (++pc >= prog_n) { err("TRY without a matching CATCH"); return 0; }
+        lex_at(pc, 0);
+    }
+}
+
+// TRY : begin a protected block. Locate its CATCH, snapshot the interpreter
+// state, push a handler, then carry on executing the block.
+static void stmt_try(void) {
+    lex_next();                                  // consume TRY
+    if (cur_line_idx < 0) { err("TRY can only be used inside a program"); return; }
+    if (try_sp >= TRY_MAX) { err("Too many nested TRY blocks"); return; }
+
+    // Remember where the token after TRY starts, so we can resume the block after
+    // the forward scan for CATCH has moved the lexer around.
+    const char *save_text = cur_text;
+    int save_line = cur_line_idx;
+    int save_off  = (int)(tok_start - cur_text);
+
+    int cpc, coff;
+    if (!find_catch(&cpc, &coff)) return;
+
+    // Re-lex the token right after TRY so the block continues cleanly.
+    cur_text = save_text; cur_line_idx = save_line;
+    lx = cur_text + save_off;
+    lex_next();
+
+    try_rec_t *h = &try_stack[try_sp++];
+    h->catch_pc = cpc; h->catch_off = coff;
+    h->call_sp = call_sp;
+    h->for_sp = for_sp; h->repeat_sp = repeat_sp; h->while_sp = while_sp;
+    h->case_sp = case_sp; h->gosub_sp = gosub_sp; h->fn_ret_sp = fn_ret_sp;
+    h->local_sp = local_sp;
+    h->scratch_base = scratch_base; h->scratch_top = scratch_top;
+}
+
+// CATCH reached in normal flow: the protected block finished with no error, so
+// discard the handler and skip past the matching ENDTRY (don't run the handler).
+static void stmt_catch(void) {
+    if (try_sp > 0) try_sp--;                    // this block succeeded
+    lex_next();                                  // consume CATCH
+    skip_to_close(KW_TRY, KW_ENDTRY, "CATCH without a matching ENDTRY");
+}
+
+static void stmt_endtry(void) { lex_next(); }    // no-op join point
+
+// RAISE : throw a user error.
+//   RAISE "message"            (code 0)
+//   RAISE code                 (numeric code, message = "")
+//   RAISE code, "message"
+static void stmt_raise(void) {
+    lex_next();                                  // consume RAISE
+    value_t v = eval_expr();
+    if (g_err) return;
+    int code = 0;
+    char msgbuf[ERRMSG_MAX]; msgbuf[0] = 0;
+    if (v.is_str) {
+        int n = v.len < ERRMSG_MAX - 1 ? v.len : ERRMSG_MAX - 1;
+        for (int i = 0; i < n; i++) msgbuf[i] = v.str[i];
+        msgbuf[n] = 0;
+    } else {
+        code = (int)v.num;
+        if (tok == T_COMMA) {
+            lex_next();
+            value_t m = need_str();
+            if (g_err) return;
+            int n = m.len < ERRMSG_MAX - 1 ? m.len : ERRMSG_MAX - 1;
+            for (int i = 0; i < n; i++) msgbuf[i] = m.str[i];
+            msgbuf[n] = 0;
+        }
+    }
+    if (g_err) return;
+    // Raise it the same way err() does, but keep the caller-supplied code.
+    err(msgbuf[0] ? msgbuf : "User error");
+    g_errcode = code;
+}
+
+// If an error is pending and the innermost TRY handler belongs to the current
+// PROC/FN frame, unwind to it: restore the saved stacks/locals, clear the error,
+// and report the CATCH position to resume at (via *pc/*off). Returns 1 if caught.
+static int try_handle_error(int *pc, int *off) {
+    if (!g_err || try_sp <= 0) return 0;
+    try_rec_t *h = &try_stack[try_sp - 1];
+    if (h->call_sp != call_sp) return 0;         // handler is in an outer frame: keep unwinding
+
+    for_sp = h->for_sp; repeat_sp = h->repeat_sp; while_sp = h->while_sp;
+    case_sp = h->case_sp; gosub_sp = h->gosub_sp; fn_ret_sp = h->fn_ret_sp;
+    while (local_sp > h->local_sp) {             // undo LOCALs bound inside the block
+        local_sp--;
+        *local_stack[local_sp].slot = local_stack[local_sp].old;
+    }
+    scratch_base = h->scratch_base; scratch_top = h->scratch_top;
+
+    *pc = h->catch_pc; *off = h->catch_off;
+    try_sp--;                                    // this handler is now consumed
+    g_err = 0;                                   // handled: resume normal flow
+    g_branch = 0; g_return = 0;
+    return 1;
+}
+
 static void exec_statement(void) {
     scratch_reset();                             // reclaim previous temporaries
     if (tok == T_LABEL) lex_next();              // ".name": a branch label, then run the rest
@@ -3288,10 +3883,20 @@ static void exec_statement(void) {
             case KW_WHEN:
             case KW_OTHERWISE: case_skip_to_end(); return;  // chosen clause finished
             case KW_ENDCASE: stmt_endcase(); return;
+            case KW_EXIT:     stmt_exit();     return;
+            case KW_CONTINUE: stmt_continue(); return;
+            case KW_TRY:      stmt_try();      return;
+            case KW_CATCH:    stmt_catch();    return;
+            case KW_ENDTRY:   stmt_endtry();   return;
+            case KW_RAISE:    stmt_raise();    return;
             case KW_ENDIF: lex_next();     return;   // block-IF join point: no-op
             case KW_ELSE:  stmt_else_block(); return;   // end of a block-IF THEN branch
             case KW_CLS:   lex_next(); con_cls();   return;
             case KW_COLOUR:stmt_colour();  return;
+            case KW_SOUND: stmt_sound();   return;
+            case KW_TONE:  stmt_tone();    return;
+            case KW_POKE:  stmt_poke_kw(); return;
+            case KW_SCREEN: stmt_screen(); return;
             case KW_MODE:  stmt_mode();    return;
             case KW_GCOL:  stmt_gcol();    return;
             case KW_PLOT:  stmt_plot();    return;
@@ -3443,6 +4048,10 @@ static void run_body(int pc, int off) {
         g_branch = 0;
         exec_text(prog[pc].text, off);
         off = 0;
+        if (g_err) {                             // a TRY in this frame can catch it
+            int npc, noff;
+            if (try_handle_error(&npc, &noff)) { pc = npc; off = noff; continue; }
+        }
         if (g_err || g_stop || g_return) break;
         if (g_branch) { pc = g_branch_line; off = g_branch_off; }
         else          { pc++; }
@@ -3466,9 +4075,12 @@ static void run_program(int start_pc, int start_off) {
     call_sp = 0;
     fn_ret_sp = 0;
     local_sp = 0;
+    try_sp = 0;
+    g_errcode = 0; g_errmsg[0] = 0;
     scratch_base = 0;
     for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;   // fresh run reloads its seeds
     seed_heap_reset();                                       // and starts with a clean heap
+    sound_reset();                                           // silence any leftover notes
     data_pc = 0;
     data_off = -1;
     scan_defs();                                            // now also sees module PROC/FN
@@ -3478,12 +4090,17 @@ static void run_program(int start_pc, int start_off) {
     // lines live above main_n and are reached solely through PROC/FN calls, so
     // falling off the end of main must not wander into them.
     while (pc >= 0 && pc < main_n && !g_err && !g_stop) {
+        sound_pump();                            // advance any queued/background notes
         cur_line_idx = pc;
         g_runline = prog[pc].num;
         g_branch = 0;
         g_return = 0;
         exec_text(prog[pc].text, off);
         off = 0;
+        if (g_err) {                             // a TRY at the top level can catch it
+            int npc, noff;
+            if (try_handle_error(&npc, &noff)) { pc = npc; off = noff; continue; }
+        }
         if (g_err || g_stop) break;
         if (g_branch) { pc = g_branch_line; off = g_branch_off; }
         else          { pc++; }
@@ -3493,7 +4110,18 @@ static void run_program(int start_pc, int start_off) {
     g_stop = 0;
     g_branch = 0;
     run_depth--;
-    if (outer) prog_n = main_n;                // strip imported module lines
+    if (outer) {
+        // An error deferred by an unmatched TRY (or one that never reached its
+        // CATCH) was recorded but not printed; report it now so it isn't lost.
+        if (g_err && !g_err_reported) {
+            con_putc('\n'); con_puts(g_errmsg);
+            g_runline = g_errline; err_tail(); g_runline = -1;
+            g_err_reported = 1;
+        }
+        try_sp = 0;
+        prog_n = main_n;                       // strip imported module lines
+        con_screen(0, 0);                      // restore the startup resolution (no-op if unchanged)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3544,6 +4172,7 @@ static void call_named(int is_fn, const char *name, value_t *retval) {
     char save_var[NAME_LEN]; s_copy(save_var, tok_var, NAME_LEN);
     int save_sbase = scratch_base, save_stop = scratch_top;
     int local_mark = local_sp;
+    int save_try = try_sp;                       // discard any TRY the body leaves open
 
     scratch_base = scratch_top;                  // body temporaries start above the args
     call_sp++;
@@ -3626,6 +4255,7 @@ static void call_named(int is_fn, const char *name, value_t *retval) {
     // Restore the caller's state. Keep scratch_top for FN so the return value
     // (which lives in scratch) survives; rewind it for PROC.
     call_sp--;
+    try_sp = save_try;                           // drop TRY handlers opened in the body
     scratch_base = save_sbase;
     if (!is_fn) scratch_top = save_stop;
     g_return = 0;
@@ -3687,8 +4317,13 @@ void basic_init(void) {
     gosub_sp = 0;
     for_sp = 0;
     repeat_sp = 0;
+    while_sp = 0;
+    case_sp = 0;
     call_sp = 0;
     local_sp = 0;
+    try_sp = 0;
+    g_errcode = 0;
+    g_errmsg[0] = 0;
     def_n = 0;
     g_return = 0;
     scratch_top = 0;
@@ -3697,6 +4332,8 @@ void basic_init(void) {
     data_off = -1;
     time_base = 0;
     clear_vars();
+    snd_init();          // bring up the audio hardware (host backend is a no-op)
+    sound_reset();
 }
 
 void basic_repl(void) {
