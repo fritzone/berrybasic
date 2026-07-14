@@ -48,6 +48,12 @@ static uint32_t g_fb_w    = FB_WIDTH;
 static uint32_t g_fb_h    = FB_HEIGHT;
 static uint32_t g_start_w = FB_WIDTH;
 static uint32_t g_start_h = FB_HEIGHT;
+// Graphics render target (SPRITETARGET). g_tgt_* are the target's pixel size
+// (0 = the screen framebuffer); g_gl_* are the logical coordinate extent - the
+// BBC 1280x1024 space for the screen, but the sprite's own pixels (1:1, origin
+// bottom-left) when drawing into a sprite.
+static int g_tgt_w = 0, g_tgt_h = 0;
+static int g_gl_w  = 1280, g_gl_h = 1024;
 static int g_term_cols    = FB_WIDTH  / CHAR_W;
 static int g_term_rows    = FB_HEIGHT / CHAR_H;
 static int cursor_visible = 0;   // whether the cursor glyph is currently drawn
@@ -376,7 +382,8 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
                 kstrcpy(buf, hist_age == 0 ? saved : hist_get(hist_age), maxlen);
                 len = kstrlen(buf); pos = len;
             }
-        } else if (c >= 32 && c <= 126) {         // insert a printable char at cursor
+        } else if (((unsigned char)c >= 32 && (unsigned char)c <= 126) ||
+                   (unsigned char)c >= 0xA0) {    // printable ASCII or Latin-1 (æ ø å …)
             if (len < maxlen - 1) {
                 for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
                 buf[pos++] = c; len++; buf[len] = 0;
@@ -435,6 +442,10 @@ void con_colour(int c) {
     if (c >= 128) text_bg    = bbc_palette[(c - 128) & 7];   // COLOUR 128+c: background
     else          text_color = bbc_palette[c & 7];           // COLOUR c: foreground
 }
+
+// Keyboard layout: forward to the shared HID decoder (see drivers/usb_hid.c).
+int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
+const char *con_get_keyboard(void)             { return hid_layout_code(); }
 
 // Block until a key is pressed; return its ASCII code (BBC GET).
 int con_getkey(void) {
@@ -576,6 +587,7 @@ static void pointer_show(void) {
 // date, so it is cheap to call at the polling rate.
 static void pointer_tick(void) {
     if (!mouse_enabled()) return;
+    if (gfx_buffered() || g_tgt_w > 0) return;   // never draw the arrow off-screen
     mouse_service();
     if (g_ptr_shown && g_ptr_x == g_mouse_x && g_ptr_y == g_mouse_y) return;
     pointer_hide();
@@ -649,6 +661,14 @@ int con_splash(const char *banner) {
 #define GFX_LW 1280
 #define GFX_LH 1024
 
+// Current graphics target dimensions. gl_* is the logical coordinate extent and
+// gt_* the destination pixel size; they differ only while SPRITETARGET is active
+// (both become the sprite's size, so drawing addresses sprite pixels directly).
+static int gl_w(void) { return g_gl_w; }
+static int gl_h(void) { return g_gl_h; }
+static int gt_w(void) { return g_tgt_w > 0 ? g_tgt_w : (int)g_fb_w; }
+static int gt_h(void) { return g_tgt_h > 0 ? g_tgt_h : (int)g_fb_h; }
+
 static int gfx_fg  = 7;     // graphics foreground (logical colour)
 static int gfx_bg  = 0;     // graphics background
 static int gfx_act = 0;     // GCOL plot action (0=store 1=OR 2=AND 3=EOR 4=invert)
@@ -665,11 +685,11 @@ static int gpx1, gpy1;      // previous point
 static int gpx2, gpy2;      // the one before that
 static int gfx_ox = 0, gfx_oy = 0;   // graphics origin (VDU 29 / ORIGIN)
 
-static int lx2px(int x) { return (x + gfx_ox) * (int)g_fb_w  / GFX_LW; }
-static int ly2py(int y) { return ((int)g_fb_h - 1) - ((y + gfx_oy) * (int)g_fb_h / GFX_LH); }
+static int lx2px(int x) { return (x + gfx_ox) * gt_w()  / gl_w(); }
+static int ly2py(int y) { return (gt_h() - 1) - ((y + gfx_oy) * gt_h() / gl_h()); }
 // Inverse transforms (physical pixel -> logical, origin-relative).
-static int px2lx(int px) { return px * GFX_LW / (int)g_fb_w - gfx_ox; }
-static int py2ly(int py) { return ((int)g_fb_h - 1 - py) * GFX_LH / (int)g_fb_h - gfx_oy; }
+static int px2lx(int px) { return px * gl_w() / gt_w() - gfx_ox; }
+static int py2ly(int py) { return (gt_h() - 1 - py) * gl_h() / gt_h() - gfx_oy; }
 
 static int isqrt_i(int v) {
     if (v <= 0) return 0;
@@ -728,7 +748,9 @@ void con_clg(void) {
     int x0, y0, x1, y1;
     gfx_clip_rect(&x0, &y0, &x1, &y1);         // clear only the graphics viewport
     gfx_set_op(0);
-    fill_rect(x0, y0, x1, y1, gcol_bg());
+    // Clearing a sprite target resets it to fully transparent (alpha 0) so
+    // untouched areas stay see-through; the screen clears to the gfx background.
+    fill_rect(x0, y0, x1, y1, g_tgt_w > 0 ? 0x00000000u : gcol_bg());
 }
 
 void con_plot(int code, int x, int y) {
@@ -775,11 +797,27 @@ void con_plot(int code, int x, int y) {
 
 int con_point(int x, int y) {
     if (!fb_ready) return -1;
-    if (x < 0 || x >= GFX_LW || y < 0 || y >= GFX_LH) return -1;
+    if (x < 0 || x >= gl_w() || y < 0 || y >= gl_h()) return -1;
     uint32_t px = getpixel(lx2px(x), ly2py(y));
     for (int i = 0; i < 8; i++) if (bbc_palette[i] == px) return i;
     return -1;
 }
+
+// --- double buffering -------------------------------------------------------
+// The graphics driver owns the back buffer and the draw-target indirection; the
+// console just gates it on a live framebuffer and keeps the software mouse
+// pointer off the back buffer (it belongs on the visible screen only).
+int con_backbuffer(int on) {
+    if (!fb_ready) return on ? -1 : 0;
+    if (on) {
+        pointer_hide();                 // clear the arrow from the front first
+        return gfx_backbuffer(1);
+    }
+    gfx_backbuffer(0);
+    return 0;
+}
+void con_flip(void) { if (fb_ready) gfx_flip(); }
+int  con_buffered(void) { return gfx_buffered(); }
 
 // --- high-level shape commands (BBC logical coordinates) --------------------
 // All draw in the current graphics foreground (logical or truecolour) and honour
@@ -806,7 +844,7 @@ void con_rectangle(int x, int y, int w, int h, int fill) {
 void con_circle(int x, int y, int r, int fill) {
     if (!fb_ready) return;
     int cx = lx2px(x), cy = ly2py(y);
-    int rp = r * (int)g_fb_w / GFX_LW;             // scale to a screen-round radius
+    int rp = r * gt_w() / gl_w();                  // scale to a round radius in target pixels
     if (rp < 0) rp = -rp;
     gfx_set_op(gfx_act);
     if (fill) fill_circle(cx, cy, rp, gcol_fg());
@@ -817,8 +855,8 @@ void con_circle(int x, int y, int r, int fill) {
 void con_ellipse(int x, int y, int rx, int ry, int fill) {
     if (!fb_ready) return;
     int cx = lx2px(x), cy = ly2py(y);
-    int rpx = rx * (int)g_fb_w / GFX_LW;
-    int rpy = ry * (int)g_fb_h / GFX_LH;
+    int rpx = rx * gt_w() / gl_w();
+    int rpy = ry * gt_h() / gl_h();
     gfx_set_op(gfx_act);
     if (fill) fill_ellipse(cx, cy, rpx, rpy, gcol_fg());
     else      draw_ellipse(cx, cy, rpx, rpy, gcol_fg());
@@ -841,6 +879,72 @@ static uint32_t sp_rd32(volatile unsigned char *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
+
+// --- sprite tint (GTINT) ----------------------------------------------------
+// A drawing-state colour that every blitted sprite is lerped toward, like GCOL.
+static int g_tint_on = 0, g_tint_r = 0, g_tint_g = 0, g_tint_b = 0, g_tint_a = 0;
+
+void con_sprite_tint(int on, int r, int g, int b, int a) {
+    g_tint_on = on ? 1 : 0;
+    g_tint_r = r & 0xff; g_tint_g = g & 0xff; g_tint_b = b & 0xff;
+    g_tint_a = a < 0 ? 0 : a > 255 ? 255 : a;
+}
+
+// Lerp a source pixel toward the tint colour (out = lerp(src,(r,g,b),a/255)),
+// keeping the source alpha so transparency is preserved.
+static uint32_t tint_px(uint32_t src) {
+    if (!g_tint_on || g_tint_a == 0) return src;
+    unsigned a = (unsigned)g_tint_a, na = 255 - a;
+    unsigned r = ( src        & 0xff);
+    unsigned g = ((src >> 8)  & 0xff);
+    unsigned b = ((src >> 16) & 0xff);
+    r = (r * na + (unsigned)g_tint_r * a + 127) / 255;
+    g = (g * na + (unsigned)g_tint_g * a + 127) / 255;
+    b = (b * na + (unsigned)g_tint_b * a + 127) / 255;
+    return (src & 0xFF000000u) | (b << 16) | (g << 8) | r;
+}
+
+// Blit one source pixel to (px,py): apply the tint, then honour the pixel's
+// alpha (0 = skip, 255 = opaque through the current plot op, otherwise blend
+// over the destination in store mode). The caller sets the plot op to gfx_act
+// around the loop; this restores it after a blended (partial-alpha) pixel.
+static void sp_put_pixel(int px, int py, uint32_t src) {
+    src = tint_px(src);
+    unsigned a = (src >> 24) & 0xFF;
+    if (a == 0) return;
+    if (a == 255) { putpixel_op(px, py, src); return; }
+    uint32_t dst = getpixel(px, py);
+    unsigned na = 255 - a;
+    unsigned r = (( src        & 0xff) * a + ( dst        & 0xff) * na + 127) / 255;
+    unsigned g = (((src >> 8)  & 0xff) * a + ((dst >> 8)  & 0xff) * na + 127) / 255;
+    unsigned b = (((src >> 16) & 0xff) * a + ((dst >> 16) & 0xff) * na + 127) / 255;
+    gfx_set_op(0);
+    putpixel_op(px, py, 0xFF000000u | (b << 16) | (g << 8) | r);
+    gfx_set_op(gfx_act);
+}
+
+// Minimal sine/cosine for sprite rotation (the kernel has no libm). Argument in
+// radians; range-reduced to [-pi/4,pi/4] with a short Taylor series - ample for
+// a nearest-sample blit. Ported from the interpreter's dsin().
+#define K_PI 3.14159265358979323846
+static double k_sin(double x) {
+    double twopi = 2 * K_PI, halfpi = K_PI / 2;
+    double kq = x / twopi;   kq = (double)(long)(kq >= 0 ? kq + 0.5 : kq - 0.5);
+    x -= kq * twopi;
+    double nq = x / halfpi;  int n = (int)(nq >= 0 ? nq + 0.5 : nq - 0.5);
+    double r = x - n * halfpi, r2 = r * r;
+    double st = r, ss = r;
+    for (int i = 1; i < 8; i++) { st *= -r2 / ((2 * i) * (2 * i + 1)); ss += st; }
+    double ct = 1, cc = 1;
+    for (int i = 1; i < 8; i++) { ct *= -r2 / ((2 * i - 1) * (2 * i)); cc += ct; }
+    switch (((n % 4) + 4) % 4) {
+        case 0:  return ss;
+        case 1:  return cc;
+        case 2:  return -ss;
+        default: return -cc;
+    }
+}
+static double k_cos(double x) { return k_sin(x + K_PI / 2); }
 
 void con_sprite_get(long addr, int x1, int y1, int x2, int y2) {
     if (!fb_ready || !addr) return;
@@ -869,30 +973,139 @@ void con_sprite_put(long addr, int x, int y) {
     if (!fb_ready || !addr) return;
     volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
     int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
-    if (w <= 0 || h <= 0 || w > (int)g_fb_w || h > (int)g_fb_h) return;
+    if (w <= 0 || h <= 0 || w > gt_w() || h > gt_h()) return;
     int dx = lx2px(x), dy = ly2py(y);
     volatile unsigned char *q = p + 8;
     gfx_set_op(gfx_act);
     for (int row = 0; row < h; row++)
         for (int col = 0; col < w; col++) {
             uint32_t src = sp_rd32(q); q += 4;
-            unsigned a = (src >> 24) & 0xFF;
-            if (a == 0) continue;                          // fully transparent
-            int px = dx + col, py = dy + row;
-            if (a == 255) {                                // opaque: honour plot op
-                putpixel_op(px, py, src);
-                continue;
-            }
-            // Partial alpha: blend src over the current screen pixel (store mode).
-            uint32_t dst = getpixel(px, py);
-            unsigned na = 255 - a;
-            unsigned r = (( src        & 0xff) * a + ( dst        & 0xff) * na + 127) / 255;
-            unsigned g = (((src >> 8)  & 0xff) * a + ((dst >> 8)  & 0xff) * na + 127) / 255;
-            unsigned b = (((src >> 16) & 0xff) * a + ((dst >> 16) & 0xff) * na + 127) / 255;
-            gfx_set_op(0);
-            putpixel_op(px, py, 0xFF000000u | (b << 16) | (g << 8) | r);
-            gfx_set_op(gfx_act);
+            sp_put_pixel(dx + col, dy + row, src);         // tint + alpha + plot op
         }
+    gfx_set_op(0);
+}
+
+// Blit a sprite scaled by `scale` and rotated `angle` degrees clockwise about
+// its centre, that centre placed where the plain con_sprite_put's centre would
+// land - so (scale=1, angle=0) matches con_sprite_put. Destination-driven with
+// nearest sampling: for each output pixel we inverse-map back into the sprite.
+void con_sprite_put_ex(long addr, int x, int y, double scale, double angle) {
+    if (!fb_ready || !addr || scale <= 0) return;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
+    if (w <= 0 || h <= 0) return;
+    volatile unsigned char *pix = p + 8;
+
+    double hw = w * 0.5, hh = h * 0.5;
+    double cx = lx2px(x) + hw, cy = ly2py(y) + hh;         // sprite centre (physical)
+    double rad = angle * (K_PI / 180.0);
+    double c = k_cos(rad), s = k_sin(rad);
+    double ac = c < 0 ? -c : c, as = s < 0 ? -s : s;
+    // Tight half-extents of the scaled+rotated bounding box.
+    int Rx = (int)(scale * (hw * ac + hh * as)) + 1;
+    int Ry = (int)(scale * (hw * as + hh * ac)) + 1;
+
+    gfx_set_op(gfx_act);
+    for (int oy = -Ry; oy <= Ry; oy++)
+        for (int ox = -Rx; ox <= Rx; ox++) {
+            // Inverse transform (dest offset -> source offset), then to a pixel.
+            double u = ( ox * c + oy * s) / scale + hw;
+            double v = (-ox * s + oy * c) / scale + hh;
+            if (u < 0 || v < 0) continue;
+            int col = (int)u, row = (int)v;
+            if (col >= w || row >= h) continue;
+            uint32_t src = sp_rd32(pix + (((row * w) + col) << 2));
+            sp_put_pixel((int)(cx + ox), (int)(cy + oy), src);
+        }
+    gfx_set_op(0);
+}
+
+// --- render-to-sprite (NEWSPRITE / SPRITETARGET) ----------------------------
+// Initialise a DIM buffer as a w*h fully transparent sprite (8-byte header then
+// zeroed - alpha 0 - pixels). Bytes written one at a time to stay alignment-safe.
+void con_newsprite(long addr, int w, int h) {
+    if (!addr || w <= 0 || h <= 0) return;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    sp_wr32(p, (uint32_t)w);
+    sp_wr32(p + 4, (uint32_t)h);
+    volatile unsigned char *q = p + 8;
+    long n = (long)w * h;
+    for (long i = 0; i < n; i++) { sp_wr32(q, 0); q += 4; }
+}
+
+// Redirect all drawing into sprite `addr`: the graphics driver writes the
+// sprite's pixel area (aligned 32-bit stores; the DIM heap is 16-aligned) and
+// the coordinate space becomes the sprite's own pixels, origin bottom-left.
+int con_target_sprite(long addr) {
+    if (!fb_ready || !addr) return -1;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
+    if (w <= 0 || h <= 0) return -1;
+    pointer_hide();                              // keep the arrow off the sprite
+    gfx_set_target((uint32_t *)(uintptr_t)(addr + 8), (uint32_t)w, (uint32_t)h);
+    g_tgt_w = w; g_tgt_h = h;
+    g_gl_w  = w; g_gl_h  = h;                    // 1:1 pixel coordinates
+    return 0;
+}
+
+// Return drawing to the screen (or the back buffer, if BUFFER ON).
+void con_target_screen(void) {
+    gfx_reset_target();
+    g_tgt_w = 0; g_tgt_h = 0;
+    g_gl_w  = GFX_LW; g_gl_h = GFX_LH;
+}
+
+// --- tilemap ----------------------------------------------------------------
+// Draw the visible window of a tile grid in one call. `map` -> cols*rows LE u32
+// words, row-major (top row first); value 0 = empty (skipped), k>=1 = sheet tile
+// (k-1). Tiles are tilew x tileh, packed row-major in the `sheet` sprite;
+// scrollx/scrolly shift the world left/up. Positions are target pixels, origin
+// top-left; clipped to the viewport, honouring alpha, the plot op and the tint.
+void con_tilemap(long sheet, long map, int cols, int rows,
+                 int tilew, int tileh, int scrollx, int scrolly) {
+    if (!fb_ready || !sheet || !map) return;
+    if (cols <= 0 || rows <= 0 || tilew <= 0 || tileh <= 0) return;
+    volatile unsigned char *sp = (volatile unsigned char *)(uintptr_t)sheet;
+    int sw = (int)sp_rd32(sp), sh = (int)sp_rd32(sp + 4);
+    if (sw <= 0 || sh <= 0) return;
+    int tpr = sw / tilew;                          // tiles per sheet row
+    if (tpr <= 0) return;
+    volatile unsigned char *spix = sp + 8;
+    volatile unsigned char *mp   = (volatile unsigned char *)(uintptr_t)map;
+
+    int vx0, vy0, vx1, vy1;
+    gfx_clip_rect(&vx0, &vy0, &vx1, &vy1);         // viewport in target pixels
+
+    // Loose range of visible cells; the per-pixel clip below handles exact edges.
+    int c_lo = (vx0 + scrollx) / tilew - 1, c_hi = (vx1 + scrollx) / tilew + 1;
+    int r_lo = (vy0 + scrolly) / tileh - 1, r_hi = (vy1 + scrolly) / tileh + 1;
+    if (c_lo < 0) c_lo = 0;
+    if (r_lo < 0) r_lo = 0;
+    if (c_hi > cols - 1) c_hi = cols - 1;
+    if (r_hi > rows - 1) r_hi = rows - 1;
+
+    gfx_set_op(gfx_act);
+    for (int mr = r_lo; mr <= r_hi; mr++) {
+        int dy0 = mr * tileh - scrolly;            // tile top on screen (top-left origin)
+        for (int mc = c_lo; mc <= c_hi; mc++) {
+            uint32_t idx = sp_rd32(mp + ((((long)mr * cols) + mc) << 2));
+            if (idx == 0) continue;                // empty cell: transparent
+            int t = (int)idx - 1;
+            int ssx = (t % tpr) * tilew, ssy = (t / tpr) * tileh;
+            if (ssy + tileh > sh) continue;        // tile index past the sheet: skip
+            int dx0 = mc * tilew - scrollx;
+            for (int py = 0; py < tileh; py++) {
+                int dy = dy0 + py;
+                if (dy < vy0 || dy > vy1) continue;
+                volatile unsigned char *srow = spix + ((((long)(ssy + py) * sw) + ssx) << 2);
+                for (int px = 0; px < tilew; px++) {
+                    int dx = dx0 + px;
+                    if (dx < vx0 || dx > vx1) continue;
+                    sp_put_pixel(dx, dy, sp_rd32(srow + (px << 2)));
+                }
+            }
+        }
+    }
     gfx_set_op(0);
 }
 
@@ -913,8 +1126,8 @@ static int vdu_qn = 0, vdu_qneed = 0, vdu_cmd = -1;
 
 static int vdu_word(int i)  { return vdu_q[i] | (vdu_q[i+1] << 8); }
 static int vdu_sword(int i) { int v = vdu_word(i); return v >= 32768 ? v - 65536 : v; }
-static int gfx_char_w(void) { return CHAR_W * GFX_LW / (int)g_fb_w; }
-static int gfx_char_h(void) { return CHAR_H * GFX_LH / (int)g_fb_h; }
+static int gfx_char_w(void) { return CHAR_W * gl_w() / gt_w(); }
+static int gfx_char_h(void) { return CHAR_H * gl_h() / gt_h(); }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 // --- VDU 5: text at the graphics cursor -------------------------------------
@@ -1341,6 +1554,10 @@ void kernel_main(void) {
         g_mouse_xhci = xhci_mouse_present();
         if (g_mouse_xhci) boot_msg("[USB] mouse ready (USB-A)\n");
     }
+
+    // Select the configured keyboard layout (default US); a program can change
+    // it at run time with the KEYBOARD statement.
+    hid_set_layout(CFG_KBD_LAYOUT);
 
     // Write the full boot log to BOOTLOG.TXT on the data partition so USB
     // enumeration can be diagnosed on real hardware (no serial cable needed).

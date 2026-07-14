@@ -12,6 +12,7 @@
 
 extern "C" {
 #include "basic.h"
+#include "usb_hid.h"
 void        tc_feed(const char *s);
 void        tc_reset_output(void);
 const char *tc_output(void);
@@ -911,4 +912,362 @@ TEST_CASE("PEEK/POKE and ? indirection share the same memory") {
 
 TEST_CASE("PEEK composes inside expressions") {
     REQUIRE_THAT(run("10 DIM b 8\n20 POKE b, 40\n30 PRINT PEEK(b) + 2"), ContainsSubstring("42"));
+}
+
+// --- GPIO (host build reports the hardware as unavailable) -------------------
+// On the host there is no 40-pin header, so every GPIO verb must raise the guard
+// rather than a syntax error. These confirm each verb parses and reaches the
+// guard; the register-level behaviour is exercised on real hardware / QEMU.
+
+TEST_CASE("GPIO verbs raise the host guard, not a syntax error") {
+    const char *guard = "GPIO needs the Pi";
+    REQUIRE_THAT(run("10 PINMODE 17, OUTPUT"),          ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PINMODE 27, INPUT PULLUP"),    ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PINMODE 2, ALT 0"),            ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PIN 17, 1"),                   ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PRINT PIN(27)"),               ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PINSET 1"),                    ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PINCLR 1"),                    ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PRINT PINS"),                  ContainsSubstring(guard));
+    REQUIRE_THAT(run("10 PRINT PINWAIT(27, 1, 0)"),     ContainsSubstring(guard));
+}
+
+// --- EVAL / EXEC (dynamic evaluation and execution) -------------------------
+// The interpreter re-lexes source on the fly, so EVAL parses a string as an
+// expression and EXEC runs one as a statement, both in the current context.
+
+TEST_CASE("EVAL computes a numeric expression with variables") {
+    REQUIRE_THAT(run("10 X=5\n20 PRINT EVAL(\"2*X+1\")"), ContainsSubstring("11"));
+}
+
+TEST_CASE("EVAL honours precedence and functions") {
+    REQUIRE_THAT(run("10 PRINT EVAL(\"SQR(9)+3*2\")"), ContainsSubstring("9"));
+}
+
+TEST_CASE("EVAL returns a string when the expression is a string") {
+    REQUIRE_THAT(run("10 A$=\"foo\"\n20 B$=\"bar\"\n30 PRINT EVAL(\"A$+B$\")"),
+                 ContainsSubstring("foobar"));
+}
+
+TEST_CASE("EVAL composes inside a larger expression") {
+    REQUIRE_THAT(run("10 X=10\n20 PRINT EVAL(\"X*2\")+100"), ContainsSubstring("120"));
+}
+
+TEST_CASE("EVAL nests (an EVAL inside an EVAL)") {
+    REQUIRE_THAT(run("10 X=3\n20 I$=\"X\"\n30 PRINT EVAL(\"EVAL(I$)*10\")"),
+                 ContainsSubstring("30"));
+}
+
+TEST_CASE("a bad EVAL string raises, and TRY can catch it") {
+    REQUIRE_THAT(run("10 TRY\n20 PRINT EVAL(\"1/\")\n30 CATCH\n40 PRINT \"caught\"\n50 ENDTRY"),
+                 ContainsSubstring("caught"));
+}
+
+TEST_CASE("EXEC runs a statement in the current context") {
+    REQUIRE_THAT(run("10 EXEC \"Y = 7*6\"\n20 PRINT Y"), ContainsSubstring("42"));
+}
+
+TEST_CASE("EXEC can be assembled dynamically for dispatch") {
+    REQUIRE_THAT(run("10 N$=\"Z\" : V$=\"99\"\n20 EXEC N$+\" = \"+V$\n30 PRINT Z"),
+                 ContainsSubstring("99"));
+}
+
+TEST_CASE("EXEC runs multiple colon-separated statements") {
+    REQUIRE_THAT(run("10 EXEC \"A=1 : B=2 : PRINT A+B\""), ContainsSubstring("3"));
+}
+
+TEST_CASE("a statement after EXEC still runs") {
+    REQUIRE_THAT(run("10 EXEC \"PRINT 1\" : PRINT \"after\""), ContainsSubstring("after"));
+}
+
+TEST_CASE("EXEC GOTO branches the program") {
+    REQUIRE_THAT(run("10 EXEC \"GOTO 40\"\n20 PRINT \"skip\"\n30 END\n40 PRINT \"jumped\""),
+                 ContainsSubstring("jumped"));
+}
+
+// --- Keyboard layouts (HID decode + the KEYBOARD statement) -----------------
+// Validate the layout tables directly through the shared decoder, then the BASIC
+// surface. mod bits: 0x02 = Shift, 0x40 = AltGr (right Alt).
+static char K(uint8_t kc, uint8_t mod = 0) { return hid_to_ascii(kc, mod); }
+
+TEST_CASE("US layout: number-row shifts and symbols") {
+    REQUIRE(hid_set_layout("US") == 1);
+    REQUIRE(K(0x1F) == '2');
+    REQUIRE(K(0x1F, 0x02) == '@');       // shift-2 = @ on US
+    REQUIRE(K(0x34, 0x02) == '"');       // shift-' = "
+    REQUIRE(K(0x64, 0x40) == 0);         // US has no AltGr layer
+}
+
+TEST_CASE("Norwegian layout: the three extra letters") {
+    REQUIRE(hid_set_layout("no") == 1);  // case-insensitive
+    REQUIRE((unsigned char)K(0x2F) == 0xE5);          // å
+    REQUIRE((unsigned char)K(0x2F, 0x02) == 0xC5);    // Å
+    REQUIRE((unsigned char)K(0x33) == 0xF8);          // ø
+    REQUIRE((unsigned char)K(0x33, 0x02) == 0xD8);    // Ø
+    REQUIRE((unsigned char)K(0x34) == 0xE6);          // æ
+    REQUIRE((unsigned char)K(0x34, 0x02) == 0xC6);    // Æ
+}
+
+TEST_CASE("Norwegian layout: AltGr programming symbols") {
+    REQUIRE(hid_set_layout("NO") == 1);
+    REQUIRE(K(0x1F, 0x40) == '@');       // AltGr-2 = @
+    REQUIRE(K(0x21, 0x40) == '$');       // AltGr-4 = $
+    REQUIRE(K(0x24, 0x40) == '{');       // AltGr-7 = {
+    REQUIRE(K(0x25, 0x40) == '[');       // AltGr-8 = [
+    REQUIRE(K(0x26, 0x40) == ']');       // AltGr-9 = ]
+    REQUIRE(K(0x27, 0x40) == '}');       // AltGr-0 = }
+    REQUIRE(K(0x2D, 0x40) == '\\');      // AltGr-+ = backslash
+    REQUIRE(K(0x30, 0x40) == '~');       // AltGr-¨ = tilde
+    REQUIRE(K(0x64, 0x40) == '|');       // AltGr-< = pipe
+}
+
+TEST_CASE("Swedish and German pick the right national letters") {
+    REQUIRE(hid_set_layout("SE") == 1);
+    REQUIRE((unsigned char)K(0x33) == 0xF6);   // ö
+    REQUIRE((unsigned char)K(0x34) == 0xE4);   // ä
+    REQUIRE(hid_set_layout("DE") == 1);
+    REQUIRE(K(0x1C) == 'z');                    // QWERTZ: Y position types z
+    REQUIRE(K(0x1D) == 'y');
+    REQUIRE(K(0x14, 0x40) == '@');              // AltGr-Q = @
+    REQUIRE((unsigned char)K(0x2D) == 0xDF);    // ß
+}
+
+TEST_CASE("an unknown layout code is rejected and keeps the current one") {
+    REQUIRE(hid_set_layout("US") == 1);
+    REQUIRE(hid_set_layout("ZZ") == 0);
+    REQUIRE(std::string(hid_layout_code()) == "US");
+}
+
+TEST_CASE("KEYBOARD statement sets the layout; KEYBOARD$ reads it back") {
+    REQUIRE_THAT(run("10 KEYBOARD \"NO\"\n20 PRINT KEYBOARD$"), ContainsSubstring("NO"));
+}
+
+TEST_CASE("KEYBOARD with an unknown layout raises an error") {
+    REQUIRE_THAT(run("10 KEYBOARD \"ZZ\""), ContainsSubstring("Unknown keyboard layout"));
+}
+
+// --- Events (ON TIMER / ON MOUSE) and WAIT -----------------------------------
+// ON PIN needs GPIO (host stub can't fire it); ON MOUSE needs a moving mouse
+// (host con_mouse is static). Timer events use the host clock, so they fire.
+
+// The test console's clock advances a fixed step per read, so a timer fires on
+// every poll; these assert "the handler ran" via a flag rather than an exact
+// count (which is clock-rate dependent and validated on real hardware/QEMU).
+
+TEST_CASE("ON TIMER runs a handler PROC") {
+    REQUIRE_THAT(run("10 F=0\n20 ON TIMER 1 PROC t\n30 REPEAT\n35 UNTIL F=1\n"
+                     "40 PRINT \"fired\"\n50 END\n60 DEF PROC t\n70 F=1\n80 ENDPROC"),
+                 ContainsSubstring("fired"));
+}
+
+TEST_CASE("a handler sees and updates global state") {
+    REQUIRE_THAT(run("10 N=0\n20 ON TIMER 1 PROC b\n30 REPEAT\n35 UNTIL N<>0\n"
+                     "40 PRINT \"final=\";N\n50 END\n60 DEF PROC b\n70 N=42\n80 ENDPROC"),
+                 ContainsSubstring("final=42"));
+}
+
+TEST_CASE("ON TIMER OFF stops the handler firing") {
+    // Fire once, cancel, then confirm a guard counter stays at zero.
+    REQUIRE_THAT(run("10 F=0\n20 G=0\n30 ON TIMER 1 PROC t\n40 REPEAT\n45 UNTIL F=1\n"
+                     "50 ON TIMER OFF\n60 G=0\n70 FOR I=1 TO 100000:NEXT\n"
+                     "80 IF G=0 THEN PRINT \"stopped\" ELSE PRINT \"leak\"\n90 END\n"
+                     "100 DEF PROC t\n110 F=1\n120 G=G+1\n130 ENDPROC"),
+                 ContainsSubstring("stopped"));
+}
+
+TEST_CASE("ON MOUSE registers and cancels without error") {
+    REQUIRE_THAT(run("10 ON MOUSE PROC m\n20 ON MOUSE OFF\n30 PRINT \"ok\"\n"
+                     "40 END\n50 DEF PROC m\n60 ENDPROC"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("ON KEY registers and cancels without error") {
+    // Firing needs real key input (the test console has none); this checks parse.
+    REQUIRE_THAT(run("10 ON KEY PROC k\n20 ON KEY OFF\n30 PRINT \"ok\"\n"
+                     "40 END\n50 DEF PROC k\n60 ENDPROC"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("WAIT executes and lets time advance") {
+    // Exact 60 Hz pacing needs a real clock; here just confirm WAIT runs and TIME moves on.
+    std::string out = run("10 T=TIME\n20 FOR F=1 TO 10:WAIT:NEXT\n"
+                          "30 IF TIME-T>0 THEN PRINT \"waited\" ELSE PRINT \"stuck\"\n40 END");
+    REQUIRE_THAT(out, ContainsSubstring("waited"));
+}
+
+TEST_CASE("DELAY pauses for at least the requested centiseconds") {
+    std::string out = run("10 T=TIME\n20 DELAY 10\n"
+                          "30 IF TIME-T>=10 THEN PRINT \"delayed\" ELSE PRINT \"short\"\n40 END");
+    REQUIRE_THAT(out, ContainsSubstring("delayed"));
+}
+
+TEST_CASE("DELAY with a non-positive value returns immediately") {
+    REQUIRE_THAT(run("10 DELAY 0\n20 DELAY -5\n30 PRINT \"ok\"\n40 END"),
+                 ContainsSubstring("ok"));
+}
+
+// --- Double buffering (BUFFER ON/OFF, FLIP) ----------------------------------
+// The host console has no framebuffer, so the visible effect is validated in
+// QEMU; here we check the surface parses, runs, and drives the standard loop.
+
+TEST_CASE("BUFFER ON / FLIP / BUFFER OFF parse and run") {
+    REQUIRE_THAT(run("10 BUFFER ON\n20 CLG\n30 CIRCLE FILL 640,512,100\n"
+                     "40 FLIP\n50 BUFFER OFF\n60 PRINT \"ok\"\n70 END"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("the standard WAIT/CLG/FLIP frame loop runs to completion") {
+    REQUIRE_THAT(run("10 BUFFER ON\n20 FOR F=1 TO 3\n30 WAIT:CLG:CIRCLE FILL F*100,512,60:FLIP\n"
+                     "40 NEXT\n50 BUFFER OFF\n60 PRINT \"done\"\n70 END"),
+                 ContainsSubstring("done"));
+}
+
+TEST_CASE("FLIP with buffering off is a harmless no-op") {
+    REQUIRE_THAT(run("10 FLIP\n20 PRINT \"ok\"\n30 END"), ContainsSubstring("ok"));
+}
+
+TEST_CASE("BUFFER without ON or OFF raises an error") {
+    REQUIRE_THAT(run("10 BUFFER 3"), ContainsSubstring("Expected ON or OFF"));
+}
+
+// --- Transformed blits (GPUT scale/angle, GTINT) -----------------------------
+// The host sprite calls are no-ops (no framebuffer); these check the surface
+// parses and runs. The pixel results are validated in QEMU.
+
+TEST_CASE("GPUT accepts the plain and the scaled/rotated forms") {
+    REQUIRE_THAT(run("10 DIM S 40000\n20 GPUT S,100,100\n30 GPUT S,100,100,2.0,45\n"
+                     "40 PRINT \"ok\"\n50 END"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("GTINT sets and clears the tint without error") {
+    REQUIRE_THAT(run("10 DIM S 40000\n20 GTINT 255,0,0,128\n30 GPUT S,10,10,1,0\n"
+                     "40 GTINT OFF\n50 PRINT \"ok\"\n60 END"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("GTINT with too few arguments raises an error") {
+    REQUIRE_THAT(run("10 GTINT 255,0,0"), ContainsSubstring("Expected ','"));
+}
+
+// --- Render-to-sprite (NEWSPRITE / SPRITETARGET) -----------------------------
+// Host sprite ops are no-ops; the pixel results are validated in QEMU. Here we
+// check the surface parses/runs and the size guard fires.
+
+TEST_CASE("NEWSPRITE / SPRITETARGET redirect and restore drawing") {
+    REQUIRE_THAT(run("10 DIM B 40000\n20 NEWSPRITE B,96,96\n30 SPRITETARGET B\n"
+                     "40 CLG:CIRCLE FILL 48,48,46\n50 SPRITETARGET OFF\n"
+                     "60 GPUT B,100,100\n70 PRINT \"ok\"\n80 END"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("NEWSPRITE with a non-positive size raises an error") {
+    REQUIRE_THAT(run("10 DIM B 40000\n20 NEWSPRITE B,0,96"),
+                 ContainsSubstring("Bad sprite size"));
+}
+
+// --- Tilemap -----------------------------------------------------------------
+// Host con_tilemap is a no-op; the scrolling render is validated in QEMU. Here
+// we check the eight-argument surface parses and runs with a built map.
+
+TEST_CASE("TILEMAP parses and runs with a DIM map") {
+    REQUIRE_THAT(run("10 DIM SH 20000\n20 NEWSPRITE SH,96,32\n30 DIM M 64\n"
+                     "40 M!0=1:M!4=2:M!8=3:M!12=0\n"
+                     "50 TILEMAP SH,M,4,1,32,32,0,0\n60 PRINT \"ok\"\n70 END"),
+                 ContainsSubstring("ok"));
+}
+
+TEST_CASE("TILEMAP with too few arguments raises an error") {
+    REQUIRE_THAT(run("10 TILEMAP 1,2,3,4"), ContainsSubstring("Expected ','"));
+}
+
+// --- Collections: dictionary, list, binary tree ------------------------------
+// These run on the host (the interpreter and its heap are platform-independent).
+
+TEST_CASE("dictionary stores, updates, reads and removes string/number values") {
+    REQUIRE_THAT(run("10 D=NEWDICT\n20 DICTSET D,\"name\",\"Ada\"\n30 DICTSET D,\"born\",1815\n"
+                     "40 DICTSET D,\"born\",1816\n"     // update
+                     "50 PRINT DICTGET$(D,\"name\");\"/\";DICTGET(D,\"born\");\"/\";SIZE(D)\n60 END"),
+                 ContainsSubstring("Ada/1816/2"));
+}
+
+TEST_CASE("DICTHAS and DICTDEL and DICTKEY$ report membership and order") {
+    REQUIRE_THAT(run("10 D=NEWDICT\n20 DICTSET D,\"a\",1\n30 DICTSET D,\"b\",2\n"
+                     "40 DICTDEL D,\"a\"\n"
+                     "50 PRINT DICTHAS(D,\"a\");\"/\";DICTHAS(D,\"b\");\"/\";DICTKEY$(D,0)\n60 END"),
+                 ContainsSubstring("0/-1/b"));
+}
+
+TEST_CASE("a missing dictionary key reads as 0 or empty") {
+    REQUIRE_THAT(run("10 D=NEWDICT\n20 PRINT \"[\";DICTGET$(D,\"x\");\"]\";DICTGET(D,\"x\")\n30 END"),
+                 ContainsSubstring("[]0"));
+}
+
+TEST_CASE("list push/pop behaves as a stack and reports its length") {
+    REQUIRE_THAT(run("10 L=NEWLIST\n20 PUSH L,10:PUSH L,20:PUSH L,30\n"
+                     "30 PRINT POP(L);\"/\";POP(L);\"/\";SIZE(L)\n40 END"),
+                 ContainsSubstring("30/20/1"));
+}
+
+TEST_CASE("list index get/set, insert and delete") {
+    REQUIRE_THAT(run("10 L=NEWLIST\n20 PUSH L,1:PUSH L,2:PUSH L,3\n30 LISTINS L,1,99\n"
+                     "40 LISTSET L,0,7\n50 LISTDEL L,3\n"
+                     "60 PRINT LISTGET(L,0);LISTGET(L,1);LISTGET(L,2);\"/\";SIZE(L)\n70 END"),
+                 ContainsSubstring("7992/3"));
+}
+
+TEST_CASE("a list can hold strings too") {
+    REQUIRE_THAT(run("10 L=NEWLIST\n20 PUSH L,\"hi\"\n30 PRINT POP$(L)\n40 END"),
+                 ContainsSubstring("hi"));
+}
+
+TEST_CASE("binary tree keeps keys sorted for in-order iteration") {
+    REQUIRE_THAT(run("10 T=NEWTREE\n20 TREESET T,50,0:TREESET T,20,0:TREESET T,80,0\n"
+                     "30 TREESET T,10,0:TREESET T,30,0\n40 S$=\"\"\n"
+                     "50 FOR I=0 TO SIZE(T)-1:S$=S$+STR$(TREEKEY(T,I))+\" \":NEXT\n"
+                     "60 PRINT S$\n70 END"),
+                 ContainsSubstring("10 20 30 50 80"));
+}
+
+TEST_CASE("tree lookup, membership, min/max and delete keep the order") {
+    REQUIRE_THAT(run("10 T=NEWTREE\n20 TREESET T,50,\"x\":TREESET T,20,\"y\":TREESET T,80,\"z\"\n"
+                     "30 TREEDEL T,20\n"
+                     "40 PRINT TREEGET$(T,50);\"/\";TREEHAS(T,20);\"/\";TREEMIN(T);\"/\";TREEMAX(T)\n50 END"),
+                 ContainsSubstring("x/0/50/80"));
+}
+
+TEST_CASE("collection type mismatches and empties raise clear errors") {
+    REQUIRE_THAT(run("10 D=NEWDICT\n20 PUSH D,1"), ContainsSubstring("Not a list"));
+    REQUIRE_THAT(run("10 L=NEWLIST\n20 PRINT POP(L)"), ContainsSubstring("List is empty"));
+    REQUIRE_THAT(run("10 PRINT SIZE(999)"), ContainsSubstring("Not a collection"));
+    REQUIRE_THAT(run("10 D=NEWDICT\n20 DICTSET D,\"x\",\"t\"\n30 PRINT DICTGET(D,\"x\")"),
+                 ContainsSubstring("Type mismatch"));
+}
+
+TEST_CASE("a collection error can be caught with TRY/CATCH") {
+    REQUIRE_THAT(run("10 L=NEWLIST\n20 TRY\n30 PRINT POP(L)\n40 CATCH\n50 PRINT \"caught\"\n60 ENDTRY\n70 END"),
+                 ContainsSubstring("caught"));
+}
+
+TEST_CASE("collection string values survive garbage collection") {
+    REQUIRE_THAT(run("10 D=NEWDICT\n20 DICTSET D,\"k\",\"keepme\"\n"
+                     "30 FOR I=1 TO 500:A$=STR$(I)+\"padding\":NEXT\n"
+                     "40 PRINT DICTGET$(D,\"k\")\n50 END"),
+                 ContainsSubstring("keepme"));
+}
+
+// --- I2C ---------------------------------------------------------------------
+// The bus is real-hardware only (QEMU doesn't model the BSC), so on the host it
+// reports unavailable; here we check the words parse and raise the guard error.
+// Actual bus traffic is validated on a real Pi.
+
+TEST_CASE("I2C words raise a clear guard on the host (no bus present)") {
+    REQUIRE_THAT(run("10 I2CWRITE 39, 65, 66"), ContainsSubstring("I2C needs real Pi hardware"));
+    REQUIRE_THAT(run("10 DIM B 8\n20 I2CREAD 39, B, 2"), ContainsSubstring("I2C needs real Pi hardware"));
+    REQUIRE_THAT(run("10 PRINT I2CPROBE(39)"), ContainsSubstring("I2C needs real Pi hardware"));
+}
+
+TEST_CASE("an I2C error can be caught with TRY/CATCH") {
+    REQUIRE_THAT(run("10 TRY\n20 I2CWRITE 39, 1\n30 CATCH\n40 PRINT \"caught\"\n50 ENDTRY\n60 END"),
+                 ContainsSubstring("caught"));
 }

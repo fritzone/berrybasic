@@ -4,6 +4,8 @@
 #include "seed.h"
 #include "image.h"
 #include "sound.h"
+#include "gpio.h"
+#include "i2c.h"
 #include "basic.h"
 
 // ===========================================================================
@@ -589,7 +591,9 @@ static void str_store(var_t *v, const char *src, int len) {
 // addresses into, for use with the ?/!/$ indirection operators and for passing
 // buffers to native seeds. Reset (like the variable/array pools) on RUN/NEW.
 #define DIM_HEAP_SIZE (256 * 1024)   // room for indirection buffers and sprites (GGET/GPUT)
-static unsigned char dim_heap[DIM_HEAP_SIZE];
+// 16-aligned so a sprite's pixel area (base+8) is 4-aligned: SPRITETARGET renders
+// into it with the graphics driver's aligned 32-bit stores (-mstrict-align).
+static unsigned char dim_heap[DIM_HEAP_SIZE] __attribute__((aligned(16)));
 static int           dim_top = 0;
 
 static void clear_vars(void) {       // BASIC CLR: scalars + arrays + string heap
@@ -600,6 +604,8 @@ static void clear_vars(void) {       // BASIC CLR: scalars + arrays + string hea
     arr_strs_top = 0;
     dim_top = 0;
     img_sprite_reset();      // free image-loaded sprites
+    gpio_reset();            // header pins -> input, no pull (never leave a load driven)
+    i2c_reset();             // release the I2C bus (gpio_reset returned SDA/SCL to inputs)
 }
 
 // Reserve `nbytes` from the DIM arena, 8-byte aligned; returns the base address
@@ -655,11 +661,21 @@ enum {
     KW_IMPORT,                                        // IMPORT "module": pull in its PROC/FN
     KW_DIV, KW_MOD, KW_AND, KW_OR, KW_EOR, KW_NOT,    // operator keywords
     KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
+    KW_WAIT,                                                        // WAIT: pace to ~60 Hz
+    KW_DELAY,                                                       // DELAY cs: pause for n centiseconds
     KW_POKE,                                                        // POKE addr,byte (alias for ?addr=byte)
+    KW_EXEC,                                                        // EXEC "stmt" : run a string as BASIC
+    KW_PINMODE, KW_PINSET, KW_PINCLR,                              // GPIO statements
+    KW_OUTPUT, KW_PULLUP, KW_PULLDOWN, KW_ALT,                    // PINMODE sub-keywords (INPUT reused)
+    KW_I2CWRITE, KW_I2CREAD,                                       // I2C statements
     KW_SOUND, KW_TONE,                                             // audio statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
     KW_LINE, KW_RECTANGLE, KW_CIRCLE, KW_ELLIPSE, KW_FILL,         // shape commands
     KW_GGET, KW_GPUT, KW_SAVESPRITE,                              // sprite capture / stamp / save
+    KW_BUFFER, KW_FLIP,                                           // double buffering: BUFFER ON/OFF + FLIP
+    KW_GTINT,                                                     // GTINT r,g,b,a / GTINT OFF : sprite tint
+    KW_NEWSPRITE, KW_SPRITETARGET,                               // render-to-sprite: blank sprite + redirect drawing
+    KW_TILEMAP,                                                  // TILEMAP sheet,map,cols,rows,tw,th,sx,sy
     KW_SAVE, KW_LOAD, KW_CAT, KW_DIR, KW_DELETE,                    // storage statements
     KW_MKDIR, KW_CD, KW_RMDIR, KW_PWD,                              // directory statements
     KW_BPUT, KW_CLOSE,                                              // file I/O statements
@@ -667,11 +683,17 @@ enum {
     KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
     KW_MOUSE,                                                       // MOUSE x,y,b statement
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
+    KW_PINS,                                          // PINS : read all header pins at once
     KW_SCREEN, KW_SCREENW, KW_SCREENH,                // SCREEN statement + current-resolution values
+    KW_KEYBOARD, KW_KEYBOARDS,                        // KEYBOARD "NO" statement + KEYBOARD$ (current layout)
     KW_ERR, KW_ERRS,                                  // ERR / ERR$ : code + message of a caught error
     KW_MOUSEX, KW_MOUSEY, KW_MOUSEB,                  // mouse pointer x / y / buttons
     KW_DIRNEXT, KW_DIRSIZE, KW_DIRTYPE,               // directory-scan cursor fields
     KW_DIRNAMES, KW_DIRDATES, KW_DIRTIMES,            // (DIRNAME$/DIRDATE$/DIRTIME$)
+    KW_NEWDICT, KW_NEWLIST, KW_NEWTREE,               // create a new dictionary / list / tree
+    KW_DICTSET, KW_DICTDEL,                           // dictionary statements
+    KW_PUSH, KW_LISTSET, KW_LISTINS, KW_LISTDEL,      // list statements
+    KW_TREESET, KW_TREEDEL,                           // tree statements
     // Functions from the "standard library"
     KW_ABS, KW_INT, KW_SGN, KW_SQR, KW_SIN, KW_COS, KW_TAN, KW_ATN,
     KW_LOG, KW_EXP, KW_DEG, KW_RAD, KW_ACS, KW_ASN,
@@ -689,8 +711,18 @@ enum {
     KW_CONTAINS, KW_STARTSWITH, KW_ENDSWITH,          // string predicates -> TRUE/FALSE
     KW_SPLIT, KW_JOINS,                               // SPLIT(...) -> array ; JOIN$(array,...)
     KW_PEEK,                                          // PEEK(addr) -> byte (alias for ?addr)
+    KW_PIN,                                           // PIN(n) -> level (also a statement: PIN n,v)
+    KW_PINWAIT,                                       // PINWAIT(pin,edge,timeout) -> pin or -1
+    KW_EVAL,                                          // EVAL("expr") -> value of the parsed expression
     KW_DIROPEN,                                       // DIROPEN("path") -> start a scan
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_DIROPEN,
+    // Collection accessor functions (see the NEW* creators above)
+    KW_SIZE,                                          // SIZE(h) : element count of any collection
+    KW_DICTGET, KW_DICTGETS, KW_DICTHAS, KW_DICTKEYS, // dictionary lookups + key iteration
+    KW_POP, KW_POPS, KW_LISTGET, KW_LISTGETS,         // list read/remove
+    KW_TREEGET, KW_TREEGETS, KW_TREEHAS,              // tree lookups
+    KW_TREEMIN, KW_TREEMAX, KW_TREEKEY,               // tree ordered access
+    KW_I2CPROBE,                                      // I2CPROBE(addr) -> device present?
+    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_I2CPROBE,
     KW_TAB, KW_SPC                                    // PRINT-only modifiers
 };
 
@@ -716,6 +748,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "DIV",   KW_DIV   }, { "MOD",  KW_MOD   }, { "AND",    KW_AND    },
     { "OR",    KW_OR    }, { "EOR",  KW_EOR   }, { "NOT",    KW_NOT    },
     { "ON",    KW_ON    }, { "DATA", KW_DATA  }, { "READ",   KW_READ   },
+    { "WAIT",  KW_WAIT  }, { "DELAY", KW_DELAY },
     { "RESTORE", KW_RESTORE }, { "STOP", KW_STOP }, { "VDU",  KW_VDU    },
     { "SOUND", KW_SOUND }, { "TONE", KW_TONE  },
     { "MODE",  KW_MODE  }, { "GCOL", KW_GCOL  }, { "PLOT",   KW_PLOT   },
@@ -728,6 +761,20 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "DIRNAME$", KW_DIRNAMES }, { "DIRSIZE", KW_DIRSIZE }, { "DIRTYPE", KW_DIRTYPE },
     { "DIRDATE$", KW_DIRDATES }, { "DIRTIME$", KW_DIRTIMES },
     { "GGET",  KW_GGET  }, { "GPUT", KW_GPUT }, { "SAVESPRITE", KW_SAVESPRITE },
+    { "BUFFER", KW_BUFFER }, { "FLIP", KW_FLIP }, { "GTINT", KW_GTINT },
+    { "NEWSPRITE", KW_NEWSPRITE }, { "SPRITETARGET", KW_SPRITETARGET },
+    { "TILEMAP", KW_TILEMAP },
+    // Collections: dictionary, list, binary tree
+    { "NEWDICT", KW_NEWDICT }, { "NEWLIST", KW_NEWLIST }, { "NEWTREE", KW_NEWTREE },
+    { "SIZE", KW_SIZE },
+    { "DICTSET", KW_DICTSET }, { "DICTDEL", KW_DICTDEL }, { "DICTHAS", KW_DICTHAS },
+    { "DICTGET", KW_DICTGET }, { "DICTGET$", KW_DICTGETS }, { "DICTKEY$", KW_DICTKEYS },
+    { "PUSH", KW_PUSH }, { "POP", KW_POP }, { "POP$", KW_POPS },
+    { "LISTSET", KW_LISTSET }, { "LISTINS", KW_LISTINS }, { "LISTDEL", KW_LISTDEL },
+    { "LISTGET", KW_LISTGET }, { "LISTGET$", KW_LISTGETS },
+    { "TREESET", KW_TREESET }, { "TREEDEL", KW_TREEDEL }, { "TREEHAS", KW_TREEHAS },
+    { "TREEGET", KW_TREEGET }, { "TREEGET$", KW_TREEGETS },
+    { "TREEMIN", KW_TREEMIN }, { "TREEMAX", KW_TREEMAX }, { "TREEKEY", KW_TREEKEY },
     { "SAVE",  KW_SAVE  }, { "LOAD", KW_LOAD  }, { "CAT",    KW_CAT    },
     { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE }, { "SEED", KW_SEED },
     { "MKDIR", KW_MKDIR }, { "CD", KW_CD }, { "RMDIR", KW_RMDIR }, { "PWD", KW_PWD },
@@ -735,6 +782,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },
     { "POS",   KW_POS   }, { "VPOS", KW_VPOS  },
     { "SCREEN", KW_SCREEN }, { "SCREENW", KW_SCREENW }, { "SCREENH", KW_SCREENH },
+    { "KEYBOARD", KW_KEYBOARD }, { "KEYBOARD$", KW_KEYBOARDS },
     { "MOUSE", KW_MOUSE }, { "MOUSEX", KW_MOUSEX },
     { "MOUSEY", KW_MOUSEY }, { "MOUSEB", KW_MOUSEB },
     { "PI",    KW_PI    },
@@ -753,6 +801,12 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "STARTSWITH", KW_STARTSWITH }, { "ENDSWITH", KW_ENDSWITH },
     { "SPLIT", KW_SPLIT }, { "JOIN$", KW_JOINS },
     { "PEEK", KW_PEEK }, { "POKE", KW_POKE },
+    { "EVAL", KW_EVAL }, { "EXEC", KW_EXEC },
+    { "PINMODE", KW_PINMODE }, { "PIN", KW_PIN }, { "PINS", KW_PINS },
+    { "PINSET", KW_PINSET }, { "PINCLR", KW_PINCLR }, { "PINWAIT", KW_PINWAIT },
+    { "I2CWRITE", KW_I2CWRITE }, { "I2CREAD", KW_I2CREAD }, { "I2CPROBE", KW_I2CPROBE },
+    { "OUTPUT", KW_OUTPUT }, { "PULLUP", KW_PULLUP },
+    { "PULLDOWN", KW_PULLDOWN }, { "ALT", KW_ALT },
     { "SHL",   KW_SHL   }, { "SHR",  KW_SHR   }, { "ASR",    KW_ASR    },
     { "ROL",   KW_ROL   }, { "ROR",  KW_ROR   },
     { "CALL",  KW_CALL  }, { "CALL$", KW_CALLS },
@@ -763,6 +817,7 @@ static const struct { const char *name; int id; } kwtab[] = {
 };
 static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
 
+static const char *cur_text;           // text of the line currently executing (see cur_line_idx)
 static const char *lx;                 // lexer cursor into the current line
 static const char *tok_start;          // start of the current token (for re-branching)
 static int    tok;                     // current token type
@@ -898,6 +953,30 @@ static void lex_next(void) {
         case '#': tok = T_HASH;   return;    // file channel prefix (BGET#, PTR#, ...)
         default: err("I don't recognise that character"); tok = T_EOL; return;
     }
+}
+
+// A snapshot of the whole lexer position, so EVAL / EXEC can point the lexer at
+// a brand-new source string, run it, and put everything back exactly as it was.
+// Everything the lexer/parser reads to decide "where am I" lives here.
+typedef struct {
+    const char *cur_text, *lx, *tok_start;
+    int    tok, tok_kw;
+    double tok_num;
+    char   tok_str[LINE_LEN];
+    char   tok_var[NAME_LEN];
+} lexstate_t;
+
+static void lex_save(lexstate_t *s) {
+    s->cur_text = cur_text; s->lx = lx; s->tok_start = tok_start;
+    s->tok = tok; s->tok_kw = tok_kw; s->tok_num = tok_num;
+    s_copy(s->tok_str, tok_str, LINE_LEN);
+    s_copy(s->tok_var, tok_var, NAME_LEN);
+}
+static void lex_restore(const lexstate_t *s) {
+    cur_text = s->cur_text; lx = s->lx; tok_start = s->tok_start;
+    tok = s->tok; tok_kw = s->tok_kw; tok_num = s->tok_num;
+    s_copy(tok_str, s->tok_str, LINE_LEN);
+    s_copy(tok_var, s->tok_var, NAME_LEN);
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,11 +1279,243 @@ static void *seed_alloc_aligned(unsigned alignment, unsigned nbytes) {
     return (void *)(ah + 1);                     // == a, with a valid header at a-16
 }
 
+// ===========================================================================
+// Collections: DICT (string-keyed map), LIST (growable sequence), TREE (binary
+// search tree keyed by number). Each is a heap object (built on the general
+// allocator above, so it is wiped clean on RUN) referred to by a small integer
+// handle. Every stored value is tagged number-or-string, so one collection can
+// hold either; the $-suffixed words (DICTGET$, POP$, ...) read string values.
+// ===========================================================================
+
+// A stored value: a number, or a string copied into the general heap.
+typedef struct { int is_str; double num; char *str; int len; } cval_t;
+
+static void cval_clear(cval_t *c) {
+    if (c->is_str && c->str) seed_free(c->str);
+    c->is_str = 0; c->num = 0; c->str = 0; c->len = 0;
+}
+// Overwrite *c with the BASIC value v (a string is copied into the heap so it
+// survives independently of BASIC's own GC heap). Returns 0 (and raises) on OOM.
+static int cval_store(cval_t *c, value_t v) {
+    char *p = 0;
+    if (v.is_str && v.len > 0) {
+        p = (char *)seed_alloc((unsigned)v.len);
+        if (!p) { err("Out of memory"); return 0; }
+        for (int i = 0; i < v.len; i++) p[i] = v.str[i];
+    }
+    cval_clear(c);
+    if (v.is_str) { c->is_str = 1; c->str = p; c->len = v.len; }
+    else          { c->num = v.num; }
+    return 1;
+}
+// Read a stored value as a typed BASIC value. The numeric/string variants raise
+// a type mismatch if the stored value is the other kind (like A vs A$).
+static value_t cval_num(cval_t *c) {
+    if (c->is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
+    return v_num(c->num);
+}
+static value_t cval_strv(cval_t *c) {
+    if (!c->is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
+    return str_in_scratch(c->str, c->len);
+}
+
+// --- LIST: a growable array of values --------------------------------------
+typedef struct { cval_t *item; int len, cap; } list_t;
+
+static int list_reserve(list_t *L, int need) {
+    if (need <= L->cap) return 1;
+    int cap = L->cap ? L->cap * 2 : 8;
+    while (cap < need) cap *= 2;
+    cval_t *n = (cval_t *)seed_realloc(L->item, (unsigned)(cap * sizeof(cval_t)));
+    if (!n) { err("Out of memory"); return 0; }
+    L->item = n; L->cap = cap; return 1;
+}
+static int list_ins(list_t *L, int i, value_t v) {   // insert before index i (0..len)
+    if (i < 0 || i > L->len) { err("Index out of range"); return 0; }
+    if (!list_reserve(L, L->len + 1)) return 0;
+    cval_t tmp = {0, 0, 0, 0};
+    if (!cval_store(&tmp, v)) return 0;               // may OOM before we shift
+    for (int k = L->len; k > i; k--) L->item[k] = L->item[k - 1];
+    L->item[i] = tmp;
+    L->len++;
+    return 1;
+}
+static void list_del(list_t *L, int i) {
+    if (i < 0 || i >= L->len) { err("Index out of range"); return; }
+    cval_clear(&L->item[i]);
+    for (int k = i; k < L->len - 1; k++) L->item[k] = L->item[k + 1];
+    L->len--;
+}
+
+// --- DICT: an insertion-ordered array of (key, value) entries --------------
+typedef struct { char *key; int klen; cval_t val; } dent_t;
+typedef struct { dent_t *e; int len, cap; } dict_t;
+
+static int dict_find(dict_t *D, const char *key, int klen) {
+    for (int i = 0; i < D->len; i++) {
+        if (D->e[i].klen != klen) continue;
+        int eq = 1;
+        for (int k = 0; k < klen; k++) if (D->e[i].key[k] != key[k]) { eq = 0; break; }
+        if (eq) return i;
+    }
+    return -1;
+}
+static int dict_set(dict_t *D, const char *key, int klen, value_t v) {
+    int i = dict_find(D, key, klen);
+    if (i >= 0) return cval_store(&D->e[i].val, v);   // update in place
+    if (D->len + 1 > D->cap) {
+        int cap = D->cap ? D->cap * 2 : 8;
+        dent_t *n = (dent_t *)seed_realloc(D->e, (unsigned)(cap * sizeof(dent_t)));
+        if (!n) { err("Out of memory"); return 0; }
+        D->e = n; D->cap = cap;
+    }
+    char *kc = 0;
+    if (klen > 0) {
+        kc = (char *)seed_alloc((unsigned)klen);
+        if (!kc) { err("Out of memory"); return 0; }
+        for (int k = 0; k < klen; k++) kc[k] = key[k];
+    }
+    dent_t *e = &D->e[D->len];
+    e->key = kc; e->klen = klen;
+    e->val.is_str = 0; e->val.num = 0; e->val.str = 0; e->val.len = 0;
+    if (!cval_store(&e->val, v)) { if (kc) seed_free(kc); return 0; }
+    D->len++;
+    return 1;
+}
+static void dict_del(dict_t *D, const char *key, int klen) {
+    int i = dict_find(D, key, klen);
+    if (i < 0) return;
+    if (D->e[i].key) seed_free(D->e[i].key);
+    cval_clear(&D->e[i].val);
+    for (int k = i; k < D->len - 1; k++) D->e[k] = D->e[k + 1];
+    D->len--;
+}
+
+// --- TREE: a binary search tree keyed by number ----------------------------
+typedef struct tnode { double key; cval_t val; struct tnode *l, *r; } tnode_t;
+typedef struct { tnode_t *root; int count; } tree_t;
+
+static tnode_t *tree_find(tree_t *T, double key) {
+    tnode_t *c = T->root;
+    while (c) { if (key == c->key) return c; c = key < c->key ? c->l : c->r; }
+    return 0;
+}
+static int tree_set(tree_t *T, double key, value_t v) {
+    tnode_t **link = &T->root, *par = 0;
+    while (*link) {
+        par = *link;
+        if (key == par->key) return cval_store(&par->val, v);   // update
+        link = key < par->key ? &par->l : &par->r;
+    }
+    tnode_t *n = (tnode_t *)seed_alloc((unsigned)sizeof(tnode_t));
+    if (!n) { err("Out of memory"); return 0; }
+    n->key = key; n->l = 0; n->r = 0;
+    n->val.is_str = 0; n->val.num = 0; n->val.str = 0; n->val.len = 0;
+    if (!cval_store(&n->val, v)) { seed_free(n); return 0; }
+    *link = n; T->count++;
+    return 1;
+}
+static void tree_del(tree_t *T, double key) {
+    tnode_t *cur = T->root, *par = 0;
+    while (cur && cur->key != key) { par = cur; cur = key < cur->key ? cur->l : cur->r; }
+    if (!cur) return;                                 // not found
+    if (cur->l && cur->r) {                           // two children: use successor
+        tnode_t *sp = cur, *s = cur->r;
+        while (s->l) { sp = s; s = s->l; }
+        cval_clear(&cur->val);
+        cur->key = s->key; cur->val = s->val;         // move successor's payload up
+        s->val.is_str = 0; s->val.str = 0;            // ...without a double free
+        cur = s; par = sp;                            // now splice out s (<=1 child)
+    }
+    tnode_t *child = cur->l ? cur->l : cur->r;
+    if (!par) T->root = child;
+    else if (par->l == cur) par->l = child;
+    else par->r = child;
+    cval_clear(&cur->val);
+    seed_free(cur);
+    T->count--;
+}
+static tnode_t *tree_edge(tree_t *T, int rightmost) {  // min (0) or max (1) node
+    tnode_t *c = T->root;
+    if (!c) return 0;
+    while (rightmost ? c->r : c->l) c = rightmost ? c->r : c->l;
+    return c;
+}
+// The idx-th node in ascending key order (0-based). Iterative in-order walk with
+// an explicit heap stack, so a degenerate (deep) tree can't overflow the C stack.
+static tnode_t *tree_index(tree_t *T, int idx) {
+    if (idx < 0 || idx >= T->count) { err("Index out of range"); return 0; }
+    tnode_t **stk = (tnode_t **)seed_alloc((unsigned)(T->count * sizeof(tnode_t *)));
+    if (!stk) { err("Out of memory"); return 0; }
+    int sp = 0, seen = -1;
+    tnode_t *cur = T->root, *res = 0;
+    while (cur || sp) {
+        while (cur) { stk[sp++] = cur; cur = cur->l; }
+        cur = stk[--sp];
+        if (++seen == idx) { res = cur; break; }
+        cur = cur->r;
+    }
+    seed_free(stk);
+    return res;
+}
+
+// --- handle pool ------------------------------------------------------------
+#define COLL_MAX 64
+enum { CT_FREE = 0, CT_DICT, CT_LIST, CT_TREE };
+static struct { int type; void *obj; } colls[COLL_MAX];
+
+// Drop every handle. The objects' memory lives in the general heap, which is
+// wiped by seed_heap_reset() on RUN/NEW, so we just clear the table alongside it.
+static void coll_reset(void) {
+    for (int i = 0; i < COLL_MAX; i++) { colls[i].type = CT_FREE; colls[i].obj = 0; }
+}
+static double coll_new(int type, unsigned objsize) {
+    for (int i = 0; i < COLL_MAX; i++) if (colls[i].type == CT_FREE) {
+        char *o = (char *)seed_alloc(objsize);
+        if (!o) { err("Out of memory"); return 0; }
+        for (unsigned k = 0; k < objsize; k++) o[k] = 0;
+        colls[i].type = type; colls[i].obj = o;
+        return (double)(i + 1);
+    }
+    err("Too many collections");
+    return 0;
+}
+// Resolve a handle, requiring a particular type (0 = any). Raises on a bad or
+// wrong-typed handle and returns 0.
+static void *coll_get(double h, int type) {
+    int i = (int)h;
+    if (i < 1 || i > COLL_MAX || colls[i - 1].type == CT_FREE) { err("Not a collection"); return 0; }
+    if (type && colls[i - 1].type != type) {
+        err(type == CT_DICT ? "Not a dictionary" : type == CT_LIST ? "Not a list" : "Not a tree");
+        return 0;
+    }
+    return colls[i - 1].obj;
+}
+static int coll_size_of(int type, void *o) {
+    if (type == CT_LIST) return ((list_t *)o)->len;
+    if (type == CT_DICT) return ((dict_t *)o)->len;
+    if (type == CT_TREE) return ((tree_t *)o)->count;
+    return 0;
+}
+
 // --- service callbacks the seed may invoke (names are uppercase + suffix) ---
 static void svc_putc(int c)                       { con_putc((char)c); }
 static void svc_puts(const char *s, int len)      { con_putsn(s, len); }
 static int  svc_getkey(void)                      { return con_getkey(); }
 static int  svc_inkey(int cs)                     { return con_inkey(cs); }
+
+// A key that the ON KEY event consumed while detecting the press, held for the
+// handler (or the next GET) to read. GET/INKEY go through these wrappers so the
+// key that triggered the event is the one the handler reads back.
+static int g_pending_key = -1;
+static int bas_getkey(void) {
+    if (g_pending_key >= 0) { int k = g_pending_key; g_pending_key = -1; return k; }
+    return con_getkey();
+}
+static int bas_inkey(int cs) {
+    if (g_pending_key >= 0) { int k = g_pending_key; g_pending_key = -1; return k; }
+    return con_inkey(cs);
+}
 
 static int svc_get_num(const char *name, double *out) {
     for (int i = 0; i < var_n; i++)
@@ -1246,6 +1557,53 @@ static void  svc_free(void *ptr)        { seed_free(ptr); }
 static void *svc_realloc(void *ptr, unsigned nbytes) { return seed_realloc(ptr, nbytes); }
 static void *svc_alloc_aligned(unsigned a, unsigned n) { return seed_alloc_aligned(a, n); }
 
+// GPIO passthroughs (see gpio.h). The driver validates the pin range itself, so
+// these are thin; on the host build every gpio_* is a stub and gpio_available()
+// is 0, which a seed can test via svc->gpio_avail().
+static int  svc_gpio_avail(void)                       { return gpio_available(); }
+static int  svc_gpio_mode(int pin, int mode, int alt)  { return gpio_set_mode(pin, mode, alt); }
+static int  svc_gpio_pull(int pin, int pull)           { return gpio_set_pull(pin, pull); }
+static void svc_gpio_write(int pin, int level)         { gpio_write(pin, level); }
+static int  svc_gpio_read(int pin)                     { return gpio_read(pin); }
+static void svc_gpio_set(uint32_t mask)                { gpio_set_mask(mask); }
+static void svc_gpio_clr(uint32_t mask)                { gpio_clr_mask(mask); }
+static uint32_t svc_gpio_level(void)                   { return gpio_read_all(); }
+static int  svc_gpio_wait(int pin, int edge, int cs)   { return gpio_wait_edge(pin, edge, cs); }
+
+// SD-card files: thin adapters over the storage channel API (see storage.h),
+// which the seed <stdio.h> is built on. All of this shares the file channels and
+// filesystem (long names included) with BASIC's OPENIN/OPENOUT.
+static int svc_file_open(const char *name, int mode) {
+    int m = (mode == SEED_FOPEN_WRITE)  ? STG_M_WRITE
+          : (mode == SEED_FOPEN_UPDATE) ? STG_M_UPDATE : STG_M_READ;
+    return stg_open(name, m);                         // channel > 0, or 0 on failure
+}
+static int svc_file_close(int fh) { return stg_close(fh); }
+static int svc_file_read(int fh, void *buf, int n) {
+    unsigned char *p = buf;
+    int i = 0;
+    for (; i < n; i++) { int b = stg_getb(fh); if (b < 0) break; p[i] = (unsigned char)b; }
+    return i;                                         // short count at EOF (stdio semantics)
+}
+static int svc_file_write(int fh, const void *buf, int n) {
+    const unsigned char *p = buf;
+    for (int i = 0; i < n; i++) { int r = stg_putb(fh, p[i]); if (r < 0) return i > 0 ? i : r; }
+    return n;
+}
+static long svc_file_seek(int fh, long off, int whence) {
+    long base = (whence == 1) ? stg_tell(fh) : (whence == 2) ? stg_size(fh) : 0;
+    if (base < 0) return base;
+    long pos = base + off;
+    int r = stg_seek(fh, pos);
+    return r < 0 ? (long)r : pos;
+}
+static long svc_file_size(int fh)   { return stg_size(fh); }
+static int  svc_file_eof(int fh)    { return stg_eof(fh); }
+static int  svc_file_remove(const char *name) { return stg_delete(name); }
+
+// Format a double exactly as PRINT/STR$ do, so a seed's printf %f matches BASIC.
+static int svc_fmt_num(double v, char *out) { return dbl_to_str(out, v); }
+
 static const SeedServices g_svc = {
     SEED_ABI_VERSION,
     svc_putc, svc_puts, svc_getkey, svc_inkey,
@@ -1253,6 +1611,11 @@ static const SeedServices g_svc = {
     svc_num_array, svc_set_return_str, svc_time_cs,
     svc_alloc, svc_free,
     svc_realloc, svc_alloc_aligned,
+    svc_gpio_avail, svc_gpio_mode, svc_gpio_pull, svc_gpio_write, svc_gpio_read,
+    svc_gpio_set, svc_gpio_clr, svc_gpio_level, svc_gpio_wait,
+    svc_file_open, svc_file_close, svc_file_read, svc_file_write,
+    svc_file_seek, svc_file_size, svc_file_eof, svc_file_remove,
+    svc_fmt_num,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma
@@ -1308,6 +1671,8 @@ static int parse_array_ref(char *name) {
     if (!expect(T_LP)) return 0;
     return expect(T_RP);
 }
+
+static int gpio_guard(void);            // defined with the GPIO statements below
 
 static value_t eval_function(int fn) {
     lex_next();                         // consume function name
@@ -1369,8 +1734,8 @@ static value_t eval_function(int fn) {
     if (!expect(T_LP)) return v_num(0);
     value_t result = v_num(0);
     switch (fn) {
-        case KW_INKEY:  { int n = (int)need_num(); result = v_num((double)con_inkey(n)); break; }
-        case KW_INKEYS: { int n = (int)need_num(); int k = con_inkey(n);
+        case KW_INKEY:  { int n = (int)need_num(); result = v_num((double)bas_inkey(n)); break; }
+        case KW_INKEYS: { int n = (int)need_num(); int k = bas_inkey(n);
                           if (k < 0) result = v_str(0, 0);   // timeout -> empty string
                           else { char c = (char)k; result = str_in_scratch(&c, 1); }
                           break; }
@@ -1390,6 +1755,73 @@ static value_t eval_function(int fn) {
         case KW_POINT: { int px = (int)need_num(); if (!expect(T_COMMA)) break;
                          int py = (int)need_num(); if (g_err) break;
                          result = v_num((double)con_point(px, py)); break; }
+
+        // --- Collections (see the NEW* creators) --------------------------------
+        case KW_SIZE: { double h = need_num(); if (g_err) break;
+                        void *o = coll_get(h, 0); if (!o) break;
+                        result = v_num(coll_size_of(colls[(int)h - 1].type, o)); break; }
+        case KW_DICTGET: case KW_DICTGETS: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            value_t k = need_str(); if (g_err) break;
+            dict_t *D = (dict_t *)coll_get(h, CT_DICT); if (!D) break;
+            int i = dict_find(D, k.str, k.len);
+            if (i < 0) result = (fn == KW_DICTGETS) ? v_str(0, 0) : v_num(0);   // absent: ""/0
+            else       result = (fn == KW_DICTGETS) ? cval_strv(&D->e[i].val) : cval_num(&D->e[i].val);
+            break; }
+        case KW_DICTHAS: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            value_t k = need_str(); if (g_err) break;
+            dict_t *D = (dict_t *)coll_get(h, CT_DICT); if (!D) break;
+            result = v_num(dict_find(D, k.str, k.len) >= 0 ? -1.0 : 0.0); break; }
+        case KW_DICTKEYS: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            int i = (int)need_num(); if (g_err) break;
+            dict_t *D = (dict_t *)coll_get(h, CT_DICT); if (!D) break;
+            if (i < 0 || i >= D->len) { err("Index out of range"); break; }
+            result = str_in_scratch(D->e[i].key, D->e[i].klen); break; }
+        case KW_POP: case KW_POPS: {
+            double h = need_num(); if (g_err) break;
+            list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) break;
+            if (L->len == 0) { err("List is empty"); break; }
+            cval_t *c = &L->item[L->len - 1];
+            if (fn == KW_POPS) result = cval_strv(c); else result = cval_num(c);
+            if (g_err) break;                                  // wrong type: leave item in place
+            cval_clear(c); L->len--; break; }
+        case KW_LISTGET: case KW_LISTGETS: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            int i = (int)need_num(); if (g_err) break;
+            list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) break;
+            if (i < 0 || i >= L->len) { err("Index out of range"); break; }
+            result = (fn == KW_LISTGETS) ? cval_strv(&L->item[i]) : cval_num(&L->item[i]); break; }
+        case KW_TREEGET: case KW_TREEGETS: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            double key = need_num(); if (g_err) break;
+            tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) break;
+            tnode_t *n = tree_find(T, key);
+            if (!n) result = (fn == KW_TREEGETS) ? v_str(0, 0) : v_num(0);       // absent: ""/0
+            else    result = (fn == KW_TREEGETS) ? cval_strv(&n->val) : cval_num(&n->val);
+            break; }
+        case KW_TREEHAS: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            double key = need_num(); if (g_err) break;
+            tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) break;
+            result = v_num(tree_find(T, key) ? -1.0 : 0.0); break; }
+        case KW_TREEMIN: case KW_TREEMAX: {
+            double h = need_num(); if (g_err) break;
+            tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) break;
+            tnode_t *n = tree_edge(T, fn == KW_TREEMAX);
+            if (!n) { err("Tree is empty"); break; }
+            result = v_num(n->key); break; }
+        case KW_TREEKEY: {
+            double h = need_num(); if (!expect(T_COMMA)) break;
+            int i = (int)need_num(); if (g_err) break;
+            tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) break;
+            tnode_t *n = tree_index(T, i);
+            if (n) result = v_num(n->key);
+            break; }
+        case KW_I2CPROBE: { int addr = (int)need_num(); if (g_err) break;
+                            if (!i2c_available()) { err("I2C needs real Pi hardware"); break; }
+                            result = v_num(i2c_probe(addr) ? -1.0 : 0.0); break; }
         case KW_RGB: { int r = (int)need_num(); if (!expect(T_COMMA)) break;
                        int g = (int)need_num(); if (!expect(T_COMMA)) break;
                        int b = (int)need_num(); if (g_err) break;
@@ -1612,6 +2044,36 @@ static value_t eval_function(int fn) {
         // ! for a 32-bit word and $ for a string. See also POKE.
         case KW_PEEK: { long a = (long)need_num(); if (g_err) break;
                         result = v_num((double)mem_peekb(a)); break; }
+        // PIN(n) -> the level (0/1) of BCM header pin n. The statement form
+        // PIN n,v (drive an output) is in exec_statement.
+        case KW_PIN: { if (gpio_guard()) break;
+                       int p = (int)need_num(); if (g_err) break;
+                       if (p < 0 || p > 27) { err("No such pin"); break; }
+                       result = v_num((double)gpio_read(p)); break; }
+        // PINWAIT(pin, edge, timeout_cs) -> pin when the edge arrives, -1 on
+        // timeout. edge: 0 = falling, 1 = rising. timeout in centiseconds.
+        case KW_PINWAIT: { if (gpio_guard()) break;
+                       int p = (int)need_num(); if (!expect(T_COMMA)) break;
+                       int e = (int)need_num(); if (!expect(T_COMMA)) break;
+                       int t = (int)need_num(); if (g_err) break;
+                       if (p < 0 || p > 27) { err("No such pin"); break; }
+                       result = v_num((double)gpio_wait_edge(p, e, t)); break; }
+        // EVAL("expr") parses the string as an expression and returns its value
+        // (number or string). The interpreter already re-lexes source on the fly,
+        // so this just points the lexer at a private copy of the string, runs the
+        // ordinary expression evaluator, and restores the lexer. The copy is on
+        // the C stack because evaluating the inner expression allocates scratch,
+        // which could otherwise overwrite the source we are reading.
+        case KW_EVAL: { value_t s = need_str(); if (g_err) break;
+                       char buf[MAX_STR + 1];
+                       int n = s.len; if (n > MAX_STR) n = MAX_STR;
+                       for (int i = 0; i < n; i++) buf[i] = s.str[i];
+                       buf[n] = 0;
+                       lexstate_t save; lex_save(&save);
+                       cur_text = buf; lx = buf; lex_next();
+                       result = eval_expr();
+                       if (!g_err && tok != T_EOL) err("Syntax error in EVAL string");
+                       lex_restore(&save); break; }
         case KW_SPRW: case KW_SPRH: {
                           long a = (long)need_num(); if (g_err) break;
                           long v = 0;
@@ -1692,22 +2154,31 @@ static value_t prim_base(void) {
             case KW_PI:    lex_next(); return v_num(BAS_PI);
             case KW_TRUE:  lex_next(); return v_num(-1.0);
             case KW_FALSE: lex_next(); return v_num(0.0);
+            case KW_NEWDICT: lex_next(); return v_num(coll_new(CT_DICT, sizeof(dict_t)));
+            case KW_NEWLIST: lex_next(); return v_num(coll_new(CT_LIST, sizeof(list_t)));
+            case KW_NEWTREE: lex_next(); return v_num(coll_new(CT_TREE, sizeof(tree_t)));
             case KW_POS:   lex_next(); return v_num(con_pos());
             case KW_VPOS:  lex_next(); return v_num(con_vpos());
             case KW_ERR:   lex_next(); return v_num(g_errcode);
             case KW_ERRS:  { lex_next();
                              int n = 0; while (g_errmsg[n]) n++;
                              return str_in_scratch(g_errmsg, n); }
+            case KW_PINS:  lex_next();
+                           if (!gpio_available()) { err("GPIO needs the Pi, not the host build"); return v_num(0); }
+                           return v_num((double)gpio_read_all());
             case KW_SCREENW: lex_next(); return v_num(con_screen_w());
             case KW_SCREENH: lex_next(); return v_num(con_screen_h());
+            case KW_KEYBOARDS: { lex_next(); const char *c = con_get_keyboard();
+                                 int n = 0; while (c[n]) n++;
+                                 return str_in_scratch(c, n); }
             case KW_MOUSEX: { int x; lex_next(); con_mouse(&x, 0, 0); return v_num(x); }
             case KW_MOUSEY: { int y; lex_next(); con_mouse(0, &y, 0); return v_num(y); }
             case KW_MOUSEB: { int b; lex_next(); con_mouse(0, 0, &b); return v_num(b); }
             case KW_TIME:  lex_next();
                            return v_num((double)((long long)(con_micros() / 10000ULL) - time_base));
             case KW_FN:  { value_t v = v_num(0); call_proc(1, &v); return v; }
-            case KW_GET:   lex_next(); return v_num((double)con_getkey());
-            case KW_GETS:{ lex_next(); char ch = (char)con_getkey(); return str_in_scratch(&ch, 1); }
+            case KW_GET:   lex_next(); return v_num((double)bas_getkey());
+            case KW_GETS:{ lex_next(); char ch = (char)bas_getkey(); return str_in_scratch(&ch, 1); }
             // Directory-scan cursor (see DIROPEN). DIRNEXT advances to the next
             // entry, returning TRUE while there is one; the rest read fields of
             // the entry DIRNEXT last landed on.
@@ -1908,7 +2379,6 @@ static value_t eval_expr(void) {                  // OR / EOR: lowest precedence
 //
 // A "position" is a (program-line index, byte offset into that line's text)
 // pair, so GOSUB/RETURN and FOR/NEXT can resume in the *middle* of a line.
-static const char *cur_text;     // text of the line currently executing
 static int  cur_line_idx;        // prog[] index of that line, or -1 if immediate
 
 // The module the executing line belongs to (0 = main program, or immediate mode).
@@ -2070,6 +2540,7 @@ static int skip_to_close(int open_kw, int close_kw, const char *msg) {
 }
 
 static void exec_statement(void);   // forward decl (IF runs a sub-statement)
+static void exec_text(const char *text, int off);   // forward decl (EXEC runs a string)
 
 #define PRINT_FIELD 8     // column width for the ',' separator and TAB alignment
 
@@ -2943,8 +3414,144 @@ static int data_next(int *len) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Event handlers: ON TIMER / ON PIN / ON MOUSE register a PROC to run when
+// something happens, instead of busy-polling. Events are dispatched *between
+// statements* by poll_events() (see run_program / run_body), never from a real
+// interrupt, so the interpreter is never re-entered at an unsafe point. A handler
+// is an ordinary parameterless PROC; while one runs, further events are held off.
+// ---------------------------------------------------------------------------
+#define EV_PIN_MAX 8
+
+static struct { int active; char proc[NAME_LEN];
+                long interval_us; unsigned long long last_us; } ev_timer;
+static struct { int active; char proc[NAME_LEN]; int x, y, b; } ev_mouse;
+static struct { int active; char proc[NAME_LEN]; } ev_key;
+static struct { int active; char proc[NAME_LEN]; int pin, edge, level; } ev_pin[EV_PIN_MAX];
+static int  in_event;                            // reentrancy guard while a handler runs
+static unsigned long long g_frame_us;            // WAIT's ~60 Hz cadence clock
+
+static void events_reset(void) {
+    ev_timer.active = 0;
+    ev_mouse.active = 0;
+    ev_key.active = 0;
+    for (int i = 0; i < EV_PIN_MAX; i++) {
+        if (ev_pin[i].active) gpio_disarm_edge(ev_pin[i].pin);
+        ev_pin[i].active = 0;
+    }
+    in_event = 0;
+    g_frame_us = 0;
+    g_pending_key = -1;
+    con_backbuffer(0);                           // every program starts drawing to the screen
+    con_sprite_tint(0, 0, 0, 0, 0);                 // ... and untinted
+    con_target_screen();                         // ... and not redirected into a sprite
+}
+
+// Read the handler's PROC name (glued "PROCname" or spaced "PROC name") into out.
+static int read_handler_proc(char *out) {
+    if (tok != T_KW || tok_kw != KW_PROC) { err("Expected PROC and a handler name"); return 0; }
+    if (tok_var[0]) { s_copy(out, tok_var, NAME_LEN); lex_next(); return 1; }
+    lex_next();
+    if (tok != T_VAR) { err("Expected PROC and a handler name"); return 0; }
+    s_copy(out, tok_var, NAME_LEN); lex_next();
+    return 1;
+}
+static int word_is(const char *w) { return tok == T_VAR && s_eq(tok_var, w); }
+
+// ON TIMER cs PROC name   |   ON TIMER OFF
+static void on_timer(void) {
+    lex_next();                                  // consume TIMER
+    if (word_is("OFF")) { lex_next(); ev_timer.active = 0; return; }
+    long cs = (long)need_num(); if (g_err) return;
+    if (cs < 1) cs = 1;
+    char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
+    s_copy(ev_timer.proc, nm, NAME_LEN);
+    ev_timer.interval_us = cs * 10000L;
+    ev_timer.last_us = con_micros();
+    ev_timer.active = 1;
+}
+
+// ON MOUSE PROC name   |   ON MOUSE OFF
+static void on_mouse(void) {
+    lex_next();                                  // consume MOUSE
+    if (word_is("OFF")) { lex_next(); ev_mouse.active = 0; return; }
+    char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
+    s_copy(ev_mouse.proc, nm, NAME_LEN);
+    con_mouse(&ev_mouse.x, &ev_mouse.y, &ev_mouse.b);   // baseline to compare against
+    ev_mouse.active = 1;
+}
+
+// ON KEY PROC name   |   ON KEY OFF
+// The handler reads the triggering key with GET / GET$ / INKEY(0), which return
+// the very key that fired the event (it is held in g_pending_key).
+static void on_key(void) {
+    lex_next();                                  // consume KEY
+    if (word_is("OFF")) { lex_next(); ev_key.active = 0; return; }
+    char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
+    s_copy(ev_key.proc, nm, NAME_LEN);
+    ev_key.active = 1;
+}
+
+// ON PIN p [RISING|FALLING] PROC name   |   ON PIN p OFF   |   ON PIN OFF
+static void on_pin(void) {
+    lex_next();                                  // consume PIN
+    if (word_is("OFF")) { lex_next();            // cancel every pin handler
+        for (int i = 0; i < EV_PIN_MAX; i++)
+            if (ev_pin[i].active) { gpio_disarm_edge(ev_pin[i].pin); ev_pin[i].active = 0; }
+        return;
+    }
+    if (!gpio_available()) { err("GPIO needs the Pi, not the host build"); return; }
+    int p = (int)need_num(); if (g_err) return;
+    if (p < 0 || p > 27) { err("No such pin"); return; }
+    if (word_is("OFF")) { lex_next();            // cancel just this pin
+        for (int i = 0; i < EV_PIN_MAX; i++)
+            if (ev_pin[i].active && ev_pin[i].pin == p) { gpio_disarm_edge(p); ev_pin[i].active = 0; }
+        return;
+    }
+    int edge = 2;                                // default: both edges
+    if      (word_is("RISING"))  { edge = 1; lex_next(); }
+    else if (word_is("FALLING")) { edge = 0; lex_next(); }
+    char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
+    int slot = -1;
+    for (int i = 0; i < EV_PIN_MAX; i++) if (ev_pin[i].active && ev_pin[i].pin == p) slot = i;
+    if (slot < 0) for (int i = 0; i < EV_PIN_MAX; i++) if (!ev_pin[i].active) { slot = i; break; }
+    if (slot < 0) { err("Too many pin handlers"); return; }
+    s_copy(ev_pin[slot].proc, nm, NAME_LEN);
+    ev_pin[slot].pin = p; ev_pin[slot].edge = edge; ev_pin[slot].active = 1;
+    ev_pin[slot].level = gpio_read(p);           // baseline for software change detect
+    gpio_arm_edge(p, edge);
+}
+
+// WAIT : block until the next ~1/60 s frame boundary, giving an animation loop a
+// steady cadence without a busy spin in the program. (There is no hardware vsync
+// interrupt on this path; this is frame pacing, not tear-free page flipping.)
+static void stmt_wait(void) {
+    lex_next();
+    const unsigned long long period = 16667;     // ~60 Hz
+    unsigned long long now = con_micros();
+    if (g_frame_us == 0 || now > g_frame_us + period) g_frame_us = now;   // (re)sync if idle/behind
+    g_frame_us += period;
+    while (con_micros() < g_frame_us) sound_pump();   // keep background audio going
+}
+
+// DELAY cs : pause for cs centiseconds (the same units as TIME and INKEY), so
+// DELAY 50 waits half a second. Unlike an empty counting loop, the duration is
+// real-time and independent of CPU speed. Background audio keeps playing during
+// the wait; a non-positive value returns at once.
+static void stmt_delay(void) {
+    lex_next();                                       // consume DELAY
+    double cs = need_num();
+    if (g_err || cs <= 0) return;
+    unsigned long long target = con_micros() + (unsigned long long)(cs * 10000.0);
+    while (con_micros() < target) sound_pump();
+}
+
 static void stmt_on(void) {
     lex_next();                                  // consume ON
+    if (tok == T_KW && tok_kw == KW_PIN)   { on_pin();   return; }
+    if (tok == T_KW && tok_kw == KW_MOUSE) { on_mouse(); return; }
+    if (word_is("TIMER"))                  { on_timer(); return; }
+    if (word_is("KEY"))                    { on_key();   return; }
     int sel = (int)need_num();
     if (g_err) return;
     if (tok != T_KW || (tok_kw != KW_GOTO && tok_kw != KW_GOSUB)) { err("Expected GOTO or GOSUB after ON"); return; }
@@ -3552,6 +4159,107 @@ static int pitch_to_hz(int pitch) {
 //   pitch     0..255, quarter-semitone steps (53 = middle C, 89 = A 440)
 //   duration  in twentieths of a second; -1 = play until replaced
 // SOUND OFF   silences everything and empties the queues.
+// --- GPIO statements --------------------------------------------------------
+// Numbering is BCM: PIN 17 is BCM GPIO 17, not header pin 17. Valid pins are the
+// 40-pin header, BCM 0..27 (avoid 0/1, the HAT ID EEPROM); higher pins drive the
+// SD card and system peripherals and are deliberately unreachable. Every verb
+// first checks that we are on real hardware (the host build has no header).
+
+// Raise the host guard; returns 1 if GPIO is unavailable (caller should bail).
+static int gpio_guard(void) {
+    if (!gpio_available()) { err("GPIO needs the Pi, not the host build"); return 1; }
+    return 0;
+}
+static int gpio_pin_arg(void) {          // read+validate a BCM header pin (0..27)
+    int p = (int)need_num();
+    if (g_err) return -1;
+    if (p < 0 || p > 27) { err("No such pin"); return -1; }
+    return p;
+}
+
+// PINMODE pin, OUTPUT | INPUT [PULLUP|PULLDOWN] | ALT f
+static void stmt_pinmode(void) {
+    lex_next();                          // consume PINMODE
+    if (gpio_guard()) return;
+    int pin = gpio_pin_arg(); if (g_err) return;
+    if (!expect(T_COMMA)) return;
+    if (tok != T_KW) { err("Bad pin mode"); return; }
+    int m = tok_kw;
+    if (m == KW_OUTPUT) {
+        lex_next();
+        gpio_set_mode(pin, GPIO_OUT, 0);
+        gpio_set_pull(pin, GPIO_PULL_NONE);
+    } else if (m == KW_INPUT) {
+        lex_next();
+        int pull = GPIO_PULL_NONE;
+        if (tok == T_KW && tok_kw == KW_PULLUP)        { pull = GPIO_PULL_UP;   lex_next(); }
+        else if (tok == T_KW && tok_kw == KW_PULLDOWN) { pull = GPIO_PULL_DOWN; lex_next(); }
+        gpio_set_mode(pin, GPIO_IN, 0);
+        gpio_set_pull(pin, pull);
+    } else if (m == KW_ALT) {
+        lex_next();
+        int f = (int)need_num(); if (g_err) return;
+        if (f < 0 || f > 5) { err("Bad pin mode"); return; }
+        gpio_set_mode(pin, GPIO_ALT, f);
+    } else {
+        err("Bad pin mode");
+    }
+}
+
+// PIN pin, level     (statement form; the read form PIN(n) is in eval_function)
+static void stmt_pin(void) {
+    lex_next();                          // consume PIN
+    if (gpio_guard()) return;
+    int pin = gpio_pin_arg(); if (g_err) return;
+    if (!expect(T_COMMA)) return;
+    int v = (int)need_num(); if (g_err) return;
+    gpio_write(pin, v != 0);
+}
+
+// PINSET mask / PINCLR mask : atomically set/clear every pin whose bit is 1.
+static void stmt_pinset(int setit) {
+    lex_next();                          // consume PINSET/PINCLR
+    if (gpio_guard()) return;
+    uint32_t mask = (uint32_t)(long)need_num(); if (g_err) return;
+    mask &= 0x0FFFFFFFu;
+    if (setit) gpio_set_mask(mask); else gpio_clr_mask(mask);
+}
+
+// I2C needs a real Pi (QEMU does not model the BSC); raise a clear error otherwise.
+static int i2c_guard(void) {
+    if (!i2c_available()) { err("I2C needs real Pi hardware"); return 1; }
+    return 0;
+}
+
+// I2CWRITE addr, b1 [, b2, ...] : send the listed bytes to the device at `addr`.
+static void stmt_i2cwrite(void) {
+    lex_next();                          // consume I2CWRITE
+    if (i2c_guard()) return;
+    int addr = (int)need_num(); if (!expect(T_COMMA)) return;
+    unsigned char buf[64]; int n = 0;
+    for (;;) {
+        int v = (int)need_num(); if (g_err) return;
+        if (n >= (int)sizeof buf) { err("Too many bytes"); return; }
+        buf[n++] = (unsigned char)v;
+        if (tok != T_COMMA) break;
+        lex_next();
+    }
+    if (i2c_write(addr, buf, n) < 0) err("I2C write failed");
+}
+
+// I2CREAD addr, buf, count : read `count` bytes from `addr` into the DIM buffer.
+static void stmt_i2cread(void) {
+    lex_next();                          // consume I2CREAD
+    if (i2c_guard()) return;
+    int addr = (int)need_num(); if (!expect(T_COMMA)) return;
+    long ad = (long)need_num(); if (!expect(T_COMMA)) return;
+    int n = (int)need_num(); if (g_err) return;
+    if (n <= 0 || n > 65535) { err("Invalid argument"); return; }
+    // The driver writes the buffer one byte at a time, so an unaligned DIM
+    // address is safe (-mstrict-align); read straight into it.
+    if (i2c_read(addr, (unsigned char *)(uintptr_t)ad, n) < 0) err("I2C read failed");
+}
+
 static void stmt_sound(void) {
     lex_next();                                  // consume SOUND
     if (tok == T_VAR && s_eq(tok_var, "OFF")) { lex_next(); sound_reset(); return; }
@@ -3595,6 +4303,19 @@ static void stmt_screen(void) {
     if (!con_screen(w, h)) err("Could not set that screen resolution");
 }
 
+// KEYBOARD "NO" : select the keyboard layout by two-letter code (US/UK/NO/DK/SE/
+// DE, case-insensitive). Affects how physical key presses are decoded from here
+// on; the current layout can be read back with the KEYBOARD$ function.
+static void stmt_keyboard(void) {
+    lex_next();                                  // consume KEYBOARD
+    value_t s = need_str();   if (g_err) return;
+    char code[8];
+    int n = s.len; if (n > (int)sizeof code - 1) n = (int)sizeof code - 1;
+    for (int i = 0; i < n; i++) code[i] = s.str[i];
+    code[n] = 0;
+    if (!con_set_keyboard(code)) err("Unknown keyboard layout");
+}
+
 // POKE addr, byte : store one byte at a memory address. Familiar alias for the
 // indirection form `?addr = byte`; use `!addr = word` / `$addr = "..."` for a
 // 32-bit word or a string. On this bare-metal machine the address is real, so
@@ -3604,6 +4325,27 @@ static void stmt_poke_kw(void) {
     long a = (long)need_num();   if (!expect(T_COMMA)) return;
     long v = (long)need_num();   if (g_err) return;
     mem_pokeb(a, v);
+}
+
+// EXEC "statement" : run a string as if it were a line of BASIC, in the current
+// context (same variables, arrays, open loops). The companion to EVAL: EVAL
+// computes a value, EXEC performs actions. Build the string however you like —
+// a config file line, an assembled "LET " + n$ + " = " + v$, a typed command.
+// The lexer is pointed at a private copy of the string and restored afterwards,
+// so the statement that issued EXEC carries on normally (e.g. EXEC c$ : PRINT).
+// A branch (GOTO/GOSUB) or END inside the string propagates out as usual; a
+// half-open block (a FOR with no NEXT, say) is a mistake, because the copied
+// text is gone once EXEC returns.
+static void stmt_exec(void) {
+    lex_next();                                  // consume EXEC
+    value_t s = need_str();   if (g_err) return;
+    char buf[LINE_LEN];
+    int n = s.len; if (n > LINE_LEN - 1) n = LINE_LEN - 1;
+    for (int i = 0; i < n; i++) buf[i] = s.str[i];
+    buf[n] = 0;
+    lexstate_t save; lex_save(&save);
+    exec_text(buf, 0);
+    lex_restore(&save);
 }
 
 // --- Graphics statements ----------------------------------------------------
@@ -3704,13 +4446,158 @@ static void stmt_gget(void) {
     con_sprite_get(addr, v[0], v[1], v[2], v[3]);
 }
 
-// GPUT addr, x, y : stamp a captured sprite (top-left at x,y)
+// GPUT addr,x,y [,scale,angle] : stamp a sprite, optionally scaled and rotated.
 static void stmt_gput(void) {
     lex_next();
     long addr = (long)need_num(); if (!expect(T_COMMA)) return;
-    int v[2];
-    if (!read_nums(v, 2)) return;
-    con_sprite_put(addr, v[0], v[1]);
+    int x = (int)need_num(); if (!expect(T_COMMA)) return;
+    int y = (int)need_num();
+    if (tok == T_COMMA) {                         // extended form: , scale , angle
+        lex_next();
+        double sc = need_num(); if (!expect(T_COMMA)) return;
+        double an = need_num(); if (g_err) return;
+        con_sprite_put_ex(addr, x, y, sc, an);
+        return;
+    }
+    if (g_err) return;
+    con_sprite_put(addr, x, y);                    // plain fast path
+}
+
+// GTINT r,g,b,a | GTINT OFF : tint every subsequently blitted sprite.
+static void stmt_gtint(void) {
+    lex_next();                                   // consume GTINT
+    if (word_is("OFF")) { lex_next(); con_sprite_tint(0, 0, 0, 0, 0); return; }
+    int v[4];
+    if (!read_nums(v, 4)) return;                  // r,g,b,a
+    con_sprite_tint(1, v[0], v[1], v[2], v[3]);
+}
+
+// NEWSPRITE addr, w, h : initialise a DIM buffer as a blank transparent sprite.
+static void stmt_newsprite(void) {
+    lex_next();
+    long addr = (long)need_num(); if (!expect(T_COMMA)) return;
+    int wh[2];
+    if (!read_nums(wh, 2)) return;                 // w, h
+    if (wh[0] <= 0 || wh[1] <= 0) { err("Bad sprite size"); return; }
+    con_newsprite(addr, wh[0], wh[1]);
+}
+
+// SPRITETARGET addr | SPRITETARGET OFF : redirect drawing into a sprite (or back).
+static void stmt_spritetarget(void) {
+    lex_next();
+    if (word_is("OFF")) { lex_next(); con_target_screen(); return; }
+    long addr = (long)need_num(); if (g_err) return;
+    if (con_target_sprite(addr) < 0) err("Bad sprite");
+}
+
+// TILEMAP sheet,map,cols,rows,tilew,tileh,scrollx,scrolly : draw a tile grid.
+static void stmt_tilemap(void) {
+    lex_next();
+    long sheet = (long)need_num(); if (!expect(T_COMMA)) return;
+    long map   = (long)need_num(); if (!expect(T_COMMA)) return;
+    int v[6];                                      // cols,rows,tilew,tileh,scrollx,scrolly
+    if (!read_nums(v, 6)) return;
+    con_tilemap(sheet, map, v[0], v[1], v[2], v[3], v[4], v[5]);
+}
+
+// --- Collection statements --------------------------------------------------
+// Copy a just-read string key into a stable local buffer: the value expression
+// that follows may run the GC and move the key's bytes in the string heap.
+static int grab_key(value_t k, char *buf) {
+    int n = k.len; if (n > MAX_STR) n = MAX_STR;
+    for (int i = 0; i < n; i++) buf[i] = k.str[i];
+    return n;
+}
+
+// DICTSET d, key$, value   |   DICTDEL d, key$
+static void stmt_dictset(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    value_t k = need_str(); if (g_err) return;
+    char key[MAX_STR]; int klen = grab_key(k, key);
+    if (!expect(T_COMMA)) return;
+    value_t v = eval_expr(); if (g_err) return;
+    dict_t *D = (dict_t *)coll_get(h, CT_DICT); if (!D) return;
+    dict_set(D, key, klen, v);
+}
+static void stmt_dictdel(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    value_t k = need_str(); if (g_err) return;
+    char key[MAX_STR]; int klen = grab_key(k, key);
+    dict_t *D = (dict_t *)coll_get(h, CT_DICT); if (!D) return;
+    dict_del(D, key, klen);
+}
+
+// PUSH L, value  |  LISTSET L, i, value  |  LISTINS L, i, value  |  LISTDEL L, i
+static void stmt_push(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    value_t v = eval_expr(); if (g_err) return;
+    list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) return;
+    list_ins(L, L->len, v);                        // append
+}
+static void stmt_listset(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    int i = (int)need_num(); if (!expect(T_COMMA)) return;
+    value_t v = eval_expr(); if (g_err) return;
+    list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) return;
+    if (i < 0 || i >= L->len) { err("Index out of range"); return; }
+    cval_store(&L->item[i], v);
+}
+static void stmt_listins(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    int i = (int)need_num(); if (!expect(T_COMMA)) return;
+    value_t v = eval_expr(); if (g_err) return;
+    list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) return;
+    list_ins(L, i, v);
+}
+static void stmt_listdel(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    int i = (int)need_num(); if (g_err) return;
+    list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) return;
+    list_del(L, i);
+}
+
+// TREESET t, key, value   |   TREEDEL t, key
+static void stmt_treeset(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    double key = need_num(); if (!expect(T_COMMA)) return;
+    value_t v = eval_expr(); if (g_err) return;
+    tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) return;
+    tree_set(T, key, v);
+}
+static void stmt_treedel(void) {
+    lex_next();
+    double h = need_num(); if (!expect(T_COMMA)) return;
+    double key = need_num(); if (g_err) return;
+    tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) return;
+    tree_del(T, key);
+}
+
+// BUFFER ON | BUFFER OFF : enable/disable off-screen drawing (double buffering).
+// While on, every draw targets the back buffer and the screen freezes until FLIP.
+static void stmt_buffer(void) {
+    lex_next();                                   // consume BUFFER
+    if (tok == T_KW && tok_kw == KW_ON) {
+        lex_next();
+        if (con_backbuffer(1) < 0) err("Could not allocate the back buffer");
+    } else if (word_is("OFF")) {
+        lex_next();
+        con_backbuffer(0);
+    } else {
+        err("Expected ON or OFF");
+    }
+}
+
+// FLIP : present the back buffer to the screen (a no-op when buffering is off).
+static void stmt_flip(void) {
+    lex_next();                                   // consume FLIP
+    con_flip();
 }
 
 // SAVESPRITE addr, "file" : write a sprite (LOADSPRITE result or GGET capture)
@@ -3896,7 +4783,17 @@ static void exec_statement(void) {
             case KW_SOUND: stmt_sound();   return;
             case KW_TONE:  stmt_tone();    return;
             case KW_POKE:  stmt_poke_kw(); return;
+            case KW_EXEC:  stmt_exec();    return;
+            case KW_PINMODE: stmt_pinmode(); return;
+            case KW_PIN:     stmt_pin();     return;   // write form; read form PIN(n) in expressions
+            case KW_PINSET:  stmt_pinset(1); return;
+            case KW_PINCLR:  stmt_pinset(0); return;
+            case KW_I2CWRITE: stmt_i2cwrite(); return;
+            case KW_I2CREAD:  stmt_i2cread();  return;
             case KW_SCREEN: stmt_screen(); return;
+            case KW_WAIT:   stmt_wait();   return;
+            case KW_DELAY:  stmt_delay();  return;
+            case KW_KEYBOARD: stmt_keyboard(); return;
             case KW_MODE:  stmt_mode();    return;
             case KW_GCOL:  stmt_gcol();    return;
             case KW_PLOT:  stmt_plot();    return;
@@ -3910,6 +4807,20 @@ static void exec_statement(void) {
             case KW_FILL:      stmt_fill();      return;
             case KW_GGET:      stmt_gget();      return;
             case KW_GPUT:      stmt_gput();      return;
+            case KW_BUFFER:    stmt_buffer();    return;
+            case KW_FLIP:      stmt_flip();      return;
+            case KW_GTINT:     stmt_gtint();     return;
+            case KW_NEWSPRITE:    stmt_newsprite();    return;
+            case KW_SPRITETARGET: stmt_spritetarget(); return;
+            case KW_TILEMAP:      stmt_tilemap();      return;
+            case KW_DICTSET:  stmt_dictset();  return;
+            case KW_DICTDEL:  stmt_dictdel();  return;
+            case KW_PUSH:     stmt_push();     return;
+            case KW_LISTSET:  stmt_listset();  return;
+            case KW_LISTINS:  stmt_listins();  return;
+            case KW_LISTDEL:  stmt_listdel();  return;
+            case KW_TREESET:  stmt_treeset();  return;
+            case KW_TREEDEL:  stmt_treedel();  return;
             case KW_SAVESPRITE: stmt_savesprite(); return;
             case KW_SAVE:  stmt_save();    return;
             case KW_LOAD:  stmt_load();    return;
@@ -3976,7 +4887,7 @@ static void exec_statement(void) {
             case KW_EDIT:     stmt_edit();     return;
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
                            for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;
-                           seed_heap_reset();
+                           seed_heap_reset(); coll_reset();
                            for_sp = 0; gosub_sp = 0; return;
             default:       err("That keyword can't be used as a command");  return;
         }
@@ -4038,11 +4949,70 @@ static void scan_defs(void) {
     }
 }
 
+// Run a registered event handler PROC (parameterless). call_named parses its
+// argument list from the current token, so force T_EOL first to bind zero args;
+// call_named saves and restores the rest of the caller's lexer state itself.
+static void dispatch_handler(const char *name) {
+    tok = T_EOL;
+    call_named(0, name, 0);
+}
+
+// Check every armed event source and run its handler if it has fired. Called at
+// statement/line boundaries from the run loops. `in_event` blocks re-entry so a
+// handler can't itself be interrupted by another event.
+static void poll_events(void) {
+    if (in_event || g_err || g_stop) return;
+    if (!ev_timer.active && !ev_mouse.active && !ev_key.active) {
+        int any = 0;
+        for (int i = 0; i < EV_PIN_MAX; i++) if (ev_pin[i].active) { any = 1; break; }
+        if (!any) return;
+    }
+    in_event = 1;
+    if (ev_timer.active) {
+        unsigned long long now = con_micros();
+        if ((long long)(now - ev_timer.last_us) >= ev_timer.interval_us) {
+            ev_timer.last_us = now;
+            dispatch_handler(ev_timer.proc);
+        }
+    }
+    for (int i = 0; i < EV_PIN_MAX && !g_err && !g_stop; i++) {
+        if (!ev_pin[i].active) continue;
+        // Fire on a hardware-latched edge (catches transient pulses on real
+        // hardware) OR a software level change of the requested direction (works
+        // everywhere, including QEMU which doesn't model the edge detector).
+        int cur = gpio_read(ev_pin[i].pin);
+        int latched = gpio_poll_edge(ev_pin[i].pin);
+        int e = ev_pin[i].edge, prev = ev_pin[i].level;
+        int fire = latched
+                || (e == 2 && cur != prev)
+                || (e == 1 && prev == 0 && cur == 1)
+                || (e == 0 && prev == 1 && cur == 0);
+        ev_pin[i].level = cur;
+        if (fire) dispatch_handler(ev_pin[i].proc);
+    }
+    if (ev_mouse.active && !g_err && !g_stop) {
+        int x, y, b; con_mouse(&x, &y, &b);
+        if (x != ev_mouse.x || y != ev_mouse.y || b != ev_mouse.b) {
+            ev_mouse.x = x; ev_mouse.y = y; ev_mouse.b = b;
+            dispatch_handler(ev_mouse.proc);
+        }
+    }
+    // A keypress: consume it and hold it in g_pending_key so the handler's GET /
+    // INKEY reads the same key. Skip if a key is already waiting to be read.
+    if (ev_key.active && !g_err && !g_stop && g_pending_key < 0) {
+        int k = con_inkey(0);
+        if (k >= 0) { g_pending_key = k; dispatch_handler(ev_key.proc); }
+    }
+    in_event = 0;
+}
+
 // Execute program lines starting at (pc,off) until ENDPROC / =<expr> (g_return),
 // END (g_stop), end of program, or an error. Used for PROC and FN bodies.
 static void run_body(int pc, int off) {
     g_return = 0;
     while (pc >= 0 && pc < prog_n && !g_err && !g_stop && !g_return) {
+        poll_events();                           // fire any events between lines
+        if (g_err || g_stop || g_return) break;
         cur_line_idx = pc;
         g_runline = prog[pc].num;
         g_branch = 0;
@@ -4080,7 +5050,9 @@ static void run_program(int start_pc, int start_off) {
     scratch_base = 0;
     for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;   // fresh run reloads its seeds
     seed_heap_reset();                                       // and starts with a clean heap
+    coll_reset();                                            // ... including its collections
     sound_reset();                                           // silence any leftover notes
+    if (outer) events_reset();                               // cancel any ON TIMER/PIN/MOUSE
     data_pc = 0;
     data_off = -1;
     scan_defs();                                            // now also sees module PROC/FN
@@ -4091,6 +5063,8 @@ static void run_program(int start_pc, int start_off) {
     // falling off the end of main must not wander into them.
     while (pc >= 0 && pc < main_n && !g_err && !g_stop) {
         sound_pump();                            // advance any queued/background notes
+        poll_events();                           // fire ON TIMER/PIN/MOUSE handlers
+        if (g_err || g_stop) break;
         cur_line_idx = pc;
         g_runline = prog[pc].num;
         g_branch = 0;
@@ -4121,6 +5095,7 @@ static void run_program(int start_pc, int start_off) {
         try_sp = 0;
         prog_n = main_n;                       // strip imported module lines
         con_screen(0, 0);                      // restore the startup resolution (no-op if unchanged)
+        con_backbuffer(0);                     // un-buffer so the prompt draws to the visible screen
     }
 }
 

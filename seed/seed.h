@@ -27,7 +27,25 @@
 #include <stddef.h>
 
 #define SEED_MAGIC        0x44454553u   // 'S','E','E','D' little-endian
-#define SEED_ABI_VERSION  3u            // v2 added alloc/free; v3 realloc/alloc_aligned
+#define SEED_ABI_VERSION  6u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num
+
+// File open modes for the file_open service (match the storage layer). The seed
+// <stdio.h> maps fopen's "r"/"w"/"a"/"r+"/... strings onto these.
+#define SEED_FOPEN_READ   0            // existing file, read only        ("r")
+#define SEED_FOPEN_WRITE  1            // create/truncate, read+write     ("w")
+#define SEED_FOPEN_UPDATE 2            // existing file, read+write       ("r+")
+
+// GPIO pin modes and pull settings, for the gpio_mode / gpio_pull services below
+// (values match the interpreter's own gpio driver).
+#define SEED_GPIO_IN        0
+#define SEED_GPIO_OUT       1
+#define SEED_GPIO_ALT       2
+#define SEED_GPIO_PULL_NONE 0
+#define SEED_GPIO_PULL_UP   1
+#define SEED_GPIO_PULL_DOWN 2
+// Edge argument for gpio_wait.
+#define SEED_GPIO_FALLING   0
+#define SEED_GPIO_RISING    1
 
 // First bytes of a .sed file. The entry point sits at byte `entry_off` from the
 // start of the blob (forced by seed.ld to be right after this header).
@@ -86,6 +104,44 @@ typedef struct SeedServices {
     // --- dynamic memory (ABI v3) ------------------------------------------
     void *(*realloc)(void *ptr, unsigned nbytes);            // grow/shrink a block
     void *(*alloc_aligned)(unsigned alignment, unsigned nbytes);  // alignment = pow2
+
+    // --- GPIO (ABI v4) -----------------------------------------------------
+    // Direct access to the Raspberry Pi 4's 40-pin header (BCM numbering, pins
+    // 0..27), for seeds that bit-bang a protocol or toggle pins faster than the
+    // interpreter can. gpio_avail is 0 on the host build (everything else then
+    // does nothing / reads 0), so a portable seed can check it first.
+    int  (*gpio_avail)(void);                       // 1 on the Pi/QEMU, 0 on host
+    int  (*gpio_mode)(int pin, int mode, int alt);  // SEED_GPIO_IN/OUT/ALT; <0 on bad pin
+    int  (*gpio_pull)(int pin, int pull);           // SEED_GPIO_PULL_*; <0 on bad pin
+    void (*gpio_write)(int pin, int level);         // drive an output 0/1
+    int  (*gpio_read)(int pin);                     // read a pin -> 0/1
+    void (*gpio_set)(uint32_t mask);                // set every 1-bit pin (atomic, GPSET0)
+    void (*gpio_clr)(uint32_t mask);                // clear every 1-bit pin (atomic, GPCLR0)
+    uint32_t (*gpio_level)(void);                   // all pin levels at once (low 28 bits)
+    int  (*gpio_wait)(int pin, int edge, int timeout_cs);  // edge SEED_GPIO_*; pin or -1
+
+    // --- SD-card files (ABI v5) -------------------------------------------
+    // The minimal file interface the seed <stdio.h> is built on. These go
+    // straight to the same filesystem BASIC uses (long file names included), so
+    // a seed can read and write real files on the card. Handles are small
+    // positive integers; 0 means failure. There are only a few channels in
+    // total, shared with BASIC's OPEN* — a seed should close what it opens.
+    int  (*file_open)(const char *name, int mode);       // SEED_FOPEN_*; handle>0 or 0
+    int  (*file_close)(int fh);                          // 0 ok, <0 error
+    int  (*file_read)(int fh, void *buf, int n);         // -> bytes read (0 = EOF), <0 error
+    int  (*file_write)(int fh, const void *buf, int n);  // -> bytes written, <0 error
+    long (*file_seek)(int fh, long off, int whence);     // whence 0/1/2 -> new pos, <0 error
+    long (*file_size)(int fh);                           // length in bytes, <0 error
+    int  (*file_eof)(int fh);                            // 1 at end-of-file, else 0
+    int  (*file_remove)(const char *name);              // delete a file; 0 ok, <0 error
+
+    // --- number formatting (ABI v6) ---------------------------------------
+    // Format a double into `out` (needs >= 32 bytes) the way BASIC's PRINT does
+    // (up to 9 significant digits, fixed-point or E-notation as appropriate,
+    // "NAN"/"INF" for those); returns the number of characters written. This is
+    // what the seed <stdio.h> uses for the printf %f/%e/%g conversions, so seed
+    // and BASIC number output match exactly.
+    int  (*fmt_num)(double v, char *out);
 } SeedServices;
 
 // A seed's entry point. Returns a number (also usable as a status); a string

@@ -214,26 +214,139 @@ static uint32_t ent_cluster(const uint8_t *e) {
     return rd16(e + 26) | ((uint32_t)rd16(e + 20) << 16);
 }
 
-// Locate a directory entry by 8.3 name within directory `dir_clus`. On success
-// fills *lba/*off with the entry's location and copies the 32-byte entry into
-// ent. Returns 0, else <0.
-static int dir_find_in(uint32_t dir_clus, const char n83[11],
+// --- VFAT long file names (read side) ---------------------------------------
+// A long name is stored as a run of 32-byte entries (attr 0x0F) placed directly
+// *before* the file's 8.3 entry, in reverse order. Each fragment carries 13
+// UCS-2 characters and a checksum of the 8.3 name, so an orphaned run (short
+// entry rewritten by a non-LFN tool) can be detected and ignored. We rebuild the
+// name while scanning a directory forward, narrowing UCS-2 to the console's
+// 8-bit character set (code points >= 256, which the font can't render, become
+// '_'). Phase 1 is read-only: names are decoded for enumeration and matching,
+// but creating/deleting long names is not done here (see stg_write/stg_delete,
+// which stay 8.3-only, so no orphaned fragments are ever produced).
+#define NAME_MAX 256
+
+// Checksum of the 11-byte short name that every LFN fragment stores (byte 13).
+static uint8_t lfn_checksum(const uint8_t n83[11]) {
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++) sum = ((sum & 1) << 7) + (sum >> 1) + n83[i];
+    return sum;
+}
+
+// Accumulates LFN fragments as a directory is scanned in order.
+typedef struct {
+    char    name[NAME_MAX];   // reconstructed name, forward order, NUL-terminated
+    int     want;             // fragment count promised by the "last" (0x40) entry
+    int     seen;             // fragments actually gathered
+    uint8_t cksum;            // short-name checksum they must all carry
+    int     started;          // a 0x40 entry has opened a run
+    int     ok;               // the run is still consistent
+} lfn_acc;
+
+static void lfn_reset(lfn_acc *a) {
+    a->started = 0; a->ok = 0; a->seen = 0; a->want = 0; a->name[0] = 0;
+}
+
+// Feed one 0x0F fragment.
+static void lfn_feed(lfn_acc *a, const uint8_t *d) {
+    uint8_t seq = d[0];
+    if (seq == 0xE5) { lfn_reset(a); return; }           // deleted fragment
+    if (seq & 0x40) {                                    // "last logical" = first seen
+        lfn_reset(a);
+        a->started = 1; a->ok = 1;
+        a->want = seq & 0x1F;
+        a->cksum = d[13];
+        for (int i = 0; i < NAME_MAX; i++) a->name[i] = 0;
+    }
+    if (!a->started) return;                             // fragment with no opener
+    int n = seq & 0x1F;
+    if (n < 1 || n > 20 || d[13] != a->cksum) { a->ok = 0; return; }
+    static const int pos[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+    int base = (n - 1) * 13;
+    for (int i = 0; i < 13; i++) {
+        uint16_t u = (uint16_t)d[pos[i]] | ((uint16_t)d[pos[i] + 1] << 8);
+        char c;
+        if (u == 0x0000 || u == 0xFFFF) c = 0;           // terminator / padding
+        else c = (u < 256) ? (char)u : '_';
+        int idx = base + i;
+        if (idx < NAME_MAX - 1) a->name[idx] = c;
+    }
+    a->seen++;
+}
+
+// If the accumulated run is complete and matches the 8.3 name `n83`, copy the
+// long name into out[NAME_MAX] and return 1; otherwise return 0.
+static int lfn_take(const lfn_acc *a, const uint8_t n83[11], char *out) {
+    if (!(a->started && a->ok && a->want > 0 && a->seen == a->want &&
+          a->cksum == lfn_checksum(n83)))
+        return 0;
+    int i = 0; while (a->name[i] && i < NAME_MAX - 1) { out[i] = a->name[i]; i++; }
+    out[i] = 0;
+    return 1;
+}
+
+// ASCII case-insensitive string compare (Latin-1 accents compare exactly).
+static int name_ci_eq(const char *a, const char *b) {
+    for (;; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'a' && x <= 'z') x -= 32;
+        if (y >= 'a' && y <= 'z') y -= 32;
+        if (x != y) return 0;
+        if (!x) return 1;
+    }
+}
+
+// Build the printable 8.3 name of an entry into out (>= 13 bytes), honouring the
+// VFAT lowercase flags (byte 12: 0x08 = lowercase base, 0x10 = lowercase ext) so
+// a PC-written "readme.txt" that fits 8.3 still reads back lower case.
+static void short_name(const uint8_t *d, char *out) {
+    int k = 0;
+    int lc_base = d[12] & 0x08, lc_ext = d[12] & 0x10;
+    for (int i = 0; i < 8 && d[i] != ' '; i++) {
+        char c = (char)d[i];
+        if (lc_base && c >= 'A' && c <= 'Z') c += 32;
+        out[k++] = c;
+    }
+    if (d[8] != ' ' || d[9] != ' ' || d[10] != ' ') {
+        out[k++] = '.';
+        for (int i = 8; i < 11 && d[i] != ' '; i++) {
+            char c = (char)d[i];
+            if (lc_ext && c >= 'A' && c <= 'Z') c += 32;
+            out[k++] = c;
+        }
+    }
+    out[k] = 0;
+}
+
+// Locate a directory entry within `dir_clus`, matching either the padded 8.3
+// name `n83` (fast path) or, when `want` is non-NULL, a VFAT long name compared
+// case-insensitively against `want`. On success fills *lba/*off with the 8.3
+// entry's location and copies the 32-byte entry into ent. Returns 0, else <0.
+static int dir_find_in(uint32_t dir_clus, const char n83[11], const char *want,
                        uint32_t *lba, int *off, uint8_t *ent) {
     uint8_t s[SECSZ];
+    lfn_acc acc; lfn_reset(&acc);
     for (uint32_t n = 0; ; n++) {
         uint32_t l = dir_sector(dir_clus, n);
         if (!l) return STG_ENOTFOUND;
         if (sd_read(l, 1, s)) return STG_EIO;
         for (int e = 0; e < SECSZ; e += 32) {
-            if (s[e] == 0x00) return STG_ENOTFOUND;     // end of directory
-            if (s[e] == 0xE5) continue;                 // deleted
-            if (s[e + 11] == 0x0F) continue;            // long-filename entry
-            if (name_eq(s + e, n83)) {
+            uint8_t *d = s + e;
+            if (d[0] == 0x00) return STG_ENOTFOUND;     // end of directory
+            if (d[0] == 0xE5) { lfn_reset(&acc); continue; }      // deleted
+            if (d[11] == 0x0F) { lfn_feed(&acc, d); continue; }   // LFN fragment
+            int hit = name_eq(d, n83);
+            if (!hit && want) {
+                char lname[NAME_MAX];
+                if (lfn_take(&acc, d, lname) && name_ci_eq(lname, want)) hit = 1;
+            }
+            if (hit) {
                 if (lba) *lba = l;
                 if (off) *off = e;
-                if (ent) for (int i = 0; i < 32; i++) ent[i] = s[e + i];
+                if (ent) for (int i = 0; i < 32; i++) ent[i] = d[i];
                 return 0;
             }
+            lfn_reset(&acc);                            // this 8.3 entry wasn't ours
         }
     }
 }
@@ -292,6 +405,214 @@ static int write_dir_entry(uint32_t lba, int off, const char n83[11],
     return sd_write(lba, 1, s) ? STG_EIO : 0;
 }
 
+// --- VFAT long file names (write side) --------------------------------------
+// Creating a long name means writing the run of 0x0F fragment entries followed
+// by a normal 8.3 entry whose short name is a unique NAME~n alias. Deleting one
+// means clearing that whole run, not just the 8.3 entry (or a PC would see
+// orphaned fragments). A name that already fits 8.3 skips all of this and gets a
+// single plain entry, exactly as before.
+
+// Is `c` (assumed already upper-cased) legal in a FAT short (8.3) name?
+static int sfc_ok(char c) {
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    for (const char *p = "!#$%&'()-@^_`{}~"; *p; p++) if (c == *p) return 1;
+    return 0;
+}
+
+// True if `name` can be stored as a plain 8.3 entry with no loss (<=8 base, <=3
+// ext, one dot, every character legal case-insensitively). Otherwise it needs a
+// long-name entry. Spaces, extra dots and non-ASCII all force a long name.
+static int name_is_83(const char *name) {
+    int base = 0, ext = 0, seen_dot = 0, i = 0;
+    for (i = 0; name[i]; i++) {
+        char c = name[i];
+        if (c == '.') { if (seen_dot) return 0; seen_dot = 1; continue; }
+        char u = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        if (!sfc_ok(u)) return 0;
+        if (!seen_dot) { if (++base > 8) return 0; }
+        else           { if (++ext  > 3) return 0; }
+    }
+    if (i == 0 || base == 0) return 0;                  // "" or ".BAS"
+    if (seen_dot && ext == 0) return 0;                 // "NAME."
+    return 1;
+}
+
+// Build the basis (up to 8 chars) and extension (up to 3) for a short alias from
+// a long name: drop spaces and interior dots, upper-case, map anything illegal to
+// '_'. The extension is taken from the last dot.
+static void short_basis(const char *name, char *basis, int *blen, char *ext, int *elen) {
+    int n = 0; while (name[n]) n++;
+    int last_dot = -1;
+    for (int i = n - 1; i >= 0; i--) if (name[i] == '.') { last_dot = i; break; }
+    int base_end = (last_dot >= 0) ? last_dot : n;
+    int bl = 0, el = 0;
+    for (int i = 0; i < base_end && bl < 8; i++) {
+        char c = name[i];
+        if (c == ' ' || c == '.') continue;
+        if (c >= 'a' && c <= 'z') c -= 32;
+        basis[bl++] = sfc_ok(c) ? c : '_';
+    }
+    if (bl == 0) basis[bl++] = '_';
+    if (last_dot >= 0)
+        for (int i = last_dot + 1; name[i] && el < 3; i++) {
+            char c = name[i];
+            if (c == ' ') continue;
+            if (c >= 'a' && c <= 'z') c -= 32;
+            ext[el++] = sfc_ok(c) ? c : '_';
+        }
+    *blen = bl; *elen = el;
+}
+
+// Choose a unique short alias "BASIS~n.EXT" for `name` within `parent`, into the
+// padded 11-byte form. Returns 0, or STG_EFULL if a million names collide.
+static int make_alias(uint32_t parent, const char *name, char out83[11]) {
+    char basis[8], ext[3]; int bl, el;
+    short_basis(name, basis, &bl, ext, &el);
+    for (uint32_t seq = 1; seq < 1000000u; seq++) {
+        char num[7]; int nl = 0; uint32_t v = seq;
+        char tmp[7]; int tl = 0;
+        do { tmp[tl++] = (char)('0' + v % 10); v /= 10; } while (v);
+        for (int i = 0; i < tl; i++) num[i] = tmp[tl - 1 - i];
+        nl = tl;
+        int keep = 8 - 1 - nl;                          // basis chars before "~n"
+        if (keep < 1) keep = 1;
+        if (keep > bl) keep = bl;
+        char e[11]; for (int i = 0; i < 11; i++) e[i] = ' ';
+        int k = 0;
+        for (int i = 0; i < keep; i++) e[k++] = basis[i];
+        e[k++] = '~';
+        for (int i = 0; i < nl; i++) e[k++] = num[i];
+        for (int i = 0; i < el; i++) e[8 + i] = ext[i];
+        if (dir_find_in(parent, e, 0, 0, 0, 0) == STG_ENOTFOUND) {
+            for (int i = 0; i < 11; i++) out83[i] = e[i];
+            return 0;
+        }
+    }
+    return STG_EFULL;
+}
+
+// Read-modify-write one raw 32-byte directory entry into (lba, off).
+static int put_raw_entry(uint32_t lba, int off, const uint8_t e[32]) {
+    uint8_t s[SECSZ];
+    if (sd_read(lba, 1, s)) return STG_EIO;
+    for (int i = 0; i < 32; i++) s[off + i] = e[i];
+    return sd_write(lba, 1, s) ? STG_EIO : 0;
+}
+
+// Find `count` consecutive free slots in `dir_clus` (growing the directory when
+// it runs out), returning each slot's (lba, off). `count` is small (<= 21).
+static int dir_find_run(uint32_t dir_clus, int count, uint32_t *lbas, int *offs) {
+    int run = 0;
+    uint8_t s[SECSZ];
+    for (uint32_t n = 0; ; n++) {
+        uint32_t l = dir_sector(dir_clus, n);
+        if (!l) {
+            uint32_t glba; int goff;                    // ran off the end: extend
+            int r = grow_dir(dir_clus, &glba, &goff);
+            if (r) return r;
+            n--; continue;                              // retry: dir_sector(n) now resolves
+        }
+        if (sd_read(l, 1, s)) return STG_EIO;
+        for (int e = 0; e < SECSZ; e += 32) {
+            if (s[e] == 0x00 || s[e] == 0xE5) {         // free slot
+                lbas[run] = l; offs[run] = e;
+                if (++run == count) return 0;
+            } else {
+                run = 0;                                // sequence broken; restart
+            }
+        }
+    }
+}
+
+// LFN fragments carry 13 UCS-2 chars at these byte offsets within the entry.
+static const int lfn_pos[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+
+// Create a directory entry for `name` (attr/cluster/size), writing an LFN run +
+// short alias when the name doesn't fit 8.3, else a single plain 8.3 entry. On
+// success returns the 8.3 entry's location in *lba/*off and its short name in
+// n83 (so the caller can update the size later).
+static int dir_create_entry(uint32_t parent, const char *name, uint8_t attr,
+                            uint32_t clus, uint32_t size,
+                            uint32_t *lba, int *off, char n83[11]) {
+    if (name_is_83(name)) {
+        name_to_83(name, n83);
+        uint32_t dlba; int doff;
+        int r = dir_find_free_in(parent, &dlba, &doff);
+        if (r) return r;
+        if ((r = write_dir_entry(dlba, doff, n83, attr, clus, size))) return r;
+        if (lba) *lba = dlba;
+        if (off) *off = doff;
+        return 0;
+    }
+
+    // Long name: alias + a run of (nfrag LFN entries + 1 short entry).
+    int r = make_alias(parent, name, n83);
+    if (r) return r;
+    int len = 0; while (name[len]) len++;
+    if (len > 255) len = 255;
+    int nfrag = (len + 12) / 13;                        // 13 UCS-2 chars per entry
+    int count = nfrag + 1;
+    uint32_t lbas[21]; int offs[21];
+    if ((r = dir_find_run(parent, count, lbas, offs))) return r;
+
+    uint8_t cksum = lfn_checksum((const uint8_t *)n83);
+    for (int i = 0; i < nfrag; i++) {                   // physical order = reverse seq
+        int seq = nfrag - i;
+        uint8_t f[32]; for (int j = 0; j < 32; j++) f[j] = 0;
+        f[0]  = (uint8_t)(seq | (i == 0 ? 0x40 : 0));   // first physical = last logical
+        f[11] = 0x0F; f[13] = cksum;                    // attr + checksum
+        int b = (seq - 1) * 13;
+        for (int j = 0; j < 13; j++) {
+            int idx = b + j;
+            uint16_t u = (idx < len) ? (uint16_t)(unsigned char)name[idx]
+                       : (idx == len) ? 0x0000 : 0xFFFF;
+            f[lfn_pos[j]] = (uint8_t)(u & 0xFF);
+            f[lfn_pos[j] + 1] = (uint8_t)(u >> 8);
+        }
+        if ((r = put_raw_entry(lbas[i], offs[i], f))) return r;
+    }
+    if ((r = write_dir_entry(lbas[nfrag], offs[nfrag], n83, attr, clus, size))) return r;
+    if (lba) *lba = lbas[nfrag];
+    if (off) *off = offs[nfrag];
+    return 0;
+}
+
+// Erase the 8.3 entry at (tgt_lba, tgt_off) together with the run of LFN
+// fragments immediately preceding it. Re-scans so the fragment slots (which may
+// live in earlier sectors) are located precisely.
+static int dir_erase(uint32_t dir_clus, uint32_t tgt_lba, int tgt_off) {
+    uint8_t s[SECSZ];
+    uint32_t run_lba[20]; int run_off[20]; int run = 0;
+    for (uint32_t n = 0; ; n++) {
+        uint32_t l = dir_sector(dir_clus, n);
+        if (!l) return STG_ENOTFOUND;
+        if (sd_read(l, 1, s)) return STG_EIO;
+        for (int e = 0; e < SECSZ; e += 32) {
+            uint8_t *d = s + e;
+            if (d[0] == 0x00) return STG_ENOTFOUND;
+            if (d[0] == 0xE5) { run = 0; continue; }
+            if (d[11] == 0x0F) {                        // gather the current run
+                if (d[0] & 0x40) run = 0;
+                if (run < 20) { run_lba[run] = l; run_off[run] = e; run++; }
+                continue;
+            }
+            if (l == tgt_lba && e == tgt_off) {         // the entry to erase
+                for (int i = 0; i < run; i++) {
+                    uint8_t t[SECSZ];
+                    if (sd_read(run_lba[i], 1, t)) return STG_EIO;
+                    t[run_off[i]] = 0xE5;
+                    if (sd_write(run_lba[i], 1, t)) return STG_EIO;
+                }
+                if (sd_read(l, 1, s)) return STG_EIO;   // re-read (a fragment may share it)
+                s[e] = 0xE5;
+                return sd_write(l, 1, s) ? STG_EIO : 0;
+            }
+            run = 0;
+        }
+    }
+}
+
 // A directory holds no files (only "."/".." and free slots). Returns 1 if empty.
 static int dir_is_empty(uint32_t dir_clus) {
     uint8_t s[SECSZ];
@@ -311,14 +632,15 @@ static int dir_is_empty(uint32_t dir_clus) {
 }
 
 // --- path resolution --------------------------------------------------------
-// Copy the next '/'-separated component of *pp into comp (max 15 chars), advance
-// *pp past it. Returns 1 if a component was read, 0 at end of the path.
-static int next_comp(const char **pp, char comp[16]) {
+// Copy the next '/'-separated component of *pp into comp (up to NAME_MAX-1
+// chars, so long names fit), advance *pp past it. Returns 1 if a component was
+// read, 0 at end of the path.
+static int next_comp(const char **pp, char comp[NAME_MAX]) {
     const char *p = *pp;
     while (*p == '/') p++;
     if (!*p) { *pp = p; return 0; }
     int i = 0;
-    while (*p && *p != '/') { if (i < 15) comp[i++] = *p; p++; }
+    while (*p && *p != '/') { if (i < NAME_MAX - 1) comp[i++] = *p; p++; }
     comp[i] = 0;
     *pp = p;
     return 1;
@@ -334,14 +656,14 @@ static int descend(uint32_t cur, const char *comp, uint32_t *out) {
         char dd[11]; for (int i = 0; i < 11; i++) dd[i] = ' ';
         dd[0] = '.'; dd[1] = '.';
         uint8_t ent[32];
-        int r = dir_find_in(cur, dd, 0, 0, ent);
+        int r = dir_find_in(cur, dd, 0, 0, 0, ent);
         if (r) return r;
         *out = ent_cluster(ent);                                        // 0 => root
         return 0;
     }
     char n83[11]; name_to_83(comp, n83);
     uint8_t ent[32];
-    int r = dir_find_in(cur, n83, 0, 0, ent);
+    int r = dir_find_in(cur, n83, comp, 0, 0, ent);                     // match long names too
     if (r) return r;
     if (!(ent[11] & 0x10)) return STG_ENOTFOUND;                        // not a directory
     *out = ent_cluster(ent);
@@ -349,12 +671,15 @@ static int descend(uint32_t cur, const char *comp, uint32_t *out) {
 }
 
 // Resolve a path to its parent directory cluster and the final component's 8.3
-// name (the leaf need not exist; the intermediate directories must). Returns
-// 0/err; STG_ENOTFOUND if the path has no final component (e.g. "" or "/").
-static int resolve_parent(const char *path, uint32_t *parent, char leaf83[11]) {
+// name (the leaf need not exist; the intermediate directories must). When
+// `leaf_orig` is non-NULL it also receives the leaf's original (long, cased)
+// spelling, so callers can match it against VFAT long names. Returns 0/err;
+// STG_ENOTFOUND if the path has no final component (e.g. "" or "/").
+static int resolve_parent(const char *path, uint32_t *parent, char leaf83[11],
+                          char *leaf_orig) {
     uint32_t cur = (path[0] == '/') ? 0 : cwd_clus;
     const char *p = path;
-    char comp[16], pending[16];
+    char comp[NAME_MAX], pending[NAME_MAX];
     int have = 0;
     while (next_comp(&p, comp)) {
         if (have) {
@@ -368,17 +693,18 @@ static int resolve_parent(const char *path, uint32_t *parent, char leaf83[11]) {
     }
     if (!have) return STG_ENOTFOUND;
     name_to_83(pending, leaf83);
+    if (leaf_orig) { int i = 0; for (; pending[i]; i++) leaf_orig[i] = pending[i]; leaf_orig[i] = 0; }
     *parent = cur;
     return 0;
 }
 
 int stg_read(const char *name, char *buf, int maxlen) {
     if (!fat_ok) return STG_ENOFS;
-    uint32_t parent; char leaf[11];
-    int r = resolve_parent(name, &parent, leaf);
+    uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
+    int r = resolve_parent(name, &parent, leaf, leaf_orig);
     if (r) return r;
     uint8_t ent[32];
-    r = dir_find_in(parent, leaf, 0, 0, ent);
+    r = dir_find_in(parent, leaf, leaf_orig, 0, 0, ent);
     if (r) return r;
     if (ent[11] & 0x10) return STG_ENOTFOUND;           // it's a directory
 
@@ -401,39 +727,35 @@ int stg_read(const char *name, char *buf, int maxlen) {
 
 int stg_delete(const char *name) {
     if (!fat_ok) return STG_ENOFS;
-    uint32_t parent; char leaf[11];
-    int r = resolve_parent(name, &parent, leaf);
+    uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
+    int r = resolve_parent(name, &parent, leaf, leaf_orig);
     if (r) return r;
     uint32_t lba; int off; uint8_t ent[32];
-    r = dir_find_in(parent, leaf, &lba, &off, ent);
+    r = dir_find_in(parent, leaf, leaf_orig, &lba, &off, ent);
     if (r) return r;
     if (ent[11] & 0x10) return STG_ENOTFOUND;           // use RMDIR for directories
 
     uint32_t clus = ent_cluster(ent);
     if (clus >= 2) free_chain(clus);
-
-    uint8_t s[SECSZ];
-    if (sd_read(lba, 1, s)) return STG_EIO;
-    s[off] = 0xE5;                                       // mark entry deleted
-    if (sd_write(lba, 1, s)) return STG_EIO;
-    return 0;
+    return dir_erase(parent, lba, off);                 // 8.3 entry + any LFN run
 }
 
 int stg_write(const char *name, const char *data, int len) {
     if (!fat_ok) return STG_ENOFS;
-    uint32_t parent; char n83[11];
-    int pr = resolve_parent(name, &parent, n83);
+    uint32_t parent; char n83[11]; char leaf_orig[NAME_MAX];
+    int pr = resolve_parent(name, &parent, n83, leaf_orig);
     if (pr) return pr;
 
     // Overwrite: drop any existing file of the same name first (refuse a dir).
-    uint8_t old[32];
-    if (dir_find_in(parent, n83, 0, 0, old) == 0) {
+    uint32_t old_lba; int old_off; uint8_t old[32];
+    if (dir_find_in(parent, n83, leaf_orig, &old_lba, &old_off, old) == 0) {
         if (old[11] & 0x10) return STG_EIO;             // a directory of that name
-        stg_delete(name);
+        uint32_t oc = ent_cluster(old);
+        if (oc >= 2) free_chain(oc);
+        dir_erase(parent, old_lba, old_off);            // 8.3 entry + any LFN run
     }
 
     // Allocate and fill the cluster chain.
-    uint32_t bytes_per_clus = sec_per_clus * SECSZ;
     uint32_t first = 0, prev = 0;
     uint32_t written = 0;
     uint8_t s[SECSZ];
@@ -452,27 +774,11 @@ int stg_write(const char *name, const char *data, int len) {
                 s[i] = (uint8_t)data[written++];
             if (sd_write(base + sc, 1, s)) { free_chain(first); return STG_EIO; }
         }
-        (void)bytes_per_clus;
     }
 
-    // Create the directory entry.
-    uint32_t dlba; int doff;
-    int r = dir_find_free_in(parent, &dlba, &doff);
+    // Create the directory entry (a long-name run when `name` needs it).
+    int r = dir_create_entry(parent, leaf_orig, 0x20, first, (uint32_t)len, 0, 0, n83);
     if (r) { if (first) free_chain(first); return r; }
-    if (sd_read(dlba, 1, s)) { if (first) free_chain(first); return STG_EIO; }
-    uint8_t *e = s + doff;
-    for (int i = 0; i < 32; i++) e[i] = 0;
-    for (int i = 0; i < 11; i++) e[i] = (uint8_t)n83[i];
-    e[11] = 0x20;                                        // attribute: archive
-    // Fixed timestamp 2026-01-01 00:00 (no RTC). Date = (year-1980)<<9|mon<<5|day.
-    uint16_t fdate = (46 << 9) | (1 << 5) | 1;
-    wr16(e + 14, 0);      wr16(e + 16, fdate);           // creation time/date
-    wr16(e + 18, fdate);                                 // last-access date
-    wr16(e + 22, 0);      wr16(e + 24, fdate);           // write time/date
-    wr16(e + 26, (uint16_t)(first & 0xFFFF));            // first cluster low
-    wr16(e + 20, (uint16_t)((first >> 16) & 0xFFFF));    // first cluster high
-    wr32(e + 28, (uint32_t)len);                         // file size
-    if (sd_write(dlba, 1, s)) { free_chain(first); return STG_EIO; }
     return 0;
 }
 
@@ -574,33 +880,29 @@ int stg_open(const char *name, int mode) {
     stg_file *f = &files[idx];
     for (int i = 0; i < (int)sizeof(*f); i++) ((uint8_t *)f)[i] = 0;
 
-    uint32_t parent; char n83[11];
-    if (resolve_parent(name, &parent, n83)) return 0;  // bad path
-    for (int i = 0; i < 11; i++) f->n83[i] = n83[i];
+    uint32_t parent; char n83[11]; char leaf_orig[NAME_MAX];
+    if (resolve_parent(name, &parent, n83, leaf_orig)) return 0;  // bad path
 
     uint32_t lba; int off; uint8_t ent[32];
-    int found = (dir_find_in(parent, n83, &lba, &off, ent) == 0);
+    int found = (dir_find_in(parent, n83, leaf_orig, &lba, &off, ent) == 0);
     if (found && (ent[11] & 0x10)) return 0;           // can't open a directory
 
     if (mode == STG_M_READ || mode == STG_M_UPDATE) {
         if (!found) return 0;                          // OPENIN/OPENUP need the file
+        for (int i = 0; i < 11; i++) f->n83[i] = ent[i];
         f->dir_lba = lba; f->dir_off = off;
         f->first_clus = ent_cluster(ent);
         f->size = rd32(ent + 28);
         f->writable = (mode == STG_M_UPDATE);
     } else {                                           // STG_M_WRITE: create/truncate
-        if (found) stg_delete(name);                   // drop old chain + entry
+        if (found) {                                   // drop old chain + entry (LFN run too)
+            uint32_t oc = ent_cluster(ent);
+            if (oc >= 2) free_chain(oc);
+            dir_erase(parent, lba, off);
+        }
         uint32_t dlba; int doff;
-        if (dir_find_free_in(parent, &dlba, &doff)) return 0;
-        uint8_t s[SECSZ];
-        if (sd_read(dlba, 1, s)) return 0;
-        uint8_t *e = s + doff;
-        for (int i = 0; i < 32; i++) e[i] = 0;
-        for (int i = 0; i < 11; i++) e[i] = (uint8_t)n83[i];
-        e[11] = 0x20;                                  // archive
-        uint16_t fdate = (46 << 9) | (1 << 5) | 1;     // 2026-01-01 (no RTC)
-        wr16(e + 16, fdate); wr16(e + 18, fdate); wr16(e + 24, fdate);
-        if (sd_write(dlba, 1, s)) return 0;
+        if (dir_create_entry(parent, leaf_orig, 0x20, 0, 0, &dlba, &doff, n83)) return 0;
+        for (int i = 0; i < 11; i++) f->n83[i] = n83[i];
         f->dir_lba = dlba; f->dir_off = doff;
         f->first_clus = 0; f->size = 0; f->writable = 1;
     }
@@ -666,6 +968,7 @@ int stg_seek(int ch, long pos) {
 void stg_dir(void) {
     if (!fat_ok) { con_puts("No disk\n"); return; }
     uint8_t s[SECSZ];
+    lfn_acc acc; lfn_reset(&acc);
     for (uint32_t n = 0; ; n++) {
         uint32_t l = dir_sector(cwd_clus, n);
         if (!l) return;
@@ -673,15 +976,14 @@ void stg_dir(void) {
         for (int e = 0; e < SECSZ; e += 32) {
             uint8_t *d = s + e;
             if (d[0] == 0x00) return;                    // end of directory
-            if (d[0] == 0xE5) continue;
-            if (d[11] == 0x0F) continue;                 // LFN
-            if (d[11] & 0x08) continue;                  // volume label
-            if (d[0] == '.') continue;                   // "." / ".."
-            for (int i = 0; i < 8; i++) if (d[i] != ' ') con_putc((char)d[i]);
-            if (d[8] != ' ' || d[9] != ' ' || d[10] != ' ') {
-                con_putc('.');
-                for (int i = 8; i < 11; i++) if (d[i] != ' ') con_putc((char)d[i]);
-            }
+            if (d[0] == 0xE5) { lfn_reset(&acc); continue; }
+            if (d[11] == 0x0F) { lfn_feed(&acc, d); continue; }   // LFN fragment
+            if (d[11] & 0x08) { lfn_reset(&acc); continue; }     // volume label
+            if (d[0] == '.')  { lfn_reset(&acc); continue; }      // "." / ".."
+            char name[NAME_MAX];
+            if (!lfn_take(&acc, d, name)) short_name(d, name);
+            lfn_reset(&acc);
+            con_puts(name);
             if (d[11] & 0x10) con_puts("  <DIR>");
             con_putc('\n');
         }
@@ -692,10 +994,10 @@ const char *stg_cwd(void) { return cwd_path; }
 
 int stg_mkdir(const char *path) {
     if (!fat_ok) return STG_ENOFS;
-    uint32_t parent; char leaf[11];
-    int r = resolve_parent(path, &parent, leaf);
+    uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
+    int r = resolve_parent(path, &parent, leaf, leaf_orig);
     if (r) return r;
-    if (dir_find_in(parent, leaf, 0, 0, 0) == 0) return STG_EEXIST;
+    if (dir_find_in(parent, leaf, leaf_orig, 0, 0, 0) == 0) return STG_EEXIST;
 
     // Allocate and zero the new directory's first cluster.
     uint32_t nc = fat_alloc();
@@ -712,29 +1014,27 @@ int stg_mkdir(const char *path) {
     if (write_dir_entry(base, 0,  dot, 0x10, nc, 0) ||
         write_dir_entry(base, 32, dd,  0x10, parent, 0)) { free_chain(nc); return STG_EIO; }
 
-    // Link it into the parent directory.
-    uint32_t dlba; int doff;
-    if ((r = dir_find_free_in(parent, &dlba, &doff))) { free_chain(nc); return r; }
-    if ((r = write_dir_entry(dlba, doff, leaf, 0x10, nc, 0))) { free_chain(nc); return r; }
+    // Link it into the parent directory (a long-name run when the name needs it).
+    char used83[11];
+    if ((r = dir_create_entry(parent, leaf_orig, 0x10, nc, 0, 0, 0, used83))) {
+        free_chain(nc); return r;
+    }
     return 0;
 }
 
 int stg_rmdir(const char *path) {
     if (!fat_ok) return STG_ENOFS;
-    uint32_t parent; char leaf[11];
-    int r = resolve_parent(path, &parent, leaf);
+    uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
+    int r = resolve_parent(path, &parent, leaf, leaf_orig);
     if (r) return r;
     uint32_t lba; int off; uint8_t ent[32];
-    r = dir_find_in(parent, leaf, &lba, &off, ent);
+    r = dir_find_in(parent, leaf, leaf_orig, &lba, &off, ent);
     if (r) return r;
     if (!(ent[11] & 0x10)) return STG_ENOTFOUND;         // not a directory
     uint32_t clus = ent_cluster(ent);
     if (!dir_is_empty(clus)) return STG_ENOTEMPTY;
     if (clus >= 2) free_chain(clus);
-    uint8_t s[SECSZ];
-    if (sd_read(lba, 1, s)) return STG_EIO;
-    s[off] = 0xE5;                                        // mark entry deleted
-    return sd_write(lba, 1, s) ? STG_EIO : 0;
+    return dir_erase(parent, lba, off);                  // 8.3 entry + any LFN run
 }
 
 // Adjust the display path for a "/COMP" push or a ".." pop.
@@ -762,7 +1062,7 @@ int stg_chdir(const char *path) {
     if (path[0] == '/') { newpath[0] = '/'; newpath[1] = 0; }
     else { int i = 0; for (; cwd_path[i]; i++) newpath[i] = cwd_path[i]; newpath[i] = 0; }
 
-    const char *p = path; char comp[16];
+    const char *p = path; char comp[NAME_MAX];
     while (next_comp(&p, comp)) {
         uint32_t nxt;
         int r = descend(cur, comp, &nxt);
@@ -784,7 +1084,7 @@ int stg_chdir(const char *path) {
 // starting directory (root for a leading '/', otherwise the current directory).
 static int resolve_dir(const char *path, uint32_t *out) {
     uint32_t cur = (path[0] == '/') ? 0 : cwd_clus;
-    const char *p = path; char comp[16];
+    const char *p = path; char comp[NAME_MAX];
     while (next_comp(&p, comp)) {
         uint32_t nxt;
         int r = descend(cur, comp, &nxt);
@@ -800,6 +1100,7 @@ static uint32_t enum_clus;      // directory being scanned (0 = root)
 static uint32_t enum_n;         // current sector index within that directory
 static int      enum_e;         // current byte offset within the sector
 static int      enum_active;
+static lfn_acc  enum_lfn;       // long-name fragments gathered so far this scan
 
 int stg_diropen(const char *path) {
     if (!fat_ok) return STG_ENOFS;
@@ -807,6 +1108,7 @@ int stg_diropen(const char *path) {
     int r = resolve_dir(path, &clus);
     if (r) return r;
     enum_clus = clus; enum_n = 0; enum_e = 0; enum_active = 1;
+    lfn_reset(&enum_lfn);
     return 0;
 }
 
@@ -822,17 +1124,13 @@ int stg_dirnext(stg_dirent *out) {
             uint8_t *d = s + enum_e;
             enum_e += 32;
             if (d[0] == 0x00) { enum_active = 0; return 0; } // end-of-directory marker
-            if (d[0] == 0xE5) continue;                      // deleted
-            if (d[11] == 0x0F) continue;                     // long-file-name fragment
-            if (d[11] & 0x08) continue;                      // volume label
-            if (d[0] == '.') continue;                       // "." / ".."
-            int k = 0;                                       // build "NAME.EXT"
-            for (int i = 0; i < 8 && d[i] != ' '; i++) out->name[k++] = (char)d[i];
-            if (d[8] != ' ' || d[9] != ' ' || d[10] != ' ') {
-                out->name[k++] = '.';
-                for (int i = 8; i < 11 && d[i] != ' '; i++) out->name[k++] = (char)d[i];
-            }
-            out->name[k] = 0;
+            if (d[0] == 0xE5) { lfn_reset(&enum_lfn); continue; }   // deleted
+            if (d[11] == 0x0F) { lfn_feed(&enum_lfn, d); continue; } // LFN fragment
+            if (d[11] & 0x08) { lfn_reset(&enum_lfn); continue; }    // volume label
+            if (d[0] == '.')  { lfn_reset(&enum_lfn); continue; }    // "." / ".."
+            // Prefer the reconstructed long name; fall back to the 8.3 name.
+            if (!lfn_take(&enum_lfn, d, out->name)) short_name(d, out->name);
+            lfn_reset(&enum_lfn);
             out->is_dir = (d[11] & 0x10) ? 1 : 0;
             out->size   = (long)rd32(d + 28);
             uint16_t wt = rd16(d + 22), wd = rd16(d + 24);   // write time / date

@@ -28,13 +28,80 @@ static int clipped(int x, int y) {
     return 0;
 }
 
+// --- draw target / double buffering -----------------------------------------
+// The primitives above all write through fb_buf/fb_width/fb_height/
+// fb_pitch_words: the "active" surface. Normally that is the real framebuffer
+// ("front"); gfx_backbuffer(1) points it at an off-screen back buffer instead,
+// so a whole frame can be composed unseen and shown at once by gfx_flip(). The
+// front surface is remembered so we can switch back and copy to it.
+static uint32_t *front_buf;
+static uint32_t  front_width, front_height, front_pitch_words;
+static int       buffered = 0;          // BUFFER ON: the "screen" is the back buffer
+static int       targeting_sprite = 0;  // SPRITETARGET: drawing into a sprite
+
+// Back-buffer store, sized to the largest resolution SCREEN allows (1920x1080).
+// A static store (like the image arenas) keeps the driver heap-free.
+#define BACK_CAP (1920u * 1080u)
+static uint32_t back_store[BACK_CAP] __attribute__((aligned(16)));
+
+// Point the active surface at the current "screen": the back buffer when
+// buffering is on, otherwise the real framebuffer.
+static void gfx_apply_screen(void) {
+    if (buffered) {
+        fb_buf = back_store; fb_pitch_words = front_width;
+    } else {
+        fb_buf = front_buf;  fb_pitch_words = front_pitch_words;
+    }
+    fb_width = front_width; fb_height = front_height;
+}
+
 void init_graphics(uint32_t *fb, uint32_t w, uint32_t h, uint32_t pitch) {
     fb_buf         = fb;
     fb_width       = w;
     fb_height      = h;
     fb_pitch_words = pitch >> 2;
     clip_on        = 0;
+    // A (re)configured framebuffer becomes the front surface, un-buffered.
+    front_buf         = fb;
+    front_width       = w;
+    front_height      = h;
+    front_pitch_words = pitch >> 2;
+    buffered          = 0;
+    targeting_sprite  = 0;
 }
+
+int gfx_backbuffer(int on) {
+    if (on && (uint64_t)front_width * front_height > BACK_CAP) return -1;
+    buffered = on ? 1 : 0;
+    if (!targeting_sprite) gfx_apply_screen();   // don't disturb an active sprite target
+    return 0;
+}
+
+// SPRITETARGET: redirect all drawing into an arbitrary WxH surface (tightly
+// packed, pitch = w). SPRITETARGET OFF restores the screen (front or back).
+void gfx_set_target(uint32_t *buf, uint32_t w, uint32_t h) {
+    fb_buf = buf; fb_width = w; fb_height = h; fb_pitch_words = w;
+    clip_on = 0;                     // the old clip was in a different surface's space
+    targeting_sprite = 1;
+}
+void gfx_reset_target(void) {
+    targeting_sprite = 0;
+    clip_on = 0;
+    gfx_apply_screen();
+}
+
+// Present the back buffer: copy it row by row onto the front (the front pitch may
+// exceed its width, so we cannot copy in one block).
+void gfx_flip(void) {
+    if (!buffered) return;
+    for (uint32_t y = 0; y < front_height; y++) {
+        uint32_t *d = front_buf  + (uint64_t)y * front_pitch_words;
+        uint32_t *s = back_store + (uint64_t)y * front_width;
+        for (uint32_t x = 0; x < front_width; x++) d[x] = s[x];
+    }
+}
+
+int gfx_buffered(void) { return buffered; }
 
 void putpixel(int x, int y, uint32_t color) {
     if (clipped(x, y)) return;

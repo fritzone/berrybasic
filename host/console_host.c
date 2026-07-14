@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "console.h"
+#include "usb_hid.h"
 
 void con_putc(char c) { putchar(c); }
 
@@ -97,10 +98,28 @@ int con_screen(int w, int h) {
 int con_screen_w(void) { return host_scr_w; }
 int con_screen_h(void) { return host_scr_h; }
 
+// Keyboard layout: forward to the shared HID decoder (compiled into the host
+// build too), so KEYBOARD / KEYBOARD$ behave identically to the target.
+int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
+const char *con_get_keyboard(void)             { return hid_layout_code(); }
+
 void con_gcol(int action, int colour) { (void)action; (void)colour; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}
 int  con_point(int x, int y) { (void)x; (void)y; return -1; }
+
+// Double buffering: no framebuffer on the host, so drawing is a no-op regardless,
+// but track the on/off state so BUFFER ON/OFF and con_buffered() behave/are testable.
+static int host_buffered = 0;
+int  con_backbuffer(int on) { host_buffered = on ? 1 : 0; return 0; }
+void con_flip(void) {}
+int  con_buffered(void) { return host_buffered; }
+void con_newsprite(long a, int w, int h) { (void)a; (void)w; (void)h; }
+int  con_target_sprite(long a) { (void)a; return 0; }
+void con_target_screen(void) {}
+void con_tilemap(long sh, long m, int c, int r, int tw, int th, int sx, int sy) {
+    (void)sh; (void)m; (void)c; (void)r; (void)tw; (void)th; (void)sx; (void)sy;
+}
 
 // Graphics library: no framebuffer on the host, so these are no-ops.
 void con_gcol_rgb(int r, int g, int b) { (void)r; (void)g; (void)b; }
@@ -112,6 +131,8 @@ void con_ellipse(int x, int y, int rx, int ry, int f) { (void)x; (void)y; (void)
 void con_fill(int x, int y) { (void)x; (void)y; }
 void con_sprite_get(long a, int x1, int y1, int x2, int y2) { (void)a; (void)x1; (void)y1; (void)x2; (void)y2; }
 void con_sprite_put(long a, int x, int y) { (void)a; (void)x; (void)y; }
+void con_sprite_put_ex(long a, int x, int y, double sc, double an) { (void)a; (void)x; (void)y; (void)sc; (void)an; }
+void con_sprite_tint(int on, int r, int g, int b, int a) { (void)on; (void)r; (void)g; (void)b; (void)a; }
 
 // No mouse on the host backend; report a parked pointer with no buttons.
 void con_mouse(int *x, int *y, int *buttons) {

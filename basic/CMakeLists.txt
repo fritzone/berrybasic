@@ -32,9 +32,12 @@ add_executable(unit_tests
   ${REPO}/seed/seed_host.c
   ${REPO}/host/image_host.c
   ${REPO}/host/sound_host.c
+  ${REPO}/host/gpio_host.c
+  ${REPO}/host/i2c_host.c
+  ${REPO}/drivers/usb_hid.c
 )
 target_include_directories(unit_tests PRIVATE
-  ${REPO}/include ${REPO}/basic ${REPO}/seed ${REPO}/third_party)
+  ${REPO}/include ${REPO}/basic ${REPO}/seed ${REPO}/drivers ${REPO}/third_party)
 target_link_libraries(unit_tests PRIVATE Catch2::Catch2WithMain)
 
 enable_testing()

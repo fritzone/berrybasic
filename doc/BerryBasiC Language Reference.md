@@ -6,14 +6,16 @@ At a glance, BerryBasiC supports:
 
 - Line‑numbered programs **and** direct‑mode commands typed at the prompt
 - Floating‑point, integer (`%`) and string (`$`) variables, plus arrays of up to three dimensions
+- Collections: dictionaries (text‑keyed), growable lists, and sorted binary trees
 - Named procedures (`PROC`) and functions (`FN`), local variables, and recursion
 - Structured control flow: `IF`/`THEN`/`ELSE`/`ENDIF`, `FOR`, `REPEAT`, `WHILE`, `CASE`
 - `DATA`/`READ`/`RESTORE` for built‑in constant tables
 - Reusable code libraries via `IMPORT`
 - Console I/O, a USB keyboard and mouse, and a centisecond clock
 - Files on the SD card, opened as channels for byte‑ or record‑level I/O, plus a full set of directory commands
-- Graphics: BBC‑style `PLOT`/`MOVE`/`DRAW`, a high‑level shape library, truecolour (24‑bit) drawing, sprites, and PNG/JPEG/BMP image loading and saving
+- Graphics: BBC‑style `PLOT`/`MOVE`/`DRAW`, a high‑level shape library, truecolour (24‑bit) drawing, sprites (with scaling, rotation and tinting), double buffering, render‑to‑sprite, tilemaps, and PNG/JPEG/BMP image loading and saving
 - `VDU` commands for fine screen control, user‑defined characters, viewports and palettes
+- Hardware on the 40‑pin header: digital GPIO (with edge events) and an I2C master for add‑on boards
 - Reserved memory blocks read and written with the `?` / `!` / `$` indirection operators
 - **Native "seeds"** — compiled AArch64 machine code, loaded from the card and called from BASIC, for the parts of a job that need full native speed
 
@@ -218,6 +220,8 @@ The value stored is always the full double precision; only its *printed* form is
 
 # Constants
 
+BerryBasiC defines a few constants of convenience, for easier access to common numerical values.
+
 ## PI
 
 `PI` is the ratio of a circle's circumference to its diameter, 3.14159265358979…
@@ -324,6 +328,8 @@ Array elements and reserved‑memory locations are assigned the same way; see *A
 
 ---
 # Operators
+
+Like every self-respecting programming language, BerryBasiC also supports mathematical operations.
 
 ## Arithmetic
 
@@ -586,6 +592,8 @@ To read structured data back from a file with the same feel, see `INPUT#` under 
 ---
 
 # Branching
+
+While having an archaic feel to it, `GOTO` can be a very useful construct from time to time.
 
 ## GOTO
 
@@ -937,6 +945,102 @@ An index outside the declared bounds raises `Array index out of range`, and re�
 
 ---
 
+# Collections
+
+Arrays are fixed in size and indexed by number. For jobs that need something more flexible, BerryBasiC has three **collections**: a **dictionary** (values looked up by a text key), a **list** (an ordered sequence you can grow, push onto and pop from), and a **binary tree** (values keyed by number, kept permanently in sorted order).
+
+## How collections work
+
+You create a collection with `NEWDICT`, `NEWLIST` or `NEWTREE`, which returns a small number — a **handle** — that you keep in a variable and pass to the other collection words:
+
+```basic
+10 scores = NEWDICT              : REM scores now refers to a new, empty dictionary
+20 DICTSET scores, "ada", 95
+30 PRINT DICTGET(scores, "ada")  : REM 95
+```
+
+A few rules apply to all three:
+
+- Every collection can hold **numbers or text**, mixed freely. You read a value back with the plain word for a number (`DICTGET`, `LISTGET`, `POP`, `TREEGET`) or the **`$` form** for text (`DICTGET$`, `LISTGET$`, `POP$`, `TREEGET$`), exactly as variables split into `A` and `A$`. Asking for the wrong kind raises `Type mismatch`.
+- `SIZE(h)` gives the number of items in **any** collection.
+- Collections live in their own memory and are **cleared when a program is `RUN`** (and by `NEW`), just like variables. Up to 64 may exist at once.
+- Passing a value that isn't a collection handle raises `Not a collection`; using the wrong word for the kind (say `PUSH` on a dictionary) raises `Not a list` / `Not a dictionary` / `Not a tree`.
+
+## Dictionary — keyed by text
+
+A dictionary maps a **text key** to a value. Keys are unique: setting an existing key replaces its value.
+
+| Word | Meaning |
+|------|---------|
+| `d = NEWDICT` | Create a new, empty dictionary. |
+| `DICTSET d, key$, value` | Store `value` under `key$` (adds it, or replaces the existing one). |
+| `DICTGET(d, key$)` / `DICTGET$(d, key$)` | Read the value as a number / as text. A **missing key reads as `0` or `""`** (use `DICTHAS` to tell the difference). |
+| `DICTHAS(d, key$)` | `TRUE` if the key is present, else `FALSE`. |
+| `DICTDEL d, key$` | Remove the key (does nothing if it isn't there). |
+| `DICTKEY$(d, i)` | The `i`‑th key (0‑based, in the order keys were first added) — for walking every entry. |
+
+```basic
+10 phone = NEWDICT
+20 DICTSET phone, "alice", "555-1234"
+30 DICTSET phone, "bob",   "555-9876"
+40 FOR i = 0 TO SIZE(phone) - 1
+50   k$ = DICTKEY$(phone, i)
+60   PRINT k$; " -> "; DICTGET$(phone, k$)
+70 NEXT
+```
+
+## List — a growable, ordered sequence
+
+A list holds items in order, indexed from **0**, and grows as you add to it. `PUSH` and `POP` at the end make it a natural **stack**.
+
+| Word | Meaning |
+|------|---------|
+| `l = NEWLIST` | Create a new, empty list. |
+| `PUSH l, value` | Append `value` to the end. |
+| `POP(l)` / `POP$(l)` | Remove and return the **last** item as a number / as text. `POP` on an empty list raises `List is empty`. |
+| `LISTGET(l, i)` / `LISTGET$(l, i)` | Read item `i` (0‑based) as a number / as text. |
+| `LISTSET l, i, value` | Replace item `i`. |
+| `LISTINS l, i, value` | Insert `value` **before** index `i` (use `i = SIZE(l)` to append). |
+| `LISTDEL l, i` | Remove item `i`, closing the gap. |
+
+An index outside `0 … SIZE(l)-1` raises `Index out of range`.
+
+```basic
+10 stack = NEWLIST
+20 PUSH stack, 10 : PUSH stack, 20 : PUSH stack, 30
+30 PRINT "top is "; POP(stack)          : REM 30, and the list shrinks to 2
+40 PRINT "now holds "; SIZE(stack); " items"
+```
+
+## Binary tree — numbers, always sorted
+
+A tree stores values keyed by a **number**, and — unlike a dictionary — keeps its keys in **sorted order** at all times. That makes it ideal when you need the smallest/largest key, or to visit everything in order, cheaply.
+
+| Word | Meaning |
+|------|---------|
+| `t = NEWTREE` | Create a new, empty tree. |
+| `TREESET t, key, value` | Store `value` under the number `key` (adds or replaces). |
+| `TREEGET(t, key)` / `TREEGET$(t, key)` | Read the value as a number / as text (`0`/`""` if the key is absent). |
+| `TREEHAS(t, key)` | `TRUE` if the key is present. |
+| `TREEDEL t, key` | Remove the key, keeping the rest sorted. |
+| `TREEMIN(t)` / `TREEMAX(t)` | The smallest / largest key (raises `Tree is empty` if there are none). |
+| `TREEKEY(t, i)` | The `i`‑th key in ascending order (0‑based) — walk `i = 0 … SIZE(t)-1` to read every key sorted. |
+
+```basic
+10 t = NEWTREE
+20 TREESET t, 50, "M" : TREESET t, 20, "T" : TREESET t, 80, "E"
+30 TREESET t, 10, "A" : TREESET t, 30, "L"
+40 PRINT "smallest key: "; TREEMIN(t)
+50 FOR i = 0 TO SIZE(t) - 1
+60   k = TREEKEY(t, i)
+70   PRINT k; " = "; TREEGET$(t, k)         : REM printed in ascending key order
+80 NEXT
+```
+
+Because a collection error is an ordinary error, you can wrap risky operations in `TRY … CATCH` (see *Error Handling*).
+
+---
+
 # Memory and Indirection
 
 Beyond variables and arrays, a program can reserve a block of raw bytes and read or write it directly with the indirection operators `?`, `!` and `$`. This is how you build a buffer to hand to a native seed for fast processing, or to pack binary data.
@@ -1221,6 +1325,105 @@ A module keeps its **own line‑number space**. The module above uses lines 10�
 - Modules may import other modules; imports are followed automatically. A module is loaded only once even if several modules ask for it. Up to 16 modules may be imported.
 - Imported lines are not part of your program: `LIST` and `SAVE` show only the code you typed, and imports are resolved fresh each time you `RUN`.
 - Keep to functions and procedures in a module. `IMPORT` itself does nothing at run time — it is handled once, before the program starts.
+
+---
+
+# Dynamic Evaluation — EVAL and EXEC
+
+BerryBasiC parses your program from its source text every time it runs a line, so it can just as easily parse text you build **while the program is running**. Two words expose that:
+
+- `EVAL(string)` — a **function** that parses `string` as an expression and returns its value.
+- `EXEC string` — a **statement** that runs `string` as a line of BASIC.
+
+Both work in the **current context**: they see the same variables, arrays and open loops as the code around them. This is what makes a calculator, a config‑file reader, a lookup table of formulas, or an in‑program command line only a few lines of code.
+
+## EVAL
+
+```basic
+result = EVAL(expression$)
+```
+
+`EVAL` evaluates the string exactly as if you had typed the expression in place, using all the usual operators, functions, variables and precedence. It returns whatever the expression is — a **number** or a **string**:
+
+```basic
+10 X = 5
+20 PRINT EVAL("2*X + 1")          : REM 11 - reads the current X
+30 PRINT EVAL("SQR(9) + 3*2")     : REM 9  - functions and precedence
+40 A$ = "foo" : B$ = "bar"
+50 PRINT EVAL("A$ + B$")          : REM foobar - a string result
+```
+
+An `EVAL` result drops straight into a larger expression, and `EVAL` may even appear inside the string it evaluates:
+
+```basic
+PRINT EVAL("X*2") + 100
+```
+
+A simple calculator is now one line — read a line of text and print its value:
+
+```basic
+10 REPEAT
+20   INPUT "> " expr$
+30   PRINT EVAL(expr$)
+40 UNTIL expr$ = ""
+```
+
+If the string is not a valid expression, `EVAL` raises `Syntax error in EVAL string` (or whatever specific error the expression itself triggers, such as a type mismatch). Wrap it in `TRY … CATCH` to keep a command loop alive:
+
+```basic
+10 TRY
+20   PRINT EVAL(expr$)
+30 CATCH
+40   PRINT "Sorry: "; ERR$
+50 ENDTRY
+```
+
+## EXEC
+
+```basic
+EXEC statement$
+```
+
+`EXEC` runs the string as if it were a line you typed — one statement or several separated by colons. It is the companion to `EVAL`: `EVAL` computes a value, `EXEC` performs an action. Because it runs in the current context, an assignment inside `EXEC` sets a real variable:
+
+```basic
+10 EXEC "Y = 7 * 6"
+20 PRINT Y                         : REM 42
+```
+
+The power is that you can **build the statement as text**, which gives you dynamic dispatch and table‑driven code. Here the variable *name* is computed at run time:
+
+```basic
+10 FOR I = 1 TO 3
+20   EXEC "V" + STR$(I) + " = I*I"    : REM sets V1, V2, V3
+30 NEXT
+40 PRINT V1; V2; V3                   : REM 1 4 9
+```
+
+A line of statements works too, and control flow such as `GOTO`, `GOSUB` or `END` inside the string takes effect in your program:
+
+```basic
+10 EXEC "A=1 : B=2 : PRINT A+B"       : REM 3
+20 EXEC "GOTO 100"                    : REM jumps the program to line 100
+```
+
+Execution returns to whatever followed the `EXEC`, so you can keep going on the same line:
+
+```basic
+10 EXEC "PRINT 1+1" : PRINT "done"
+```
+
+> **Keep an `EXEC` string self‑contained.** It is fine to branch out of an `EXEC`, but do not *open* a block you don't also close inside the same string — an `EXEC "FOR I=1 TO 3"` with the matching `NEXT` elsewhere leaves the loop pointing at text that no longer exists. Open and close a loop, `IF` block, or `TRY` within the one string, or not at all.
+
+## Where this is useful
+
+| Pattern | How |
+|---------|-----|
+| Calculator / formula entry | `PRINT EVAL(line$)` |
+| Config file of `KEY = value` lines | `EXEC line$` for each line read from the file |
+| A table of formulas by name | store expression strings, `EVAL` the chosen one |
+| Dynamic dispatch (name computed at run time) | `EXEC "PROC" + cmd$ + "(x)"` |
+| An in‑program command line | read a line, `EXEC` it inside `TRY … CATCH` |
 
 ---
 
@@ -1515,6 +1718,72 @@ A common "wait, but not forever" loop:
 20 REPEAT : K = INKEY(10) : UNTIL K <> -1
 30 PRINT "You pressed code "; K
 ```
+
+---
+
+# Keyboard Layouts
+
+A USB keyboard reports *which key* was pressed, not which letter is printed on it, so the machine has to know your keyboard's layout to turn key presses into the right characters. Out of the box it assumes a **US** layout. If you have a Norwegian, Swedish, Danish, German or UK keyboard, tell it so — otherwise the symbols and the national letters land in the wrong places.
+
+## KEYBOARD
+
+Select a layout by its two‑letter code (case doesn't matter):
+
+```basic
+KEYBOARD "NO"
+```
+
+| Code | Layout |
+|------|--------|
+| `US` | United States (the default) |
+| `UK` | United Kingdom |
+| `NO` | Norwegian |
+| `DK` | Danish |
+| `SE` | Swedish |
+| `DE` | German (QWERTZ) |
+
+The change takes effect immediately and stays until you change it again or the machine is switched off. An unknown code raises `Unknown keyboard layout`.
+
+## KEYBOARD$
+
+Reads back the current layout code:
+
+```basic
+10 PRINT "Keyboard is set to "; KEYBOARD$
+```
+
+## The three levels: normal, Shift and AltGr
+
+Each key can type up to three characters: on its own, with **Shift**, and with **AltGr** (the right‑hand `Alt` key). On the Nordic and German layouts AltGr is how you reach the programming symbols. On a Norwegian keyboard, for example:
+
+| You press | You get |
+|-----------|---------|
+| the `Æ` `Ø` `Å` keys | `æ ø å` (with Shift, the capitals) |
+| `AltGr` + `2` `4` | `@` `$` |
+| `AltGr` + `7` `8` `9` `0` | `{` `[` `]` `}` |
+| `AltGr` + `+` | `\` |
+| `AltGr` + `<` | `|` |
+| `AltGr` + the `¨` key | `~` |
+
+The national letters (`æ ø å`, `ä ö ü`, `ß`, …) are ordinary characters: you can `PRINT` them, put them in strings, and type them into the editor.
+
+## Making it the default
+
+`KEYBOARD "NO"` only lasts for the session. To boot straight into your layout every time, run the configuration tool and pick it from the menu (alongside the screen resolution and font):
+
+```
+tools/configure.sh
+```
+
+or set it directly:
+
+```
+tools/configure.sh 1280x720 fonts/ISO.F16 1 NO
+```
+
+Then `make`. (The tool writes `#define CFG_KBD_LAYOUT "NO"` into `kernel/buildconfig.h`; you can also edit that line by hand and rebuild.)
+
+> Layouts apply to a real USB keyboard on the Pi. Typing over a serial console sends characters directly and is unaffected.
 
 ---
 
@@ -2018,6 +2287,94 @@ The format is **PNG** (which preserves the alpha channel), unless the filename e
 
 Because PNG round‑trips alpha, you can load a transparent sprite and save it again without losing its transparency.
 
+## Scaled and rotated blits — GPUT with transforms
+
+`GPUT` takes two optional extra arguments, a **scale** and an **angle**, to stamp a sprite enlarged/shrunk and spun:
+
+```basic
+GPUT addr, x, y, scale, angle
+```
+
+`scale` is a floating‑point factor (`1.0` = original size, `2.0` = double, `0.5` = half). `angle` is in **degrees, clockwise**, about the sprite's centre. The transformed sprite is positioned so its centre lands where the plain `GPUT addr, x, y` would put the un‑transformed sprite's centre — so `GPUT a, x, y, 1, 0` is identical to `GPUT a, x, y`. A `scale` of zero or less draws nothing; the angle is taken modulo 360. Alpha, the `GCOL` plot action and the tint (below) all still apply.
+
+```basic
+10 cat% = LOADSPRITE("CAT.PNG")
+20 a = 0
+30 REPEAT
+40   WAIT : CLG
+50   GPUT cat%, 500, 400, 2.0, a     : REM double size, spinning
+60   FLIP
+70   a = (a + 3) MOD 360
+80 UNTIL INKEY(0) <> -1
+```
+
+Rotation and scaling use nearest‑pixel sampling (fast, with a slightly blocky look on steep angles).
+
+## Tinting sprites — GTINT
+
+`GTINT` sets a **tint** colour that every subsequently blitted sprite is blended toward, like `GCOL` is drawing state:
+
+```basic
+GTINT r, g, b, a      : REM tint toward (r,g,b) by strength a (0-255)
+GTINT OFF             : REM stop tinting
+```
+
+Each drawn pixel becomes `lerp(sprite, (r,g,b), a/255)` while its own transparency is preserved, so `GTINT 255,0,0,128` gives a half‑strength red flash and `GTINT 255,255,255,255` whites a sprite out completely. The tint applies to both `GPUT` forms and is reset when a program is `RUN`.
+
+```basic
+100 GTINT 255, 0, 0, 120 : GPUT hero%, x, y : GTINT OFF   : REM hero flashes red when hit
+```
+
+## Rendering into a sprite — NEWSPRITE and SPRITETARGET
+
+You can draw *into* a sprite instead of onto the screen, then stamp the finished sprite cheaply many times. `NEWSPRITE` initialises a `DIM` buffer as a blank, fully **transparent** sprite of a given pixel size:
+
+```basic
+NEWSPRITE addr, w, h      : REM buffer needs w*h*4 + 8 bytes, as for GGET
+```
+
+`SPRITETARGET addr` then redirects **all** drawing (`PLOT`, shapes, `GPUT`, text, `CLG`, `POINT`) into that sprite. While a sprite is the target, coordinates are the sprite's own pixels with the origin at the **bottom‑left**, `0 … w-1` by `0 … h-1` — so a shape at `(w/2, h/2)` sits in the middle. `CLG` clears the sprite back to transparent. `SPRITETARGET OFF` returns drawing to the screen (or the back buffer, if `BUFFER ON`).
+
+```basic
+10 DIM badge% 40000
+20 NEWSPRITE badge%, 96, 96
+30 SPRITETARGET badge%
+40   CLG : GCOL 0,1 : CIRCLE FILL 48, 48, 46    : REM compose the badge once...
+50   GCOL 0,3 : MOVE 20,48 : DRAW 76,48
+60 SPRITETARGET OFF
+70 FOR i = 0 TO 9 : GPUT badge%, i*120, 700 : NEXT   : REM ...then stamp it cheaply
+```
+
+Only one sprite target is active at a time. Use render‑to‑sprite to pre‑compose complex sprites, build a tilesheet at run time, or capture a scene for a transition.
+
+## Tilemaps — TILEMAP
+
+`TILEMAP` draws a scrolling grid of tiles in a single call — a whole background in one statement instead of a BASIC loop:
+
+```basic
+TILEMAP sheet, map, cols, rows, tilew, tileh, scrollx, scrolly
+```
+
+- `sheet` — a sprite (from `LOADSPRITE`, `GGET`, or a `NEWSPRITE`/`SPRITETARGET` render) holding the tiles, packed left‑to‑right then top‑to‑bottom; the tiles‑per‑row is `SPRW(sheet) DIV tilew`.
+- `map` — a block of `cols*rows` 32‑bit words, row‑major (top row first). Build it in a `DIM` buffer with the `!` word operator. A value of **0 means empty** (that cell is skipped, so the background shows through); a value **k ≥ 1** draws sheet tile **k−1**.
+- `tilew`, `tileh` — the tile size in pixels.
+- `scrollx`, `scrolly` — a pixel offset; increase them to scroll the world left/up.
+
+Only the visible tiles are drawn, clipped to the current viewport, honouring the tint and the current draw target (screen, back buffer, or a sprite). A smooth scroller is then just a `BUFFER`/`WAIT`/`TILEMAP`/`FLIP` loop:
+
+```basic
+10 sheet% = LOADSPRITE("TILES.PNG")     : REM e.g. a 64px, 4-tile sheet
+20 DIM map% 8*8*4                        : REM an 8x8 grid of tile indices
+30 FOR i = 0 TO 63 : map%!(i*4) = 1 + (i MOD 3) : NEXT
+40 BUFFER ON : sx = 0
+50 REPEAT
+60   WAIT : CLG
+70   TILEMAP sheet%, map%, 8, 8, 64, 64, sx, 0
+80   FLIP
+90   sx = (sx + 4) MOD (8*64)
+100 UNTIL INKEY(0) <> -1
+```
+
 ---
 
 # Program Control Commands
@@ -2190,9 +2547,356 @@ SOUND OFF
 Sound is also reset automatically whenever a program is `RUN`.
 
 ---
+# GPIO (the 40‑pin header)
+
+BerryBasiC can drive and read the Raspberry Pi 4's **40‑pin GPIO header** — the pins that connect to LEDs, buttons, sensors and add‑on boards. Phase one is plain **digital I/O**: set a pin as an output and turn it on or off, or set it as an input and read whether it is high or low.
+
+> **Pin numbers are BCM, not header positions.** `PIN 17` means **BCM GPIO 17**, which is physical pin 11 on the header — *not* the eleventh… not the seventeenth pin along. Every command and function on this page uses BCM numbering. Mixing this up is the single most common wiring mistake; keep a BCM pinout diagram next to you.
+
+Valid pins are **BCM 0–27** (the pins broken out on the header). Anything outside that range raises `No such pin`; the higher‑numbered lines drive the SD card and other system hardware and are deliberately out of reach. BCM **0** and **1** are reserved for a HAT's ID EEPROM — avoid them for your own wiring.
+
+> GPIO works on **real hardware and under QEMU**. On the host test build there is no header, so every GPIO command raises `GPIO needs the Pi, not the host build`.
+
+## Safety: pins reset on RUN
+
+Every time a program is `RUN` (and on `NEW`, `LOAD`, and at power‑on) **all header pins are reset to inputs with no pull resistor**. A program can never leave a pin still driving an LED or a motor after it stops — starting a new program always begins from a clean, safe state.
+
+## PINMODE
+
+Configure what a pin does.
+
+```basic
+PINMODE pin, OUTPUT
+PINMODE pin, INPUT
+PINMODE pin, INPUT PULLUP
+PINMODE pin, INPUT PULLDOWN
+PINMODE pin, ALT function
+```
+
+| Mode | Meaning |
+|------|---------|
+| `OUTPUT` | The pin drives a voltage — use it to light an LED or switch something on. |
+| `INPUT` | The pin reads a voltage; no internal pull resistor (the pin floats unless something drives it). |
+| `INPUT PULLUP` | Input with an internal **pull‑up**, so it idles **high** (1) and a button to ground reads **low** (0) when pressed. |
+| `INPUT PULLDOWN` | Input with an internal **pull‑down**, so it idles **low** (0). |
+| `ALT function` | Select an **alternate function** `0`–`5` — used to hand the pin to a bus peripheral (I²C, SPI, UART, PWM). |
+
+An unknown mode word, or an `ALT` function outside 0–5, raises `Bad pin mode`.
+
+## PIN — write and read
+
+As a **statement**, `PIN` drives an output pin:
+
+```basic
+PIN pin, level          : REM level 0 = low, any non-zero = high
+```
+
+As a **function**, `PIN(pin)` reads a pin's current level and returns `0` or `1`:
+
+```basic
+IF PIN(27) = 0 THEN PRINT "button pressed"
+```
+
+## PINS, PINSET, PINCLR — the whole port at once
+
+For speed, or to change several pins together, you can work with all the header pins as one 32‑bit value (bit *n* is BCM pin *n*; only bits 0–27 are on the header, and bits 28–31 read back as 0).
+
+```basic
+PINSET mask       : REM drive high every pin whose bit is 1 in mask (atomic)
+PINCLR mask       : REM drive low  every pin whose bit is 1 in mask (atomic)
+x = PINS          : REM read all pin levels at once
+```
+
+`PINSET` and `PINCLR` are **atomic**: they touch only the pins in the mask and leave the rest exactly as they were. Build a mask with `SHL` (shift a 1 into position):
+
+```basic
+PINSET SHL(1,17) OR SHL(1,22)     : REM turn BCM 17 and 22 on together
+```
+
+## PINWAIT — wait for an edge
+
+Polling a pin in a tight `REPEAT` loop works, but if all you want is to block until something happens, `PINWAIT` does it in one call:
+
+```basic
+p = PINWAIT(pin, edge, timeout)
+```
+
+It waits for an **edge** — a change of level — on `pin`, and returns:
+
+- the **pin number** when the edge arrives, or
+- **`-1`** if `timeout` centiseconds (hundredths of a second) pass first.
+
+`edge` is `0` for a **falling** edge (high→low) or `1` for a **rising** edge (low→high). A `timeout` of `0` checks once and returns immediately. The shape mirrors `INKEY`: a real result, or `-1` for "nothing happened in time".
+
+```basic
+10 PINMODE 27, INPUT PULLUP
+20 PRINT "Press the button..."
+30 IF PINWAIT(27, 0, 500) = -1 THEN PRINT "timed out" ELSE PRINT "got it"
+```
+
+Here the button idles high (pull-up) and grounds the pin when pressed, so the press is a **falling** edge; we wait up to five seconds for it.
+
+## Examples
+
+**Blink** an LED (with a series resistor) on BCM 17 once a second, until a key is pressed. `DELAY` gives each on/off phase a real half‑second, so the blink looks the same on any machine:
+
+```basic
+10 PINMODE 17, OUTPUT
+20 REPEAT
+30   PIN 17, 1 : DELAY 50         : REM LED on for 0.5 s
+40   PIN 17, 0 : DELAY 50         : REM LED off for 0.5 s
+50 UNTIL INKEY(0) <> -1
+```
+
+> **Don't time with an empty loop.** A busy‑wait such as `REPEAT t=t+1 UNTIL t>10` is *not* a reliable delay: it runs in microseconds on this hardware, so the LED toggles hundreds of thousands of times a second and just looks steadily lit. Use `DELAY` (centiseconds) for a real, CPU‑independent pause. See *DELAY* for details.
+
+**Read a button** wired from BCM 27 to ground, using the internal pull‑up so it idles high and reads 0 when pressed:
+
+```basic
+10 PINMODE 27, INPUT PULLUP
+20 REPEAT
+30   IF PIN(27) = 0 THEN PRINT "pressed"
+40 UNTIL FALSE
+```
+
+**Self‑test with a single jumper** from BCM 23 to BCM 24 — proves write, read and whole‑port access all agree:
+
+```basic
+10 PINMODE 23, OUTPUT
+20 PINMODE 24, INPUT
+30 PIN 23, 1 : IF PIN(24) <> 1 THEN PRINT "FAIL high" : END
+40 PIN 23, 0 : IF PIN(24) <> 0 THEN PRINT "FAIL low"  : END
+50 PINSET SHL(1,23) : IF (PINS AND SHL(1,24)) = 0 THEN PRINT "FAIL mask" : END
+60 PRINT "GPIO OK"
+```
+
+## GPIO errors
+
+| Message | Cause |
+|---------|-------|
+| `No such pin` | A pin number outside BCM 0–27. |
+| `Bad pin mode` | An unrecognised `PINMODE` mode, or an `ALT` function outside 0–5. |
+| `GPIO needs the Pi, not the host build` | A GPIO command was used on the host test build, which has no header. |
+
+---
+# I2C
+
+Many add‑on boards — LCD/OLED displays, real‑time clocks, temperature and motion sensors, port expanders — talk over **I2C**, a two‑wire bus. The Pi 4's primary I2C bus is on the header: **SDA** on BCM 2 (physical pin 3) and **SCL** on BCM 3 (physical pin 5). BerryBasiC drives it as a bus *master*: you address a device by its **7‑bit address** and write or read bytes.
+
+You do not need to set the pins up — the first I2C statement configures BCM 2/3 for you (and the bus is released, like the GPIO pins, whenever a program is `RUN`).
+
+> **Real hardware only.** The BSC controller behind I2C is not emulated by QEMU, so these words work only on a real Pi 4. On the emulator or the host build they raise `I2C needs real Pi hardware` (rather than hang). Wiring notes: I2C needs pull‑up resistors on SDA and SCL to 3.3 V (many breakout boards include them); use 3.3 V logic, never 5 V, on these pins.
+
+## Writing — I2CWRITE
+
+```basic
+I2CWRITE addr, byte1 [, byte2, ...]
+```
+
+Sends the listed bytes to the device at `addr` in one transaction. The bytes are ordinary numbers 0–255. This is the common case — a register number followed by the value(s) to put there, or a single control byte:
+
+```basic
+10 I2CWRITE &27, &08              : REM one control byte to the device at 0x27
+20 I2CWRITE &68, 0, 30            : REM write value 30 into register 0 of device 0x68
+```
+
+(`&` introduces a hexadecimal number, so `&27` is 39 and `&68` is 104.) If no device acknowledges, the statement raises `I2C write failed` — which you can catch with `TRY … CATCH`.
+
+## Reading — I2CREAD
+
+```basic
+I2CREAD addr, buf, count
+```
+
+Reads `count` bytes from the device at `addr` into the reserved buffer `buf` (a block from `DIM buf n`). Read the bytes back out with the `?` byte‑indirection operator. To read a device *register*, write the register number first, then read:
+
+```basic
+10 DIM buf 8
+20 I2CWRITE &68, 0                : REM point the device at register 0
+30 I2CREAD  &68, buf, 2           : REM read 2 bytes from it
+40 PRINT ?buf; " "; ?(buf + 1)    : REM the two bytes
+```
+
+A failed read raises `I2C read failed`.
+
+## Scanning — I2CPROBE
+
+`I2CPROBE(addr)` returns `TRUE` if a device acknowledges at `addr`, `FALSE` otherwise — the building block of a bus scan, handy for finding a board whose address you don't know:
+
+```basic
+10 PRINT "Devices found:"
+20 FOR a = 8 TO 119               : REM the valid 7-bit address range
+30   IF I2CPROBE(a) THEN PRINT "  address "; a
+40 NEXT
+```
+
+(Addresses are shown here in decimal; the same numbers written in hex — e.g. `&27` for 39 — are what a device's datasheet usually quotes.)
+
+## Notes and limits
+
+- Addresses are **7‑bit** (`8` … `119`); the read/write direction bit is handled for you.
+- The bus runs in standard mode (about 100 kHz), which every device supports.
+- `I2CWRITE` sends up to 64 bytes per statement; more than that raises `Too many bytes`.
+- A register read is done as a write followed by a separate read (a stop in between), which nearly all devices accept. A tiny number of devices insist on a *repeated start* and won't work this way.
+- A stuck bus can't lock the machine up: each transfer gives up after a short safety timeout and raises an error.
+
+---
+# Events — ON TIMER, ON PIN, ON MOUSE
+
+Instead of writing a loop that constantly checks the clock, or a pin, or the mouse, you can ask the machine to **run a procedure when something happens**. An event handler is an ordinary parameterless `PROC`; you register it once, and it runs by itself whenever its event fires:
+
+```basic
+10 SECONDS = 0
+20 ON TIMER 100 PROC tick          : REM run tick() every 100 centiseconds
+30 REPEAT
+40   REM ... the main program does its own work here ...
+50 UNTIL SECONDS >= 10
+60 END
+70 DEF PROC tick
+80   SECONDS = SECONDS + 1          : REM a handler shares the program's variables
+90 ENDPROC
+```
+
+Handlers and the main program share all variables, so a handler's usual job is to update some state that the main loop reads — no polling in the loop itself.
+
+## How and when handlers run
+
+Events are checked and dispatched **between statements** of your running program — never in the middle of one, and never from a hardware interrupt that could catch the interpreter in an inconsistent state. The practical consequences:
+
+- A handler fires between lines while your program is executing. A program that wants events to keep flowing should keep doing something (a `REPEAT … UNTIL` loop, `WAIT`, ongoing work) rather than blocking in a single long `GET` or `INPUT`.
+- While a handler runs, other events are **held off** until it returns, so handlers never interrupt each other.
+- Handlers stop when the program stops, and every handler is cancelled at `RUN`.
+
+## The four sources
+
+```basic
+ON TIMER cs PROC name                REM every cs centiseconds
+ON KEY PROC name                     REM when a key is pressed
+ON PIN p PROC name                   REM on any edge of BCM pin p
+ON PIN p RISING PROC name            REM only low->high
+ON PIN p FALLING PROC name           REM only high->low
+ON MOUSE PROC name                   REM when the pointer moves or a button changes
+```
+
+Each can be cancelled with `OFF`:
+
+```basic
+ON TIMER OFF
+ON KEY OFF
+ON PIN 27 OFF          : REM this pin only
+ON PIN OFF             : REM all pin handlers
+ON MOUSE OFF
+```
+
+## Reading the key in an ON KEY handler
+
+When `ON KEY` fires, the key that triggered it is waiting to be read: the handler picks it up with `GET`, `GET$` or `INKEY(0)`, which return that exact key.
+
+```basic
+10 ON KEY PROC typed
+20 REPEAT : WAIT : UNTIL FALSE       : REM idle; the handler does the work
+30 DEF PROC typed
+40   K = GET
+50   IF K = 27 THEN PRINT "escape!"  : REM 27 = Esc
+60   IF K >= 32 THEN PRINT "you typed "; CHR$(K)
+70 ENDPROC
+```
+
+If the handler doesn't read the key, it stays queued for the next `GET` in the program, so a keystroke is never lost. (As with all events, a program blocked in a plain `GET` at the top level won't dispatch `ON KEY` — keep the idle in a loop, as above.)
+
+`ON PIN` sets up the pin's edge detection for you (you'll still usually `PINMODE p, INPUT PULLUP` first so it reads cleanly); up to eight pins can have handlers at once. `ON PIN` needs real hardware — on the host build it raises `GPIO needs the Pi, not the host build`.
+
+A worked button example:
+
+```basic
+10 PINMODE 27, INPUT PULLUP
+20 ON PIN 27 FALLING PROC pressed    : REM button to ground = a falling edge
+30 REPEAT : WAIT : UNTIL FALSE       : REM idle; the handler does the work
+40 DEF PROC pressed
+50   PRINT "button!"
+60 ENDPROC
+```
+
+# WAIT
+
+`WAIT` pauses until the next frame boundary, pacing an animation or game loop to a steady **~60 Hz** so it runs at the same speed regardless of how quickly the machine gets through a frame's work:
+
+```basic
+10 REPEAT
+20   WAIT                : REM one tick, ~1/60 s
+30   PROC draw_frame
+40 UNTIL done%
+```
+
+This is frame *pacing* from the system timer, not a hardware vertical‑blank interrupt (there isn't one on this path), so it steadies the loop's rate but does not by itself eliminate tearing. Pair it with **double buffering** (next) to compose each frame off‑screen and show it all at once — flicker‑free.
+
+# DELAY
+
+`DELAY n` pauses the program for `n` **centiseconds** (hundredths of a second — the same units as `TIME` and `INKEY`), so `DELAY 50` waits half a second and `DELAY 100` waits one second:
+
+```basic
+10 PINMODE 17, OUTPUT
+20 REPEAT
+30   PIN 17, 1 : DELAY 50        : REM LED on for 0.5 s
+40   PIN 17, 0 : DELAY 50        : REM LED off for 0.5 s
+50 UNTIL INKEY(0) <> -1
+```
+
+Use `DELAY` for a real, fixed pause — a blink, a pause between messages, a simple timed animation. Unlike a busy “counting” loop such as `REPEAT t=t+1 UNTIL t>1000`, whose duration depends entirely on how fast the machine runs (microseconds on this hardware — far too short to see), `DELAY` waits a genuine amount of *time* and behaves the same on any machine. A value of zero or less returns immediately, and queued `SOUND`/`TONE` audio keeps playing during the wait.
+
+`DELAY` blocks for its whole duration, so event handlers (`ON TIMER`, `ON KEY`, …) do not run *during* a `DELAY`; for a loop that stays responsive between short pauses, use `WAIT` (above) instead.
+
+---
+# Double Buffering
+
+Without help, a clear‑then‑draw loop can *flicker*: the screen is briefly blank (or half‑drawn) between the `CLG` and the last shape, and you see it. **Double buffering** fixes this. You draw the whole frame into a hidden **back buffer**, then present it in one step with `FLIP`, so the viewer only ever sees complete frames.
+
+## BUFFER ON / BUFFER OFF
+
+`BUFFER ON` allocates a full‑screen back buffer and routes *all* drawing to it — `PLOT`, `MOVE`/`DRAW`, the shape library, `GPUT`, `TILEMAP`, text, and `CLG` — while the visible screen is frozen. `BUFFER OFF` sends drawing straight back to the visible screen. Buffering is turned off automatically when a program ends, so the prompt is always visible.
+
+## FLIP
+
+`FLIP` copies the back buffer onto the visible screen. Nothing you draw while buffered appears until you `FLIP`. With buffering off, `FLIP` does nothing (harmless).
+
+## The standard frame loop
+
+`WAIT` · `CLG` · draw · `FLIP` is the animation loop this pairs with:
+
+```basic
+10 BUFFER ON
+20 x = 0
+30 REPEAT
+40   WAIT                       : REM steady ~60 Hz
+50   CLG                        : REM clear the back buffer
+60   CIRCLE FILL x, 512, 60      : REM draw this frame off-screen
+70   FLIP                       : REM show it, all at once
+80   x = (x + 8) MOD 1280
+90 UNTIL INKEY(0) <> -1
+100 BUFFER OFF
+```
+
+The circle glides across with no flicker. Because the back buffer keeps its contents after a `FLIP`, you normally `CLG` and redraw every frame (as above). `POINT` while buffered reads the **back** buffer, so a program can test what it has drawn this frame.
+
+---
 # Storage (SD Card)
 
-Programs and data live on the SD card's FAT filesystem. File names may be given quoted or bare; if you give no extension, `.BAS` is assumed (so `LOAD WELCOME` opens `WELCOME.BAS`). Names are 8.3 — up to eight characters, a dot, a three‑letter extension — because the card is FAT.
+Programs and data live on the SD card's FAT filesystem. File names may be given quoted or bare; if you give no extension, `.BAS` is assumed (so `LOAD WELCOME` opens `WELCOME.BAS`).
+
+### Long file names
+
+The card is FAT, whose native names are **8.3** — up to eight characters, a dot, a three‑letter extension. BerryBasiC supports **VFAT long file names** on top of that, so you are not limited to 8.3:
+
+```basic
+SAVE "My Space Game"                 : REM -> "My Space Game.bas"
+CH = OPENOUT("Weather Log 2026.txt") : REM create a long-named data file
+MKDIR "My Projects"                  : REM long-named directory
+CH = OPENIN("My Holiday Photos.txt") : REM open one a PC made
+```
+
+Long names are **created** by `SAVE`, `OPENOUT`, `MKDIR` (and read by `LOAD`, `OPENIN`, `DIR`, `DIROPEN`/`DIRNAME$`, `CD`), and are **deleted** cleanly by `DELETE`/`RMDIR` and replaced by overwriting. Matching is case‑insensitive, and names may contain accented letters (`brød.bas`, `Größe.dat`) — they display and round‑trip because the console is 8‑bit.
+
+Behind the scenes each long name also gets a classic `NAME~1.EXT` short alias, so the files are fully interchangeable with a PC: names you make here read correctly on a computer, and long names a computer made read correctly here. A name that already fits 8.3 (like `GAME.BAS`) is stored as a plain 8.3 entry with no overhead.
 
 ## SAVE
 
@@ -2249,7 +2953,7 @@ SAVE "LEVELS/LEVEL1"          : REM -> LEVELS/LEVEL1.BAS
 OPENIN("/DATA/SCORES.DAT")    : REM absolute path
 ```
 
-Directory and file names are still 8.3 since the card is FAT. `MKDIR`, `CD` and `RMDIR` take the name as given (no automatic `.BAS`), so quote them: `CD "GAMES"`.
+`MKDIR`, `CD` and `RMDIR` take the name as given (no automatic `.BAS`), so quote them: `CD "GAMES"`. They accept long names too: `MKDIR "My Projects"` then `CD "My Projects"` (see *Long file names* above).
 
 ## Reading a directory in a program
 
@@ -2403,6 +3107,8 @@ A seed never links against the interpreter; instead it is handed a small set of 
 | `time_cs`        | centiseconds since power‑on |
 | `alloc`, `free`  | allocate / release working memory from the seed heap |
 | `realloc`, `alloc_aligned` | resize a block / allocate with a given alignment |
+| GPIO (`gpio_write`, `gpio_read`, …) | drive and read the 40‑pin header (see below) |
+| files (`file_open`, `file_read`, …) | read and write SD‑card files — the base of the seed `<stdio.h>` (see below) |
 
 Variable and array names are passed exactly as BASIC stores them: upper case, including the `$` or `%` suffix — e.g. `"X"`, `"N%"`, `"A$"`.
 
@@ -2439,6 +3145,50 @@ The full standard allocation set is provided, all backed by the same seed heap:
 
 Anything `aligned_alloc`/`posix_memalign` returns can be released with the ordinary `free`. The standard `memset`, `memcpy`, `memmove` and `memcmp` are available too (a small runtime is linked in for you), so ordinary buffer code just works. If you prefer, the raw `svc->alloc` / `svc->free` / `svc->realloc` / `svc->alloc_aligned` services are still there and do exactly the same thing.
 
+## GPIO from a seed
+
+A seed can drive the Raspberry Pi 4's 40‑pin header directly — useful when you need to toggle pins or bit‑bang a protocol faster than the interpreter can, or in a tight timed loop. The services mirror the BASIC `PIN`/`PINMODE` words (BCM numbering, pins 0–27):
+
+| Service | Purpose |
+|---------|---------|
+| `gpio_avail()` | 1 on the Pi/QEMU, 0 on the host build — check before using the rest |
+| `gpio_mode(pin, mode, alt)` | `SEED_GPIO_IN` / `SEED_GPIO_OUT` / `SEED_GPIO_ALT` (with function `alt`) |
+| `gpio_pull(pin, pull)` | `SEED_GPIO_PULL_NONE` / `_UP` / `_DOWN` |
+| `gpio_write(pin, level)` | drive an output 0/1 |
+| `gpio_read(pin)` | read a pin → 0/1 |
+| `gpio_set(mask)`, `gpio_clr(mask)` | set / clear many pins at once, atomically |
+| `gpio_level()` | read all pins at once (low 28 bits) |
+| `gpio_wait(pin, edge, timeout_cs)` | wait for an edge (`SEED_GPIO_RISING`/`_FALLING`); returns the pin or −1 |
+
+Because a seed runs to completion before BASIC continues, GPIO reset‑on‑`RUN` still protects you: a pin a seed left driving is returned to a safe input at the next `RUN`. A complete blink seed:
+
+```c
+#include "seed.h"
+
+SEED_EXPORT(pinblink)
+{
+    if (argc < 2 || !svc->gpio_avail()) return 0;
+    int pin = (int)argv[0].num, cycles = (int)argv[1].num;
+    int half = argc >= 3 ? (int)argv[2].num : 25;   // centiseconds
+
+    svc->gpio_mode(pin, SEED_GPIO_OUT, 0);
+    for (int i = 0; i < cycles; i++) {
+        svc->gpio_write(pin, 1);
+        uint32_t t = svc->time_cs(); while (svc->time_cs() - t < (uint32_t)half) { }
+        svc->gpio_write(pin, 0);
+        t = svc->time_cs(); while (svc->time_cs() - t < (uint32_t)half) { }
+    }
+    return (double)cycles;
+}
+```
+
+```basic
+10 SEED h%, "PINBLINK.SED"
+20 PRINT CALL(h%, 17, 10)        : REM blink BCM 17 ten times
+```
+
+The full example ships as `seed/examples/pinblink.c` (built to `PINBLINK.SED`).
+
 ## The seed C library
 
 Because a seed is built freestanding (there is no C library to link against), any standard function it calls must be provided by the *seed runtime*. A useful, OS‑independent subset is — just include the familiar headers:
@@ -2454,6 +3204,31 @@ Because a seed is built freestanding (there is no C library to link against), an
 | `<stdlib.h>` | `malloc` `calloc` `realloc` `reallocarray` `free` `free_sized` `free_aligned_sized` `aligned_alloc` `memalign` `posix_memalign`, `qsort` `bsearch`, `atoi` `atol` `strtol` `strtoul`, `abs` `labs`, `rand` `srand` |
 | `<string.h>` | `memcpy` `memmove` `memset` `memcmp` `memchr`, `strlen` `strnlen` `strcmp` `strncmp` `strcpy` `strncpy` `strcat` `strncat` `strchr` `strrchr` `strstr` `strdup` `strndup` |
 | `<ctype.h>`  | `isdigit` `isalpha` `isalnum` `isspace` `isupper` `islower` `isxdigit` `ispunct` … and `toupper` / `tolower` |
+| `<stdio.h>`  | `fopen` `fclose` `fflush`, `fread` `fwrite`, `fgetc` `getc` `getchar` `ungetc` `fgets`, `fputc` `putc` `putchar` `fputs` `puts`, `fseek` `ftell` `rewind`, `feof` `ferror` `clearerr`, `remove`, `printf` `fprintf` `snprintf` `vfprintf` `vsnprintf`, and `stdin` / `stdout` / `stderr` |
+
+### Files on the SD card
+
+`<stdio.h>` gives a seed real read/write access to the card, using the same filesystem BASIC does — long file names included — so a seed can log data, load a table, or transform a file at native speed:
+
+```c
+#include "seed.h"
+#include <stdio.h>
+
+SEED_EXPORT(logrun)
+{
+    FILE *f = fopen("Run Log.txt", "a");     // long name, append mode
+    if (!f) return -1;
+    fprintf(f, "run finished, code %d\n", (int)argv[0].num);
+    fclose(f);
+    return 0;
+}
+```
+
+`fopen` accepts the usual `"r"`, `"w"`, `"a"`, `"r+"`, `"w+"`, `"a+"` modes (a trailing `b` is accepted and ignored — files are always binary‑clean). `stdin`, `stdout` and `stderr` are wired to the keyboard and screen, so `printf` and `fgets(buf, n, stdin)` work as you'd expect.
+
+The `printf` family handles the integer and string conversions (`%d %i %u %o %x %X %c %s %p %%`, with width, `-`/`0` flags and `l`/`ll`/`z` length) and the floating‑point ones (`%f %e %g`). One thing to know about the floats: they are formatted in **BASIC's own number style** — the very same output `PRINT` and `STR$` produce (up to nine significant figures, switching to `E` notation for very large or small values) — so numbers look identical whether a seed or a BASIC line printed them. A consequence is that a precision or the exact `f`/`e`/`g` choice is advisory rather than exact (`%.2f` does not truncate to two places); field width is still honoured. There is no `scanf` — read a line with `fgets` and parse it with `strtol` / `strtod`. File writes are unbuffered (the storage layer caches a sector for you), so `fflush` is a no‑op and data is on the card as soon as it is written.
+
+There are only a few file channels in total, shared with BASIC's `OPEN*`, so a seed should `fclose` what it opens.
 
 These behave exactly as in standard C; `malloc` and friends draw from the seed heap, and `qsort`/`bsearch` take the usual comparator. For example, sorting a BASIC array in place:
 
@@ -2711,6 +3486,39 @@ When something goes wrong, BerryBasiC stops the current operation and prints a m
 | `Reserve memory into a numeric variable` | `DIM name size` used with a `$` variable |
 | `READ ran out of DATA` | more `READ`s than `DATA` items |
 
+## Collections
+
+| Message | Usually means |
+|---------|---------------|
+| `Not a collection` | a value passed where a dictionary/list/tree handle was expected isn't one |
+| `Not a dictionary` / `Not a list` / `Not a tree` | a collection word used on the wrong kind of collection |
+| `Too many collections` | more than 64 collections exist at once |
+| `Index out of range` | a list index, `DICTKEY$`/`TREEKEY` index outside `0 … SIZE-1` |
+| `List is empty` | `POP` / `POP$` on a list with no items |
+| `Tree is empty` | `TREEMIN` / `TREEMAX` on a tree with no keys |
+
+(Reading a value with the wrong number/text form raises the usual `Type mismatch`.)
+
+## Graphics
+
+| Message | Usually means |
+|---------|---------------|
+| `Could not allocate the back buffer` | `BUFFER ON` when there isn't room for a full‑screen buffer |
+| `Expected ON or OFF` | a `BUFFER` statement without `ON` or `OFF` |
+| `Bad sprite size` | `NEWSPRITE` with a zero or negative width/height |
+| `Bad sprite` | `SPRITETARGET` given a null or invalid sprite address |
+
+## Hardware buses (GPIO, I2C)
+
+| Message | Usually means |
+|---------|---------------|
+| `No such pin` | a pin number outside BCM 0–27 |
+| `Bad pin mode` | an unknown `PINMODE` mode, or an `ALT` function outside 0–5 |
+| `GPIO needs the Pi, not the host build` | a GPIO command on the host test build |
+| `I2C needs real Pi hardware` | an I2C word on the host or under QEMU (the bus isn't emulated) |
+| `I2C write failed` / `I2C read failed` | no device acknowledged, or the transfer timed out |
+| `Too many bytes` | an `I2CWRITE` with more than 64 bytes |
+
 ## Files and storage
 
 | Message | Usually means |
@@ -2746,6 +3554,7 @@ When something goes wrong, BerryBasiC stops the current operation and prints a m
 | String length | 255 characters |
 | Variables | 512 |
 | Arrays | 16, up to 3 dimensions each |
+| Collections (dictionaries + lists + trees) | 64 total |
 | String‑array elements (pool) | 512 |
 | `GOSUB` nesting | 32 |
 | `FOR` nesting | 16 |
@@ -2761,6 +3570,10 @@ When something goes wrong, BerryBasiC stops the current operation and prints a m
 | Loaded seeds | 8 |
 | Seed arguments | 16 |
 | Seed heap | 2 MB (default) |
+| GPIO pins (BCM numbering) | 0–27 |
+| `PINMODE` alt functions | 0–5 |
+| Back buffer (`BUFFER ON`) | one, full‑screen |
+| Active sprite target (`SPRITETARGET`) | one at a time |
 
 ---
 
@@ -2774,11 +3587,17 @@ Grouped by purpose. Functions are marked *(fn)* and used inside expressions; eve
 
 **Assignment & data:** `LET` · `DIM` · `DATA` · `READ` · `RESTORE`
 
+**Collections:** `NEWDICT` *(fn)* · `NEWLIST` *(fn)* · `NEWTREE` *(fn)* · `SIZE` *(fn)* · `DICTSET` · `DICTGET` *(fn)* · `DICTGET$` *(fn)* · `DICTHAS` *(fn)* · `DICTDEL` · `DICTKEY$` *(fn)* · `PUSH` · `POP` *(fn)* · `POP$` *(fn)* · `LISTGET` *(fn)* · `LISTGET$` *(fn)* · `LISTSET` · `LISTINS` · `LISTDEL` · `TREESET` · `TREEGET` *(fn)* · `TREEGET$` *(fn)* · `TREEHAS` *(fn)* · `TREEDEL` · `TREEMIN` *(fn)* · `TREEMAX` *(fn)* · `TREEKEY` *(fn)*
+
 **Control flow:** `IF` · `THEN` · `ELSE` · `ENDIF` · `FOR` · `TO` · `STEP` · `NEXT` · `REPEAT` · `UNTIL` · `WHILE` · `ENDWHILE` · `CASE` · `OF` · `WHEN` · `OTHERWISE` · `ENDCASE` · `GOTO` · `GOSUB` · `RETURN` · `ON` · `EXIT` · `CONTINUE`
+
+**Events & timing:** `ON TIMER` · `ON KEY` · `ON PIN` · `ON MOUSE` (each with `OFF` to cancel; handler is a `PROC`) · `WAIT` · `DELAY`
 
 **Error handling:** `TRY` · `CATCH` · `ENDTRY` · `RAISE` · `ERR` *(fn)* · `ERR$` *(fn)*
 
 **Procedures & functions:** `DEF` · `PROC` · `FN` · `ENDPROC` · `LOCAL` · `IMPORT`
+
+**Dynamic evaluation:** `EVAL` *(fn)* · `EXEC`
 
 **Operators (keywords):** `DIV` · `MOD` · `AND` · `OR` · `EOR` · `NOT`
 
@@ -2792,6 +3611,8 @@ Grouped by purpose. Functions are marked *(fn)* and used inside expressions; eve
 
 **Keyboard & cursor *(fn)*:** `GET` · `GET$` · `INKEY` · `INKEY$` · `POS` · `VPOS`
 
+**Keyboard layout:** `KEYBOARD` · `KEYBOARD$` *(fn)*
+
 **Mouse:** `MOUSE` (statement) · `MOUSEX` · `MOUSEY` · `MOUSEB` *(fn)*
 
 **Time:** `TIME` (read or set)
@@ -2800,9 +3621,15 @@ Grouped by purpose. Functions are marked *(fn)* and used inside expressions; eve
 
 **Sound:** `SOUND` · `SOUND OFF` · `TONE`
 
+**Hardware (GPIO):** `PINMODE` · `PIN` (statement `PIN n,v`; function `PIN(n)` *(fn)*) · `PINS` *(fn)* · `PINSET` · `PINCLR` · `PINWAIT` *(fn)* · mode words `OUTPUT` · `INPUT` · `PULLUP` · `PULLDOWN` · `ALT`
+
+**Hardware (I2C):** `I2CWRITE` · `I2CREAD` · `I2CPROBE` *(fn)*
+
 **Graphics:** `GCOL` · `PLOT` · `MOVE` · `DRAW` · `CLG` · `POINT` *(fn)* · `LINE` · `RECTANGLE` · `CIRCLE` · `ELLIPSE` · `FILL` · `RGB` *(fn)*
 
-**Sprites:** `GGET` · `GPUT` · `LOADSPRITE` *(fn)* · `SAVESPRITE` · `SPRW` *(fn)* · `SPRH` *(fn)*
+**Sprites:** `GGET` · `GPUT` (plain, or `GPUT addr,x,y,scale,angle`) · `LOADSPRITE` *(fn)* · `SAVESPRITE` · `SPRW` *(fn)* · `SPRH` *(fn)*
+
+**Sprites/graphics depth:** `BUFFER ON` / `BUFFER OFF` · `FLIP` · `GTINT` (`… OFF` to clear) · `NEWSPRITE` · `SPRITETARGET` (`… OFF` to restore) · `TILEMAP`
 
 **Storage & directories:** `SAVE` · `LOAD` · `CAT` · `DIR` · `DELETE` · `MKDIR` · `CD` · `RMDIR` · `PWD` · `DIROPEN` *(fn)* · `DIRNEXT` *(fn)* · `DIRNAME$` *(fn)* · `DIRTYPE` *(fn)* · `DIRSIZE` *(fn)* · `DIRDATE$` *(fn)* · `DIRTIME$` *(fn)*
 

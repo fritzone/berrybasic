@@ -27,7 +27,7 @@ const char *stg_cwd(void);          // current directory path (for PWD / prompts
 // each stg_dirnext yields the next entry. This backs the BASIC DIROPEN /
 // DIRNEXT / DIRNAME$ / DIRSIZE / DIRTYPE / DIRDATE$ / DIRTIME$ words.
 typedef struct {
-    char name[13];              // "NAME.EXT" (8.3, uppercased, no path), NUL-terminated
+    char name[256];             // file name (VFAT long name if present, else 8.3), NUL-terminated
     int  is_dir;                // 1 = directory, 0 = regular file
     long size;                  // size in bytes (0 for directories)
     int  year, month, day;      // last-write date (month/day 1-based; 0 if none)

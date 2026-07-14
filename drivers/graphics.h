@@ -16,6 +16,23 @@
 typedef struct { int x1, y1, x2, y2, clip; } viewport_t;
 
 void init_graphics(uint32_t *fb, uint32_t w, uint32_t h, uint32_t pitch);
+
+// --- double buffering -------------------------------------------------------
+// gfx_backbuffer(1) redirects every primitive to an off-screen back buffer
+// (allocated once, sized to the current front buffer); gfx_backbuffer(0)
+// restores drawing to the visible framebuffer. gfx_flip() copies the back
+// buffer onto the front. gfx_buffered() reports whether drawing is buffered.
+// Returns 0 on success, <0 if the resolution exceeds the back-buffer capacity.
+int  gfx_backbuffer(int on);
+void gfx_flip(void);
+int  gfx_buffered(void);
+
+// Render-to-sprite: gfx_set_target points every primitive at an off-screen WxH
+// surface (tightly packed, pitch = w); gfx_reset_target restores the screen
+// (front or back buffer). Used by SPRITETARGET.
+void gfx_set_target(uint32_t *buf, uint32_t w, uint32_t h);
+void gfx_reset_target(void);
+
 void putpixel(int x, int y, uint32_t color);
 void putpixel_op(int x, int y, uint32_t color);   // like putpixel but applies the plot op
 uint32_t getpixel(int x, int y);

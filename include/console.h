@@ -27,6 +27,12 @@ void con_cls(void);             // clear screen, cursor home
 void con_colour(int c);         // set text foreground colour (BBC COLOUR 0..7)
 int  con_getkey(void);          // block for one keypress, return its ASCII code
 
+// Keyboard layout (KEYBOARD statement / KEYBOARD$ function). con_set_keyboard
+// selects a layout by two-letter code (US/UK/NO/DK/SE/DE, case-insensitive) and
+// returns 1 on success, 0 if unknown. con_get_keyboard returns the active code.
+int         con_set_keyboard(const char *code);
+const char *con_get_keyboard(void);
+
 unsigned long long con_micros(void);   // microseconds since boot (for TIME)
 int  con_inkey(int centiseconds);      // wait up to n centiseconds for a key; -1 if none
 int  con_pos(void);                    // text cursor column (POS)
@@ -51,6 +57,32 @@ void con_plot(int code, int x, int y);   // PLOT code,x,y (master graphics primi
 void con_clg(void);                      // CLG: clear graphics area to gfx background
 int  con_point(int x, int y);            // POINT(x,y): logical colour 0..7, or -1 off-screen
 
+// --- double buffering -------------------------------------------------------
+// con_backbuffer(1) allocates (once) a full-screen off-screen buffer and routes
+// all drawing to it; the visible screen freezes until con_flip(). con_backbuffer
+// (0) routes drawing back to the visible screen. con_flip() presents the back
+// buffer (a no-op when buffering is off). con_buffered() reports the state.
+// con_backbuffer returns 0 on success, <0 if the buffer could not be allocated.
+int  con_backbuffer(int on);
+void con_flip(void);
+int  con_buffered(void);
+
+// --- render-to-sprite -------------------------------------------------------
+// con_newsprite initialises a DIM buffer as a w*h fully transparent sprite.
+// con_target_sprite redirects all drawing into that sprite (coordinates become
+// its own pixels, origin bottom-left); returns 0 on success, <0 on a bad sprite.
+// con_target_screen returns drawing to the screen (or the back buffer).
+void con_newsprite(long addr, int w, int h);
+int  con_target_sprite(long addr);
+void con_target_screen(void);
+
+// TILEMAP: draw the visible window of a tile grid. `map` -> cols*rows LE u32
+// words, row-major (top row first); value 0 = empty, k>=1 = sheet tile (k-1).
+// Tiles are tilew x tileh, packed row-major in the `sheet` sprite; scrollx/
+// scrolly shift the world. Respects the viewport, target buffer and tint.
+void con_tilemap(long sheet, long map, int cols, int rows,
+                 int tilew, int tileh, int scrollx, int scrolly);
+
 // --- graphics library (all in BBC logical coordinates) ----------------------
 void con_gcol_rgb(int r, int g, int b);              // GCOL r,g,b : truecolour foreground
 void con_palette(int logical, int r, int g, int b);  // COLOUR l,r,g,b : redefine a palette slot
@@ -63,6 +95,14 @@ void con_fill(int x, int y);                         // FILL x,y : flood fill
 // back (top-left at the given logical point, honouring the plot op).
 void con_sprite_get(long addr, int x1, int y1, int x2, int y2);
 void con_sprite_put(long addr, int x, int y);
+// Blit a sprite scaled by `scale` (1.0 = original) and rotated `angle` degrees
+// clockwise about its centre; the centre lands where con_sprite_put's would, so
+// (1,0) == con_sprite_put. Honours alpha, GCOL action, viewport, tint, and the
+// current draw target. scale<=0 draws nothing; angle is taken mod 360.
+void con_sprite_put_ex(long addr, int x, int y, double scale, double angle);
+// GTINT: set (on!=0) or clear the sprite tint - out = lerp(src,(r,g,b),a/255),
+// applied to every blitted sprite (both con_sprite_put forms), alpha preserved.
+void con_sprite_tint(int on, int r, int g, int b, int a);
 
 // --- pointer (USB mouse) ----------------------------------------------------
 // Poll the mouse and report the current pointer position in raw framebuffer

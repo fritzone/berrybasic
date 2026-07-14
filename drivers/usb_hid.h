@@ -17,8 +17,17 @@
 #define KEY_END    0x16
 #define KEY_DEL    0x7F   // forward delete
 
-// Map a HID usage code + modifier byte to an ASCII character (0 if none).
+// Map a HID usage code + modifier byte to a character (0 if none), honouring the
+// active keyboard layout (see hid_set_layout) and AltGr (modifier bit 0x40).
 char hid_to_ascii(uint8_t kc, uint8_t mod);
+
+// Keyboard layout selection. Codes are two letters, case-insensitive:
+//   "US" United States · "UK" United Kingdom · "NO" Norwegian · "DK" Danish
+//   "SE" Swedish · "DE" German.
+// hid_set_layout returns 1 on success, 0 if the code is unknown (layout kept).
+// hid_layout_code returns the active code (never NULL); defaults to "US".
+int         hid_set_layout(const char *code);
+const char *hid_layout_code(void);
 
 // Given a fresh 8-byte boot report and the caller's previous-report buffer,
 // return the ASCII for the first newly-pressed key (0 if none). Updates prev[].

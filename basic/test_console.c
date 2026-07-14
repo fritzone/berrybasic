@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "console.h"
+#include "usb_hid.h"
 
 // ---- scripted input --------------------------------------------------------
 static const char *in_buf;
@@ -100,10 +101,23 @@ int con_screen(int w, int h) {
 int con_screen_w(void) { return host_scr_w; }
 int con_screen_h(void) { return host_scr_h; }
 
+int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
+const char *con_get_keyboard(void)             { return hid_layout_code(); }
+
 void con_gcol(int a, int c) { (void)a; (void)c; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}
 int  con_point(int x, int y) { (void)x; (void)y; return -1; }
+static int tc_buffered = 0;
+int  con_backbuffer(int on) { tc_buffered = on ? 1 : 0; return 0; }
+void con_flip(void) {}
+int  con_buffered(void) { return tc_buffered; }
+void con_newsprite(long a, int w, int h) { (void)a; (void)w; (void)h; }
+int  con_target_sprite(long a) { (void)a; return 0; }
+void con_target_screen(void) {}
+void con_tilemap(long sh, long m, int c, int r, int tw, int th, int sx, int sy) {
+    (void)sh; (void)m; (void)c; (void)r; (void)tw; (void)th; (void)sx; (void)sy;
+}
 void con_gcol_rgb(int r, int g, int b) { (void)r; (void)g; (void)b; }
 void con_palette(int l, int r, int g, int b) { (void)l; (void)r; (void)g; (void)b; }
 void con_line(int x1, int y1, int x2, int y2) { (void)x1; (void)y1; (void)x2; (void)y2; }
@@ -113,4 +127,6 @@ void con_ellipse(int x, int y, int rx, int ry, int f) { (void)x; (void)y; (void)
 void con_fill(int x, int y) { (void)x; (void)y; }
 void con_sprite_get(long a, int x1, int y1, int x2, int y2) { (void)a; (void)x1; (void)y1; (void)x2; (void)y2; }
 void con_sprite_put(long a, int x, int y) { (void)a; (void)x; (void)y; }
+void con_sprite_put_ex(long a, int x, int y, double sc, double an) { (void)a; (void)x; (void)y; (void)sc; (void)an; }
+void con_sprite_tint(int on, int r, int g, int b, int a) { (void)on; (void)r; (void)g; (void)b; (void)a; }
 void con_mouse(int *x, int *y, int *b) { if (x) *x = 0; if (y) *y = 0; if (b) *b = 0; }
