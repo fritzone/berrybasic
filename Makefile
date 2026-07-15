@@ -67,6 +67,11 @@ $(BUILD_DIR)/%.o: %.S | $(BUILD_DIR)
 # third-party header (it is not our code).
 $(BUILD_DIR)/image.o: CFLAGS += -Ithird_party -Ithird_party/stb_shim -w
 
+# drivers/ttf.c compiles the vendored stb_truetype.h. It defines every STBTT_*
+# hook itself (so stb pulls in no system headers), needing only the third_party
+# path; -w silences warnings from the third-party header.
+$(BUILD_DIR)/ttf.o: CFLAGS += -Ithird_party -w
+
 clean:
 	rm -rf $(BUILD_DIR)
 
@@ -114,10 +119,11 @@ HOST_BIN    = $(BUILD_DIR)/basic_host
 HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -I$(DRIVERS_DIR) -Ithird_party
 HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
               $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/sound_host.c \
-              $(HOST_DIR)/gpio_host.c $(HOST_DIR)/i2c_host.c $(DRIVERS_DIR)/usb_hid.c $(HOST_DIR)/main.c
+              $(HOST_DIR)/gpio_host.c $(HOST_DIR)/i2c_host.c $(HOST_DIR)/ttf_host.c $(HOST_DIR)/gfx_host.c \
+              $(DRIVERS_DIR)/usb_hid.c $(HOST_DIR)/main.c
 
 host: $(HOST_SRC) | $(BUILD_DIR)
-	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC)
+	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC) -lm
 
 # Unit tests (Catch2) for the interpreter, configured by basic/CMakeLists.txt.
 #   make test        build + run the test suite

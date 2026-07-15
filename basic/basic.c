@@ -6,6 +6,8 @@
 #include "sound.h"
 #include "gpio.h"
 #include "i2c.h"
+#include "ttf.h"
+#include "gfx.h"
 #include "basic.h"
 
 // ===========================================================================
@@ -604,6 +606,7 @@ static void clear_vars(void) {       // BASIC CLR: scalars + arrays + string hea
     arr_strs_top = 0;
     dim_top = 0;
     img_sprite_reset();      // free image-loaded sprites
+    ttf_reset();             // drop loaded TrueType fonts
     gpio_reset();            // header pins -> input, no pull (never leave a load driven)
     i2c_reset();             // release the I2C bus (gpio_reset returned SDA/SCL to inputs)
 }
@@ -676,6 +679,7 @@ enum {
     KW_GTINT,                                                     // GTINT r,g,b,a / GTINT OFF : sprite tint
     KW_NEWSPRITE, KW_SPRITETARGET,                               // render-to-sprite: blank sprite + redirect drawing
     KW_TILEMAP,                                                  // TILEMAP sheet,map,cols,rows,tw,th,sx,sy
+    KW_FONT, KW_FONTSIZE, KW_FONTSTYLE, KW_GTEXT,                // TrueType fonts: select / size / style / draw
     KW_SAVE, KW_LOAD, KW_CAT, KW_DIR, KW_DELETE,                    // storage statements
     KW_MKDIR, KW_CD, KW_RMDIR, KW_PWD,                              // directory statements
     KW_BPUT, KW_CLOSE,                                              // file I/O statements
@@ -685,6 +689,7 @@ enum {
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
     KW_PINS,                                          // PINS : read all header pins at once
     KW_SCREEN, KW_SCREENW, KW_SCREENH,                // SCREEN statement + current-resolution values
+    KW_FONTHEIGHT,                                    // FONTHEIGHT : line height of the current font (px)
     KW_KEYBOARD, KW_KEYBOARDS,                        // KEYBOARD "NO" statement + KEYBOARD$ (current layout)
     KW_ERR, KW_ERRS,                                  // ERR / ERR$ : code + message of a caught error
     KW_MOUSEX, KW_MOUSEY, KW_MOUSEB,                  // mouse pointer x / y / buttons
@@ -722,8 +727,10 @@ enum {
     KW_TREEGET, KW_TREEGETS, KW_TREEHAS,              // tree lookups
     KW_TREEMIN, KW_TREEMAX, KW_TREEKEY,               // tree ordered access
     KW_I2CPROBE,                                      // I2CPROBE(addr) -> device present?
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_I2CPROBE,
-    KW_TAB, KW_SPC                                    // PRINT-only modifiers
+    KW_HEXS, KW_BINS, KW_FORMATS,                     // formatted / multi-base output
+    KW_LOADFONT, KW_TEXTWIDTH,                         // LOADFONT("f")->handle ; TEXTWIDTH(s$)->pixels
+    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_TEXTWIDTH,
+    KW_TAB, KW_SPC, KW_USING                          // PRINT-only modifiers
 };
 
 static int is_func_kw(int id) { return id >= KW__FIRST_FUNC && id <= KW__LAST_FUNC; }
@@ -764,6 +771,9 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "BUFFER", KW_BUFFER }, { "FLIP", KW_FLIP }, { "GTINT", KW_GTINT },
     { "NEWSPRITE", KW_NEWSPRITE }, { "SPRITETARGET", KW_SPRITETARGET },
     { "TILEMAP", KW_TILEMAP },
+    { "LOADFONT", KW_LOADFONT }, { "FONT", KW_FONT }, { "FONTSIZE", KW_FONTSIZE },
+    { "FONTSTYLE", KW_FONTSTYLE }, { "GTEXT", KW_GTEXT },
+    { "TEXTWIDTH", KW_TEXTWIDTH }, { "FONTHEIGHT", KW_FONTHEIGHT },
     // Collections: dictionary, list, binary tree
     { "NEWDICT", KW_NEWDICT }, { "NEWLIST", KW_NEWLIST }, { "NEWTREE", KW_NEWTREE },
     { "SIZE", KW_SIZE },
@@ -813,7 +823,8 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "OPENIN", KW_OPENIN }, { "OPENOUT", KW_OPENOUT }, { "OPENUP", KW_OPENUP },
     { "BGET",  KW_BGET  }, { "BPUT", KW_BPUT }, { "EOF", KW_EOF },
     { "EXT",   KW_EXT   }, { "PTR",  KW_PTR  }, { "CLOSE", KW_CLOSE },
-    { "TAB",   KW_TAB   }, { "SPC",  KW_SPC   },
+    { "TAB",   KW_TAB   }, { "SPC",  KW_SPC   }, { "USING", KW_USING },
+    { "HEX$",  KW_HEXS  }, { "BIN$", KW_BINS  }, { "FORMAT$", KW_FORMATS },
 };
 static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
 
@@ -881,6 +892,13 @@ static void lex_next(void) {
             lx++;
         }
         tok = T_NUM; tok_num = (double)h; return;
+    }
+
+    if (c == '%' && (lx[1] == '0' || lx[1] == '1')) {  // binary constant, e.g. %1010
+        lx++;                                          // (a lone '%' is a var suffix,
+        long b = 0;                                    //  handled in the identifier branch)
+        while (*lx == '0' || *lx == '1') { b = b * 2 + (*lx - '0'); lx++; }
+        tok = T_NUM; tok_num = (double)b; return;
     }
 
     if (c == '"') {
@@ -1604,6 +1622,33 @@ static int  svc_file_remove(const char *name) { return stg_delete(name); }
 // Format a double exactly as PRINT/STR$ do, so a seed's printf %f matches BASIC.
 static int svc_fmt_num(double v, char *out) { return dbl_to_str(out, v); }
 
+// --- graphics + TrueType text for seeds (ABI v7) ---------------------------
+// Device-pixel drawing forwards to gfx.h (framebuffer target / host no-op);
+// font management reuses the same ttf.h engine as BASIC's GTEXT.
+static int  svc_gfx_avail(void)  { return sgfx_avail(); }
+static int  svc_gfx_width(void)  { return sgfx_width(); }
+static int  svc_gfx_height(void) { return sgfx_height(); }
+static void svc_gfx_clear(uint32_t rgb) { sgfx_clear(rgb); }
+static void svc_gfx_putpixel(int x, int y, uint32_t rgb) { sgfx_putpixel(x, y, rgb); }
+static uint32_t svc_gfx_getpixel(int x, int y) { return sgfx_getpixel(x, y); }
+static void svc_gfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_line(x1, y1, x2, y2, rgb); }
+static void svc_gfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_fillrect(x1, y1, x2, y2, rgb); }
+static void svc_gfx_circle(int cx, int cy, int r, uint32_t rgb) { sgfx_circle(cx, cy, r, rgb); }
+static void svc_gfx_fillcircle(int cx, int cy, int r, uint32_t rgb) { sgfx_fillcircle(cx, cy, r, rgb); }
+static void svc_gfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_ellipse(cx, cy, rx, ry, rgb); }
+static void svc_gfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_fillellipse(cx, cy, rx, ry, rgb); }
+static void svc_gfx_fillpoly(const int *xy, int npts, uint32_t rgb) { sgfx_fillpoly(xy, npts, rgb); }
+static void svc_gfx_flood(int x, int y, uint32_t rgb) { sgfx_flood(x, y, rgb); }
+static void svc_gfx_clip(int x1, int y1, int x2, int y2) { sgfx_clip(x1, y1, x2, y2); }
+static void svc_gfx_noclip(void) { sgfx_noclip(); }
+static int  svc_font_load(const char *name) { return ttf_load(name); }
+static int  svc_font_select(int handle) { return ttf_select(handle); }
+static void svc_font_size(int px) { ttf_set_size(px); }
+static void svc_font_style(int b, int i, int u) { ttf_set_style(b, i, u); }
+static void svc_gfx_text(int x, int y, const char *s, int len, uint32_t rgb) { sgfx_text(x, y, s, len, rgb); }
+static int  svc_text_width(const char *s, int len) { return ttf_text_width(s, len); }
+static int  svc_text_height(void) { return ttf_line_height(); }
+
 static const SeedServices g_svc = {
     SEED_ABI_VERSION,
     svc_putc, svc_puts, svc_getkey, svc_inkey,
@@ -1616,6 +1661,12 @@ static const SeedServices g_svc = {
     svc_file_open, svc_file_close, svc_file_read, svc_file_write,
     svc_file_seek, svc_file_size, svc_file_eof, svc_file_remove,
     svc_fmt_num,
+    svc_gfx_avail, svc_gfx_width, svc_gfx_height, svc_gfx_clear,
+    svc_gfx_putpixel, svc_gfx_getpixel, svc_gfx_line, svc_gfx_fillrect,
+    svc_gfx_circle, svc_gfx_fillcircle, svc_gfx_ellipse, svc_gfx_fillellipse,
+    svc_gfx_fillpoly, svc_gfx_flood, svc_gfx_clip, svc_gfx_noclip,
+    svc_font_load, svc_font_select, svc_font_size, svc_font_style,
+    svc_gfx_text, svc_text_width, svc_text_height,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma
@@ -1673,6 +1724,89 @@ static int parse_array_ref(char *name) {
 }
 
 static int gpio_guard(void);            // defined with the GPIO statements below
+
+// Render a number as text under a FORMAT$/PRINT USING template. Returns the
+// output length, or -1 if the template has no digit position at all. Template
+// chars: '#' = optional digit (blank-filled), '0' = zero-filled digit, '.' =
+// decimal point (positions after it set the decimal places, value is rounded),
+// ',' = thousands separators in the integer part, a leading '+' forces a sign,
+// a leading '-' is the default (sign only when negative). Any other character
+// is literal and copied through. The integer part is never truncated: if it
+// needs more digits than the template provides, the field simply grows.
+static int fmt_number(char *out, const char *tmpl, int tlen, double v) {
+    int sign_mode = 0;                       // 0 = sign only if negative, 1 = always
+    char prefix[64]; int plen = 0;           // literal text before the digit field
+    char suffix[64]; int slen = 0;           // literal text after the digit field
+    int int_slots = 0, int_zeros = 0;        // integer digit positions / zero-filled ones
+    int use_commas = 0, dec_places = 0;
+    int seen_field = 0, in_frac = 0, field_done = 0;
+
+    for (int i = 0; i < tlen; i++) {
+        char c = tmpl[i];
+        if (!seen_field && (c == '+' || c == '-')) {   // leading sign indicator
+            if (c == '+') sign_mode = 1;
+            continue;
+        }
+        if (c == '#' || c == '0') {
+            if (field_done) { if (slen < 63) suffix[slen++] = c; continue; }
+            seen_field = 1;
+            if (in_frac) dec_places++;
+            else { int_slots++; if (c == '0') int_zeros++; }
+            continue;
+        }
+        if (c == ',' && seen_field && !in_frac && !field_done) { use_commas = 1; continue; }
+        if (c == '.' && seen_field && !in_frac && !field_done) { in_frac = 1; continue; }
+        if (!seen_field) { if (plen < 63) prefix[plen++] = c; }        // literal prefix
+        else { field_done = 1; if (slen < 63) suffix[slen++] = c; }    // literal suffix
+    }
+    if (int_slots == 0 && dec_places == 0) return -1;    // no digit position
+
+    double mag = v < 0 ? -v : v;
+    char sign = v < 0 ? '-' : (sign_mode ? '+' : 0);
+    double pw10 = 1; for (int i = 0; i < dec_places; i++) pw10 *= 10;
+    double m = mag * pw10;
+    // Round half away from zero, with a tiny relative nudge so decimals that a
+    // human writes exactly (e.g. 2.005) don't fall short through binary error.
+    unsigned long long scaled = (unsigned long long)(m + 0.5 + m * 1e-12 + 1e-9);
+    unsigned long long divp = 1; for (int i = 0; i < dec_places; i++) divp *= 10;
+    unsigned long long ip = scaled / divp;
+    unsigned long long fp = scaled - ip * divp;
+
+    // Integer digits, least-significant first, then zero-padded to the minimum.
+    char idig[40]; int ndig = 0;
+    if (ip == 0) idig[ndig++] = '0';
+    while (ip > 0 && ndig < 39) { idig[ndig++] = (char)('0' + (int)(ip % 10)); ip /= 10; }
+    while (ndig < int_zeros && ndig < 39) idig[ndig++] = '0';
+
+    // Weave commas in (still least-significant first), then reverse to forward.
+    char istr[64]; int ilen = 0;
+    for (int i = 0; i < ndig && ilen < 62; i++) {
+        if (use_commas && i > 0 && i % 3 == 0) istr[ilen++] = ',';
+        istr[ilen++] = idig[i];
+    }
+    char ifwd[64]; for (int i = 0; i < ilen; i++) ifwd[i] = istr[ilen - 1 - i];
+
+    // Assemble: prefix, leading blanks (a floating sign eats one), digits,
+    // decimal point and fraction, suffix.
+    int n = 0;
+    for (int i = 0; i < plen && n < MAX_STR; i++) out[n++] = prefix[i];
+    int blanks = int_slots - ndig; if (blanks < 0) blanks = 0;
+    if (sign) {
+        for (int i = 0; i < blanks - 1 && n < MAX_STR; i++) out[n++] = ' ';
+        if (n < MAX_STR) out[n++] = sign;
+    } else {
+        for (int i = 0; i < blanks && n < MAX_STR; i++) out[n++] = ' ';
+    }
+    for (int i = 0; i < ilen && n < MAX_STR; i++) out[n++] = ifwd[i];
+    if (dec_places > 0) {
+        if (n < MAX_STR) out[n++] = '.';
+        char fbuf[24]; unsigned long long t = fp;
+        for (int i = dec_places - 1; i >= 0; i--) { fbuf[i] = (char)('0' + (int)(t % 10)); t /= 10; }
+        for (int i = 0; i < dec_places && n < MAX_STR; i++) out[n++] = fbuf[i];
+    }
+    for (int i = 0; i < slen && n < MAX_STR; i++) out[n++] = suffix[i];
+    return n;
+}
 
 static value_t eval_function(int fn) {
     lex_next();                         // consume function name
@@ -1822,6 +1956,39 @@ static value_t eval_function(int fn) {
         case KW_I2CPROBE: { int addr = (int)need_num(); if (g_err) break;
                             if (!i2c_available()) { err("I2C needs real Pi hardware"); break; }
                             result = v_num(i2c_probe(addr) ? -1.0 : 0.0); break; }
+        // HEX$/BIN$: the value as a 32-bit integer (BBC two's-complement, so
+        // HEX$(-1) = "FFFFFFFF"), optionally zero-padded to a minimum width.
+        case KW_HEXS: case KW_BINS: {
+            unsigned long val = (unsigned long)(unsigned int)(long)need_num();
+            int w = 0;
+            if (tok == T_COMMA) { lex_next(); w = (int)need_num(); }
+            if (g_err) break;
+            int base = (fn == KW_HEXS) ? 16 : 2;
+            char tmp[33]; int t = 0;
+            if (val == 0) tmp[t++] = '0';
+            while (val) { int d = (int)(val % base); tmp[t++] = (char)(d < 10 ? '0' + d : 'A' + d - 10); val /= base; }
+            char b[40]; int n = 0;
+            for (int i = t; i < w && n < 39; i++) b[n++] = '0';   // pad to at least w digits
+            while (t) b[n++] = tmp[--t];                          // reverse into b
+            result = str_in_scratch(b, n); break;
+        }
+        // FORMAT$(template$, value): render a number under a template (decimals,
+        // width, zero-pad, thousands, sign); literal template text copies through.
+        case KW_FORMATS: {
+            value_t tp = need_str(); if (!expect(T_COMMA)) break;
+            double val = need_num(); if (g_err) break;
+            char b[MAX_STR + 1];
+            int n = fmt_number(b, tp.str, tp.len, val);
+            if (n < 0) { err("Bad format template"); break; }
+            result = str_in_scratch(b, n); break;
+        }
+        // LOADFONT("file.ttf") -> handle > 0 (also selects it), or 0 on failure.
+        case KW_LOADFONT: { value_t s = need_str(); if (g_err) break;
+                            char nm[128]; copy_fname(s, nm, sizeof nm);
+                            result = v_num((double)ttf_load(nm)); break; }
+        // TEXTWIDTH(s$) -> pixel width of s$ in the current font/size/style.
+        case KW_TEXTWIDTH: { value_t s = need_str(); if (g_err) break;
+                             result = v_num((double)ttf_text_width(s.str, s.len)); break; }
         case KW_RGB: { int r = (int)need_num(); if (!expect(T_COMMA)) break;
                        int g = (int)need_num(); if (!expect(T_COMMA)) break;
                        int b = (int)need_num(); if (g_err) break;
@@ -2168,6 +2335,7 @@ static value_t prim_base(void) {
                            return v_num((double)gpio_read_all());
             case KW_SCREENW: lex_next(); return v_num(con_screen_w());
             case KW_SCREENH: lex_next(); return v_num(con_screen_h());
+            case KW_FONTHEIGHT: lex_next(); return v_num(ttf_line_height());
             case KW_KEYBOARDS: { lex_next(); const char *c = con_get_keyboard();
                                  int n = 0; while (c[n]) n++;
                                  return str_in_scratch(c, n); }
@@ -2632,6 +2800,16 @@ static void stmt_input_file(void) {
 static void stmt_print(void) {
     lex_next();                              // consume PRINT
     if (tok == T_HASH) { stmt_print_file(); return; }
+    // PRINT USING tmpl$; a; b; ...  — format every numeric item with the same
+    // template (as FORMAT$ would); strings, TAB/SPC and separators are unchanged.
+    char using_tmpl[MAX_STR + 1]; int using_len = -1;   // -1 = no template active
+    if (tok == T_KW && tok_kw == KW_USING) {
+        lex_next();
+        value_t t = need_str(); if (g_err) return;
+        if (tok == T_SEMI || tok == T_COMMA) lex_next();   // separator before the first item
+        using_len = t.len > MAX_STR ? MAX_STR : t.len;
+        for (int i = 0; i < using_len; i++) using_tmpl[i] = t.str[i];
+    }
     int col = 0;
     int trailing_sep = 0;                    // line ended with a separator -> no newline
     while (tok != T_EOL && tok != T_COLON && !(tok == T_KW && tok_kw == KW_ELSE)) {
@@ -2658,6 +2836,12 @@ static void stmt_print(void) {
         value_t v = eval_expr();
         if (g_err) return;
         if (v.is_str) { con_putsn(v.str, v.len); col += v.len; }
+        else if (using_len >= 0) {           // PRINT USING: format via the template
+            char b[MAX_STR + 1];
+            int n = fmt_number(b, using_tmpl, using_len, v.num);
+            if (n < 0) { err("Bad format template"); return; }
+            con_putsn(b, n); col += n;
+        }
         else { char b[40]; int n = dbl_to_str(b, v.num); con_putsn(b, n); col += n; }
         trailing_sep = 0;
     }
@@ -3335,10 +3519,152 @@ static void list_text(const char *t) {
     }
 }
 
-// LIST [start][,end] : whole program, a single line (LIST 100), a range
-// (LIST 100,200), from a line (LIST 100,) or up to a line (LIST ,200).
+static int word_is(const char *w);      // "LIST SIMPLE" / OFF-style bareword test
+
+// --- pretty LIST: gutter, indentation and syntax colouring ------------------
+// Colours are BBC logical indices (con_colour): on the framebuffer they tint the
+// text, on the host CLI they map to ANSI, and in the unit tests they are a no-op.
+#define LC_LINE  6      // line-number gutter  (cyan)
+#define LC_KW    3      // keywords            (yellow)
+#define LC_STR   2      // string literals     (green)
+#define LC_NUM   5      // numeric literals    (magenta)
+#define LC_NAME  6      // PROC/FN names       (cyan)
+#define LC_REM   4      // REM comments        (blue)
+#define LC_DEF   7      // everything else     (white)
+
+static int is_hexd(char c) { c = up(c); return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); }
+static int num_digits(int n) { int d = 1; if (n < 0) n = -n; while (n >= 10) { n /= 10; d++; } return d; }
+
+// Analyse one program line for block indentation. Returns the net change in
+// nesting depth the line makes (openers +1, closers -1), and sets *dedent_first
+// when the line *begins* with a closer or a mid-block keyword (NEXT, ENDIF,
+// ELSE, ...) so the line itself renders one level out. A multi-line IF is one
+// whose last word is THEN; a one-line DEF (a classic FN= or a PROC:...:ENDPROC)
+// nets to zero, so only true multi-line definitions open a block.
+static int line_blocks(const char *t, int *dedent_first) {
+    *dedent_first = 0;
+    int delta = 0, seen = 0, defs = 0, has_eq = 0;
+    char last[16]; last[0] = 0;
+    int i = 0;
+    while (t[i]) {
+        if (t[i] == '"') { i++; while (t[i] && t[i] != '"') i++; if (t[i]) i++; continue; }
+        if (t[i] == '=') { has_eq = 1; i++; continue; }
+        if (!is_alpha(t[i])) { i++; continue; }
+        char w[16]; int wn = 0;
+        while (is_alnum(t[i])) { if (wn < 15) w[wn++] = up(t[i]); i++; }
+        w[wn] = 0;
+        s_copy(last, w, 16);
+        int open = 0, close = 0, mid = 0;
+        if (s_eq(w, "FOR") || s_eq(w, "REPEAT") || s_eq(w, "WHILE") ||
+            s_eq(w, "CASE") || s_eq(w, "TRY")) open = 1;
+        else if (s_eq(w, "DEF")) defs++;                       // resolved after has_eq is known
+        else if (s_eq(w, "NEXT") || s_eq(w, "UNTIL") || s_eq(w, "ENDWHILE") ||
+                 s_eq(w, "ENDCASE") || s_eq(w, "ENDTRY") || s_eq(w, "ENDPROC") ||
+                 s_eq(w, "ENDIF")) close = 1;
+        else if (s_eq(w, "ELSE") || s_eq(w, "CATCH")) mid = 1;
+        else if (s_eq(w, "END")) {                             // END PROC / END FN close a block
+            int k = i; while (t[k] == ' ') k++;
+            char nw[8]; int nn = 0;
+            while (is_alpha(t[k]) && nn < 7) { nw[nn++] = up(t[k]); k++; }
+            nw[nn] = 0;
+            if (s_eq(nw, "PROC") || s_eq(nw, "FN")) close = 1;
+        }
+        if (open)  delta++;
+        if (close) delta--;
+        if (!seen && (close || mid)) *dedent_first = 1;
+        seen = 1;
+    }
+    if (!has_eq) delta += defs;                                // a real multi-line DEF opens
+    if (s_eq(last, "THEN")) delta++;                           // block IF ... THEN
+    return delta;
+}
+
+// Render a program line with syntax colouring: keywords upper-cased and coloured,
+// strings, numbers, REM comments and PROC/FN names each in their own colour, the
+// rest (variables, operators) in the default. Mirrors list_text's word handling.
+static void list_fancy_text(const char *t) {
+    int i = 0;
+    while (t[i]) {
+        char c = t[i];
+        if (c == '"') {                                        // string literal
+            con_colour(LC_STR);
+            con_putc(c); i++;
+            while (t[i] && t[i] != '"') con_putc(t[i++]);
+            if (t[i] == '"') { con_putc('"'); i++; }
+            con_colour(LC_DEF);
+            continue;
+        }
+        if (c == '&') {                                        // hex literal &FF
+            con_colour(LC_NUM); con_putc('&'); i++;
+            while (is_hexd(t[i])) con_putc(t[i++]);
+            con_colour(LC_DEF);
+            continue;
+        }
+        if (c == '%' && (t[i + 1] == '0' || t[i + 1] == '1')) {  // binary literal %1010
+            con_colour(LC_NUM); con_putc('%'); i++;
+            while (t[i] == '0' || t[i] == '1') con_putc(t[i++]);
+            con_colour(LC_DEF);
+            continue;
+        }
+        if (is_digit(c) || (c == '.' && is_digit(t[i + 1]))) {   // decimal / E-notation
+            con_colour(LC_NUM);
+            while (is_digit(t[i])) con_putc(t[i++]);
+            if (t[i] == '.') { con_putc(t[i++]); while (is_digit(t[i])) con_putc(t[i++]); }
+            if ((t[i] == 'E' || t[i] == 'e') &&
+                (is_digit(t[i + 1]) || ((t[i + 1] == '+' || t[i + 1] == '-') && is_digit(t[i + 2])))) {
+                con_putc(t[i++]);
+                if (t[i] == '+' || t[i] == '-') con_putc(t[i++]);
+                while (is_digit(t[i])) con_putc(t[i++]);
+            }
+            con_colour(LC_DEF);
+            continue;
+        }
+        if (!is_alpha(c)) { con_putc(c); i++; continue; }       // operators / punctuation
+
+        int j = i, wn = 0; char word[16];
+        while (is_alnum(t[j])) { if (wn < 15) word[wn++] = up(t[j]); j++; }
+        if ((t[j] == '$' || t[j] == '%') && wn < 15) word[wn++] = t[j], j++;
+        word[wn] = 0;
+
+        int is_kw = 0;
+        for (int k = 0; k < kwcount; k++)
+            if (s_eq(word, kwtab[k].name)) { is_kw = 1; break; }
+        int is_proc = (word[0] == 'P' && word[1] == 'R' && word[2] == 'O' && word[3] == 'C');
+        int is_fn   = (word[0] == 'F' && word[1] == 'N' && wn > 2);
+
+        if (is_kw) {
+            con_colour(LC_KW);
+            for (int p = i; p < j; p++) con_putc(up(t[p]));     // keyword -> UPPERCASE
+            con_colour(LC_DEF);
+            if (s_eq(word, "REM")) {                            // colour the comment tail
+                con_colour(LC_REM);
+                i = j; while (t[i]) con_putc(t[i++]);
+                con_colour(LC_DEF);
+                break;
+            }
+        } else if (is_proc || is_fn) {                         // PROC/FN + name
+            int plen = is_proc ? 4 : 2;
+            con_colour(LC_KW);
+            for (int p = i; p < i + plen; p++) con_putc(up(t[p]));
+            con_colour(LC_NAME);
+            for (int p = i + plen; p < j; p++) con_putc(t[p]);  // name as typed
+            con_colour(LC_DEF);
+        } else {
+            for (int p = i; p < j; p++) con_putc(t[p]);         // variable as typed
+        }
+        i = j;
+    }
+}
+
+// LIST [SIMPLE] [start][,end] : whole program, a single line (LIST 100), a range
+// (LIST 100,200), from a line (LIST 100,) or up to a line (LIST ,200). By default
+// the listing is pretty-printed - line numbers right-aligned in a gutter sized to
+// the largest number, structural indentation, and syntax colouring. LIST SIMPLE
+// gives the plain "number space text" form (e.g. for copying or a mono terminal).
 static void stmt_list(void) {
     lex_next();
+    int simple = 0;
+    if (word_is("SIMPLE")) { simple = 1; lex_next(); }
     int lo = 0, hi = 0x7FFFFFFF;
     if (tok == T_NUM) { lo = (int)tok_num; hi = lo; lex_next(); }   // single line by default
     if (tok == T_COMMA) {                                           // a range was requested
@@ -3346,14 +3672,53 @@ static void stmt_list(void) {
         hi = 0x7FFFFFFF;
         if (tok == T_NUM) { hi = (int)tok_num; lex_next(); }
     }
-    for (int i = 0; i < prog_n; i++) {
-        if (prog[i].module != 0) continue;                         // never list module lines
-        if (prog[i].num < lo || prog[i].num > hi) continue;
-        con_putn(prog[i].num);
-        con_putc(' ');
-        list_text(prog[i].text);
-        con_putc('\n');
+
+    if (simple) {
+        for (int i = 0; i < prog_n; i++) {
+            if (prog[i].module != 0) continue;                     // never list module lines
+            if (prog[i].num < lo || prog[i].num > hi) continue;
+            con_putn(prog[i].num);
+            con_putc(' ');
+            list_text(prog[i].text);
+            con_putc('\n');
+        }
+        return;
     }
+
+    // Pretty form. First find the widest line number among the lines we'll print,
+    // so the gutter is exactly as wide as it needs to be.
+    int maxnum = 0;
+    for (int i = 0; i < prog_n; i++) {
+        if (prog[i].module != 0) continue;
+        if (prog[i].num < lo || prog[i].num > hi) continue;
+        if (prog[i].num > maxnum) maxnum = prog[i].num;
+    }
+    int gutter = num_digits(maxnum);
+
+    // Walk every main line to track block nesting (so a partial listing is still
+    // correctly indented), printing the ones inside the range.
+    int indent = 0;
+    for (int i = 0; i < prog_n; i++) {
+        if (prog[i].module != 0) continue;
+        int dedent_first;
+        int delta = line_blocks(prog[i].text, &dedent_first);
+        int render = indent - (dedent_first ? 1 : 0);
+        if (render < 0) render = 0;
+
+        if (prog[i].num >= lo && prog[i].num <= hi) {
+            for (int k = num_digits(prog[i].num); k < gutter; k++) con_putc(' ');  // right-align
+            con_colour(LC_LINE);
+            con_putn(prog[i].num);
+            con_colour(LC_DEF);
+            con_putc(' ');
+            for (int k = 0; k < render * 2; k++) con_putc(' ');                    // indentation
+            list_fancy_text(prog[i].text);
+            con_putc('\n');
+        }
+        indent += delta;
+        if (indent < 0) indent = 0;
+    }
+    con_colour(LC_DEF);                                            // leave text back to normal
 }
 
 // ---------------------------------------------------------------------------
@@ -3839,6 +4204,121 @@ static void stmt_delete(void) {
     if (!read_filename(name, sizeof name)) return;
     int r = stg_delete(name);
     if (r) stg_err(r);
+}
+
+// --- CAT: a rich directory listing ------------------------------------------
+// Categorise a file by extension into a short icon tag and a colour (BBC index).
+static void cat_kind(const char *name, int is_dir, const char **icon, int *colour) {
+    if (is_dir) { *icon = "[DIR]"; *colour = 4; return; }             // blue
+    int n = 0; while (name[n]) n++;
+    int dot = -1;
+    for (int i = n - 1; i >= 0; i--) { if (name[i] == '.') { dot = i; break; } if (name[i] == '/') break; }
+    char ext[8]; int el = 0;
+    if (dot >= 0) for (int i = dot + 1; name[i] && el < 7; i++) ext[el++] = up(name[i]);
+    ext[el] = 0;
+    if (s_eq(ext, "BAS")) { *icon = "[BAS]"; *colour = 3; return; }   // program  - yellow
+    if (s_eq(ext, "SED")) { *icon = "[SED]"; *colour = 5; return; }   // seed     - magenta
+    if (s_eq(ext, "PNG") || s_eq(ext, "JPG") || s_eq(ext, "JPEG") ||
+        s_eq(ext, "BMP") || s_eq(ext, "GIF"))
+                          { *icon = "[IMG]"; *colour = 2; return; }   // image    - green
+    if (s_eq(ext, "TTF") || s_eq(ext, "TTC") || s_eq(ext, "OTF"))
+                          { *icon = "[FNT]"; *colour = 6; return; }   // font     - cyan
+    if (s_eq(ext, "TXT") || s_eq(ext, "MD") || s_eq(ext, "LOG") ||
+        s_eq(ext, "INI") || s_eq(ext, "CFG"))
+                          { *icon = "[TXT]"; *colour = 7; return; }   // text     - white
+    *icon = "[BIN]"; *colour = 7;                                     // anything else
+}
+
+static int cat_u_to_str(char *out, long v) {          // non-negative -> decimal, returns len
+    char t[24]; int n = 0;
+    if (v <= 0) { out[0] = '0'; out[1] = 0; return 1; }
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    for (int i = 0; i < n; i++) out[i] = t[n - 1 - i];
+    out[n] = 0; return n;
+}
+
+// Human-readable size: "845", "12.3K", "4.0M".
+static void cat_size_str(long sz, char *out) {
+    if (sz < 0) sz = 0;
+    if (sz < 1024) { cat_u_to_str(out, sz); return; }
+    long div  = (sz < 1024L * 1024) ? 1024L : 1024L * 1024L;
+    char unit = (sz < 1024L * 1024) ? 'K' : 'M';
+    long tenths = sz * 10 / div;
+    int n = cat_u_to_str(out, tenths / 10);
+    out[n++] = '.'; out[n++] = (char)('0' + tenths % 10); out[n++] = unit; out[n] = 0;
+}
+
+static void cat_pad(int n) { while (n-- > 0) con_putc(' '); }
+static void cat_2d(int v)  { con_putc((char)('0' + (v / 10) % 10)); con_putc((char)('0' + v % 10)); }
+
+// CAT / DIR : list the current directory. By default it is rich - a coloured
+// type icon per file, the name, a human-readable size, and the date/time, in
+// aligned columns, pausing for a keypress when the screen fills. CAT SIMPLE gives
+// the plain one-name-per-line listing (and is what a program should use).
+static void stmt_cat(void) {
+    lex_next();                                       // consume CAT / DIR
+    if (word_is("SIMPLE")) { lex_next(); stg_dir(); return; }
+
+    // Pass 1: the widest name (to size the name column) and the entry count.
+    if (stg_diropen(".") != 0) { con_puts("No disk\n"); return; }
+    int maxname = 0, count = 0;
+    while (stg_dirnext(&g_dirent) == 1) {
+        int n = 0; while (g_dirent.name[n]) n++;
+        if (n > maxname) maxname = n;
+        count++;
+    }
+    if (count == 0) { con_puts("(empty)\n"); return; }
+    int namew = maxname; if (namew < 12) namew = 12; if (namew > 28) namew = 28;
+
+    int rows = con_rows();
+    int page = rows > 1 ? rows - 1 : 0;               // 0 = do not page (host/tests)
+    int printed = 0, files = 0, dirs = 0;
+    long total = 0;
+
+    // Pass 2: print each entry.
+    stg_diropen(".");
+    while (stg_dirnext(&g_dirent) == 1) {
+        const char *icon; int colour;
+        cat_kind(g_dirent.name, g_dirent.is_dir, &icon, &colour);
+        int nl = 0; while (g_dirent.name[nl]) nl++;
+
+        con_colour(colour);
+        con_puts(icon); con_putc(' ');                // [BAS] etc.
+        con_puts(g_dirent.name);                      // name (same colour)
+        con_colour(7);
+        cat_pad(namew - nl + 2);
+
+        if (g_dirent.is_dir) { cat_pad(6); con_puts("-"); dirs++; }   // size column
+        else {
+            char sz[24]; cat_size_str(g_dirent.size, sz);
+            int sl = 0; while (sz[sl]) sl++;
+            cat_pad(7 - sl); con_puts(sz);
+            total += g_dirent.size; files++;
+        }
+
+        con_puts("  ");                               // date  time
+        if (g_dirent.year > 0) {
+            char y[8]; int yl = cat_u_to_str(y, g_dirent.year);
+            cat_pad(4 - yl); con_puts(y);
+            con_putc('-'); cat_2d(g_dirent.month); con_putc('-'); cat_2d(g_dirent.day);
+            con_putc(' '); cat_2d(g_dirent.hour);  con_putc(':'); cat_2d(g_dirent.minute);
+        }
+        con_putc('\n');
+
+        printed++;
+        if (page && printed % page == 0) {            // screen full: wait for a key
+            con_puts("-- more (any key, Q quits) --");
+            int k = con_getkey();
+            con_putc('\r'); cat_pad(30); con_putc('\r');   // erase the prompt
+            if (k == 'q' || k == 'Q' || k == 27) { con_colour(7); return; }
+        }
+    }
+
+    con_colour(6);                                    // footer summary
+    con_putn(files); con_puts(files == 1 ? " file, " : " files, ");
+    con_putn(dirs);  con_puts(dirs == 1 ? " dir, "  : " dirs, ");
+    { char sz[24]; cat_size_str(total, sz); con_puts(sz); con_puts(" total\n"); }
+    con_colour(7);
 }
 
 // Directory commands take a quoted path (no ".BAS" default): MKDIR/CD/RMDIR
@@ -4500,6 +4980,41 @@ static void stmt_tilemap(void) {
     con_tilemap(sheet, map, v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 
+// --- TrueType font statements -----------------------------------------------
+// FONT handle : make a font loaded with LOADFONT the current one.
+static void stmt_font(void) {
+    lex_next();
+    int h = (int)need_num(); if (g_err) return;
+    if (!ttf_select(h)) err("No such font");
+}
+
+// FONTSIZE pixels : set the current font's glyph height.
+static void stmt_fontsize(void) {
+    lex_next();
+    int px = (int)need_num(); if (g_err) return;
+    if (px < 1) { err("Invalid argument"); return; }
+    ttf_set_size(px);
+}
+
+// FONTSTYLE bold [, italic [, underline]] : each a 0/1 flag (default 0).
+static void stmt_fontstyle(void) {
+    lex_next();
+    int bold = (int)need_num(); if (g_err) return;
+    int italic = 0, underline = 0;
+    if (tok == T_COMMA) { lex_next(); italic = (int)need_num(); if (g_err) return; }
+    if (tok == T_COMMA) { lex_next(); underline = (int)need_num(); if (g_err) return; }
+    ttf_set_style(bold, italic, underline);
+}
+
+// GTEXT x, y, s$ : draw text with the current font at logical baseline (x,y).
+static void stmt_gtext(void) {
+    lex_next();
+    int x = (int)need_num(); if (!expect(T_COMMA)) return;
+    int y = (int)need_num(); if (!expect(T_COMMA)) return;
+    value_t s = need_str(); if (g_err) return;
+    con_gtext(x, y, s.str, s.len);
+}
+
 // --- Collection statements --------------------------------------------------
 // Copy a just-read string key into a stable local buffer: the value expression
 // that follows may run the GC and move the key's bytes in the string heap.
@@ -4813,6 +5328,10 @@ static void exec_statement(void) {
             case KW_NEWSPRITE:    stmt_newsprite();    return;
             case KW_SPRITETARGET: stmt_spritetarget(); return;
             case KW_TILEMAP:      stmt_tilemap();      return;
+            case KW_FONT:         stmt_font();         return;
+            case KW_FONTSIZE:     stmt_fontsize();     return;
+            case KW_FONTSTYLE:    stmt_fontstyle();    return;
+            case KW_GTEXT:        stmt_gtext();        return;
             case KW_DICTSET:  stmt_dictset();  return;
             case KW_DICTDEL:  stmt_dictdel();  return;
             case KW_PUSH:     stmt_push();     return;
@@ -4828,7 +5347,7 @@ static void exec_statement(void) {
             case KW_SEED:  stmt_seed();    return;
             case KW_CALL:  stmt_call();    return;
             case KW_CAT:
-            case KW_DIR:   lex_next(); stg_dir(); return;
+            case KW_DIR:   stmt_cat(); return;
             case KW_MKDIR: stmt_mkdir(); return;
             case KW_CD:    stmt_cd();    return;
             case KW_RMDIR: stmt_rmdir(); return;

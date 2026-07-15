@@ -9,7 +9,7 @@
 90 PRINT "Done - "; FOUND; " device(s)."
 100 END
 110 DEF PROC show(A)
-120   PRINT "  device at address "; A
+120   PRINT "  device at address "; A; " (&"; HEX$(A, 2); ")"
 130 ENDPROC
 140 REM --- Example device use (uncomment and set ADDR/REG for your board) ------
 150 REM  A read of one register: write the register number, then read bytes back.

@@ -34,8 +34,13 @@ add_executable(unit_tests
   ${REPO}/host/sound_host.c
   ${REPO}/host/gpio_host.c
   ${REPO}/host/i2c_host.c
+  ${REPO}/host/ttf_host.c
+  ${REPO}/host/gfx_host.c
   ${REPO}/drivers/usb_hid.c
 )
+# Absolute path to a bundled TTF so the font tests don't depend on the CWD.
+target_compile_definitions(unit_tests PRIVATE
+  FONT_TTF_PATH="${REPO}/fonts/Philosopher-Regular.ttf")
 target_include_directories(unit_tests PRIVATE
   ${REPO}/include ${REPO}/basic ${REPO}/seed ${REPO}/drivers ${REPO}/third_party)
 target_link_libraries(unit_tests PRIVATE Catch2::Catch2WithMain)

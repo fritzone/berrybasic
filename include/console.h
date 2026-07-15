@@ -37,6 +37,7 @@ unsigned long long con_micros(void);   // microseconds since boot (for TIME)
 int  con_inkey(int centiseconds);      // wait up to n centiseconds for a key; -1 if none
 int  con_pos(void);                    // text cursor column (POS)
 int  con_vpos(void);                   // text cursor row (VPOS)
+int  con_rows(void);                   // text rows on screen, or 0 if unpaged (host/tests)
 // Show the boot logo + banner if appropriate (target QEMU only). Returns 1 if it
 // printed `banner` itself (beside the logo); 0 if the caller should print it.
 int  con_splash(const char *banner);
@@ -103,6 +104,15 @@ void con_sprite_put_ex(long addr, int x, int y, double scale, double angle);
 // GTINT: set (on!=0) or clear the sprite tint - out = lerp(src,(r,g,b),a/255),
 // applied to every blitted sprite (both con_sprite_put forms), alpha preserved.
 void con_sprite_tint(int on, int r, int g, int b, int a);
+
+// --- TrueType text ----------------------------------------------------------
+// GTEXT x,y,string$ : draw `s` (len bytes) with the current TrueType font, size
+// and style (set via ttf.h / LOADFONT / FONTSIZE / FONTSTYLE) in the current
+// graphics foreground colour. (x,y) is the logical coordinate of the baseline at
+// the start of the text; glyphs are anti-aliased and honour the viewport, plot
+// op, tint and draw target, exactly like a sprite blit. A no-op on backends with
+// no framebuffer, or when no font is loaded.
+void con_gtext(int x, int y, const char *s, int len);
 
 // --- pointer (USB mouse) ----------------------------------------------------
 // Poll the mouse and report the current pointer position in raw framebuffer

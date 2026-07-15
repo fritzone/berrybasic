@@ -584,6 +584,22 @@ TEST_CASE("directory enumeration reports name, size, date, time") {
     REQUIRE_THAT(out, ContainsSubstring("SZ2@"));   // the 2-byte file was found
 }
 
+TEST_CASE("CAT shows a coloured type icon, a size and a summary") {
+    { std::ofstream f("CATME.BAS"); f << "10 PRINT 1\n"; }
+    std::string out = run_raw("CAT\n");             // no paging on the host (con_rows=0)
+    std::remove("CATME.BAS");
+    REQUIRE_THAT(out, ContainsSubstring("[BAS] CATME.BAS"));   // icon + name
+    REQUIRE_THAT(out, ContainsSubstring("total"));            // footer summary line
+}
+
+TEST_CASE("CAT SIMPLE lists plain names without icons") {
+    { std::ofstream f("CATME2.BAS"); f << "x\n"; }
+    std::string out = run_raw("CAT SIMPLE\n");
+    std::remove("CATME2.BAS");
+    REQUIRE_THAT(out, ContainsSubstring("CATME2.BAS"));
+    REQUIRE_THAT(out, !ContainsSubstring("[BAS] CATME2.BAS"));  // plain, not the rich form
+}
+
 // --- Sound: the portable queued/background tone player ----------------------
 // These reach past PRINT into the engine itself (sound_pump / sound_cur_freq /
 // sound_queued from basic.h). run() leaves the enqueued notes un-pumped (the
@@ -1270,4 +1286,138 @@ TEST_CASE("I2C words raise a clear guard on the host (no bus present)") {
 TEST_CASE("an I2C error can be caught with TRY/CATCH") {
     REQUIRE_THAT(run("10 TRY\n20 I2CWRITE 39, 1\n30 CATCH\n40 PRINT \"caught\"\n50 ENDTRY\n60 END"),
                  ContainsSubstring("caught"));
+}
+
+TEST_CASE("HEX$ and BIN$ render numbers in base 16 and 2") {
+    REQUIRE_THAT(run("10 PRINT HEX$(255)"),        ContainsSubstring("FF"));
+    REQUIRE_THAT(run("10 PRINT HEX$(255,4)"),      ContainsSubstring("00FF"));
+    REQUIRE_THAT(run("10 PRINT HEX$(-1)"),         ContainsSubstring("FFFFFFFF"));   // 32-bit two's complement
+    REQUIRE_THAT(run("10 PRINT BIN$(10)"),         ContainsSubstring("1010"));
+    REQUIRE_THAT(run("10 PRINT BIN$(10,8)"),       ContainsSubstring("00001010"));
+    REQUIRE_THAT(run("10 PRINT \"0x\"+HEX$(240)"), ContainsSubstring("0xF0"));       // composes with +
+}
+
+TEST_CASE("binary literals with % evaluate and compose") {
+    REQUIRE_THAT(run("10 PRINT %1010"),            ContainsSubstring("10"));
+    REQUIRE_THAT(run("10 PRINT %1100 OR %0011"),   ContainsSubstring("15"));
+    REQUIRE_THAT(run("10 A%=%11110000\n20 PRINT A%;\" \";HEX$(A%)"), ContainsSubstring("240 F0"));
+}
+
+TEST_CASE("a lone %% is still an integer variable suffix, not a binary literal") {
+    REQUIRE_THAT(run("10 COUNT%=5\n20 PRINT COUNT%*2"), ContainsSubstring("10"));
+}
+
+TEST_CASE("FORMAT$ renders decimals, width, zero-pad, thousands and sign") {
+    REQUIRE_THAT(run("10 PRINT \"[\";FORMAT$(\"####.##\",3.14159);\"]\""), ContainsSubstring("[   3.14]"));
+    REQUIRE_THAT(run("10 PRINT \"[\";FORMAT$(\"000.00\",3.1);\"]\""),      ContainsSubstring("[003.10]"));
+    REQUIRE_THAT(run("10 PRINT \"[\";FORMAT$(\"#,###,###\",1234567);\"]\""),ContainsSubstring("[1,234,567]"));
+    REQUIRE_THAT(run("10 PRINT \"[\";FORMAT$(\"+#0.0\",5);\"]\""),         ContainsSubstring("[+5.0]"));
+    REQUIRE_THAT(run("10 PRINT \"[\";FORMAT$(\"#.##\",-2.005);\"]\""),     ContainsSubstring("[-2.01]"));  // rounds
+}
+
+TEST_CASE("FORMAT$ copies literal template text through and never truncates the integer part") {
+    REQUIRE_THAT(run("10 PRINT FORMAT$(\"$#,##0.00\",1999.5)"), ContainsSubstring("$1,999.50"));
+    REQUIRE_THAT(run("10 PRINT \"[\";FORMAT$(\"#,##0\",1234567);\"]\""), ContainsSubstring("[1,234,567]"));
+}
+
+TEST_CASE("FORMAT$ with no digit position raises Bad format template") {
+    REQUIRE_THAT(run("10 PRINT FORMAT$(\"abc\",5)"), ContainsSubstring("Bad format template"));
+}
+
+TEST_CASE("PRINT USING applies a template to each numeric item") {
+    REQUIRE_THAT(run("10 PRINT USING \"#,##0\"; 1234567"),        ContainsSubstring("1,234,567"));
+    REQUIRE_THAT(run("10 PRINT USING \"######.00\"; 12.5"),       ContainsSubstring("    12.50"));
+    REQUIRE_THAT(run("10 PRINT USING \"000.0\"; 7; \" done\""),   ContainsSubstring("007.0 done")); // strings pass through
+}
+
+// --- TrueType fonts ---------------------------------------------------------
+// A real TTF bundled in the repo; its absolute path comes from CMake so these
+// tests don't depend on the working directory. Metrics run on the host backend
+// (real stb_truetype); GTEXT is a no-op there but must still parse and run.
+#ifdef FONT_TTF_PATH
+static std::string load_font() {
+    return std::string("10 F = LOADFONT(\"") + FONT_TTF_PATH + "\")\n";
+}
+
+TEST_CASE("LOADFONT returns a handle for a real font and 0 for a missing one") {
+    REQUIRE_THAT(run(load_font() + "20 PRINT \"H=\";F"),           ContainsSubstring("H=1"));
+    REQUIRE_THAT(run("10 PRINT \"M=\";LOADFONT(\"nope.ttf\")"),    ContainsSubstring("M=0"));
+}
+
+TEST_CASE("FONTHEIGHT tracks FONTSIZE") {
+    std::string out = run(load_font() +
+        "20 FONTSIZE 48 : PRINT \"A=\";FONTHEIGHT\n"
+        "30 FONTSIZE 24 : PRINT \"B=\";FONTHEIGHT\n");
+    REQUIRE_THAT(out, ContainsSubstring("A=48"));
+    REQUIRE_THAT(out, ContainsSubstring("B=24"));
+}
+
+TEST_CASE("TEXTWIDTH grows with text length and is zero for the empty string") {
+    std::string out = run(load_font() +
+        "20 FONTSIZE 32\n"
+        "30 IF TEXTWIDTH(\"MMMM\") > TEXTWIDTH(\"M\") THEN PRINT \"WIDER\"\n"
+        "40 IF TEXTWIDTH(\"M\") > 0 THEN PRINT \"NONZERO\"\n"
+        "50 PRINT \"E=\";TEXTWIDTH(\"\")\n");
+    REQUIRE_THAT(out, ContainsSubstring("WIDER"));
+    REQUIRE_THAT(out, ContainsSubstring("NONZERO"));
+    REQUIRE_THAT(out, ContainsSubstring("E=0"));
+}
+
+TEST_CASE("FONTSTYLE bold widens the text") {
+    std::string out = run(load_font() +
+        "20 FONTSIZE 40\n"
+        "30 W = TEXTWIDTH(\"lll\")\n"
+        "40 FONTSTYLE 1\n"
+        "50 IF TEXTWIDTH(\"lll\") > W THEN PRINT \"BOLDER\"\n");
+    REQUIRE_THAT(out, ContainsSubstring("BOLDER"));
+}
+
+TEST_CASE("FONT selects a loaded handle and rejects an unknown one") {
+    REQUIRE_THAT(run(load_font() + "20 FONT 1 : PRINT \"OK\""),    ContainsSubstring("OK"));
+    REQUIRE_THAT(run(load_font() + "20 FONT 99"),                  ContainsSubstring("No such font"));
+}
+
+TEST_CASE("GTEXT and FONTSTYLE parse and run (no-op without a framebuffer)") {
+    std::string out = run(load_font() +
+        "20 FONTSIZE 30 : FONTSTYLE 1,1,1\n"
+        "30 GCOL 255,200,0\n"
+        "40 GTEXT 100, 200, \"Hello\"\n"
+        "50 PRINT \"RAN\"\n");
+    REQUIRE_THAT(out, ContainsSubstring("RAN"));
+}
+#endif
+
+// --- pretty LIST (colouring is a no-op in tests, so gutter + indent are seen) --
+TEST_CASE("LIST right-aligns line numbers in a gutter sized to the largest") {
+    std::string out = run_raw("5 PRINT 1\n100 PRINT 2\nLIST\n");
+    REQUIRE_THAT(out, ContainsSubstring("  5 PRINT 1"));    // padded to width 3
+    REQUIRE_THAT(out, ContainsSubstring("100 PRINT 2"));
+}
+
+TEST_CASE("LIST indents the body of a block") {
+    std::string out = run_raw("10 FOR I=1 TO 2\n20 PRINT I\n30 NEXT\nLIST\n");
+    REQUIRE_THAT(out, ContainsSubstring("10 FOR I"));       // opener at column 0
+    REQUIRE_THAT(out, ContainsSubstring("20   PRINT I"));   // body indented one level
+    REQUIRE_THAT(out, ContainsSubstring("30 NEXT"));        // closer back out
+}
+
+TEST_CASE("LIST dedents ELSE and ENDIF within a block IF") {
+    std::string out = run_raw(
+        "10 IF X THEN\n20 PRINT \"a\"\n30 ELSE\n40 PRINT \"b\"\n50 ENDIF\nLIST\n");
+    REQUIRE_THAT(out, ContainsSubstring("20   PRINT"));     // body indented
+    REQUIRE_THAT(out, ContainsSubstring("30 ELSE"));        // ELSE dedented
+    REQUIRE_THAT(out, ContainsSubstring("50 ENDIF"));       // ENDIF dedented
+}
+
+TEST_CASE("LIST SIMPLE gives the plain unindented form") {
+    std::string out = run_raw("10 FOR I=1 TO 2\n20 PRINT I\n30 NEXT\nLIST SIMPLE\n");
+    REQUIRE_THAT(out, ContainsSubstring("20 PRINT I"));     // one space, no indent
+    REQUIRE_THAT(out, !ContainsSubstring("20   PRINT I"));  // definitely not indented
+}
+
+TEST_CASE("LIST SIMPLE still honours a line range") {
+    std::string out = run_raw("10 PRINT 1\n20 PRINT 2\n30 PRINT 3\nLIST SIMPLE 20,30\n");
+    REQUIRE_THAT(out, ContainsSubstring("20 PRINT 2"));
+    REQUIRE_THAT(out, ContainsSubstring("30 PRINT 3"));
+    REQUIRE_THAT(out, !ContainsSubstring("10 PRINT 1"));
 }

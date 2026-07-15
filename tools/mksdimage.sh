@@ -84,6 +84,15 @@ for img in "$ROOT"/images/*.png "$ROOT"/images/*.jpg "$ROOT"/images/*.bmp; do
     [ -e "$img" ] || continue
     mcopy -i "$DATAPART" "$img" "::$(basename "$img" | tr '[:lower:]' '[:upper:]')"
 done
+# TrueType fonts for LOADFONT/GTEXT. Long names are preserved via VFAT; a short
+# PHILO.TTF alias of the bundled Philosopher font is added so examples have a
+# tidy 8.3 name to load.
+for ttf in "$ROOT"/fonts/*.ttf "$ROOT"/fonts/*.ttc; do
+    [ -e "$ttf" ] || continue
+    mcopy -i "$DATAPART" "$ttf" "::$(basename "$ttf" | tr '[:lower:]' '[:upper:]')"
+done
+[ -e "$ROOT/fonts/Philosopher-Regular.ttf" ] &&
+    mcopy -i "$DATAPART" "$ROOT/fonts/Philosopher-Regular.ttf" ::PHILO.TTF
 
 # --- Assemble the final image with a 2-partition MBR ------------------------
 dd if=/dev/zero of="$OUT" bs=1M count="$SIZE_MB" status=none

@@ -6,6 +6,8 @@
 #include "usb_kbd.h"
 #include "usb_hid.h"
 #include "console.h"
+#include "ttf.h"
+#include "gfx.h"
 #include "basic.h"
 #include "mmu.h"
 #include "sd.h"
@@ -494,6 +496,7 @@ int con_inkey(int centiseconds) {
 
 int con_pos(void)  { return cursor_col; }
 int con_vpos(void) { return cursor_row; }
+int con_rows(void) { return g_term_rows; }
 
 // Poll whichever USB backend enumerated a mouse and fold the relative movement
 // into the absolute pointer position. Raw framebuffer pixels, origin top-left:
@@ -1018,6 +1021,133 @@ void con_sprite_put_ex(long addr, int x, int y, double scale, double angle) {
             sp_put_pixel((int)(cx + ox), (int)(cy + oy), src);
         }
     gfx_set_op(0);
+}
+
+// --- TrueType text (GTEXT) --------------------------------------------------
+// Draw a string with the current TrueType font (see ttf.c). (x,y) is the logical
+// coordinate of the baseline at the start of the run; the pen advances in
+// physical pixels so glyphs stay crisp at their native size regardless of the
+// logical-to-physical scale. Each glyph's 8-bit coverage becomes a source pixel
+// (coverage as alpha, the graphics foreground as colour) and goes through
+// sp_put_pixel, so tint, plot op, viewport and the current draw target apply just
+// as for a sprite. Synthetic italic shears each row; underline draws a rule below
+// the baseline after the run. (Bold is baked into the coverage by ttf.c.)
+// Blit a run of the current TrueType font with its baseline start at physical
+// pixel (px,py), in framebuffer colour `fg`. Shared by con_gtext (BASIC's GTEXT,
+// logical coords) and sgfx_text (native seeds, device pixels).
+static void gtext_blit(int px, int py, const char *s, int len, uint32_t fg) {
+    if (!fb_ready || !s || len <= 0 || !ttf_ready()) return;
+    int flags   = ttf_style_flags();
+    int italic  = flags & 2;
+    int underln = flags & 4;
+    uint32_t rgb = fg & 0x00FFFFFFu;             // colour bytes; alpha set per pixel
+
+    int penx = px;
+    gfx_set_op(gfx_act);
+    for (int i = 0; i < len; i++) {
+        const unsigned char *bmp; int gw, gh, gx, gy, adv;
+        if (!ttf_glyph((unsigned char)s[i], &bmp, &gw, &gh, &gx, &gy, &adv)) break;
+        if (bmp && gw > 0 && gh > 0) {
+            for (int row = 0; row < gh; row++) {
+                int yy = py + gy + row;
+                int shear = italic ? (int)(-(gy + row) * 0.2) : 0;   // ascenders lean right
+                const unsigned char *srow = bmp + row * gw;
+                for (int col = 0; col < gw; col++) {
+                    unsigned cov = srow[col];
+                    if (!cov) continue;
+                    sp_put_pixel(penx + gx + col + shear, yy, ((uint32_t)cov << 24) | rgb);
+                }
+            }
+        }
+        penx += adv;
+    }
+    gfx_set_op(0);
+
+    if (underln && penx > px) {                  // rule two pixels below the baseline
+        int uy = py + 2;
+        for (int xx = px; xx < penx; xx++) putpixel_op(xx, uy, fg);
+    }
+}
+
+// Draw a string with the current TrueType font (see ttf.c). (x,y) is the logical
+// coordinate of the baseline at the start of the run; glyphs are anti-aliased and
+// honour tint, plot op, viewport and the current draw target, just like a sprite.
+void con_gtext(int x, int y, const char *s, int len) {
+    gtext_blit(lx2px(x), ly2py(y), s, len, gcol_fg());
+}
+
+// --- device-pixel graphics for native seeds (gfx.h / BGI-style, ABI v7) ------
+// These address the framebuffer directly: origin top-left, colours 0xRRGGBB.
+// They forward to the graphics.c primitives (which honour the clip rectangle and
+// the current draw target), so a seed's output composes with BASIC's graphics.
+// The plot op rests at 0 (store) between BASIC statements, which is the copy mode
+// BGI drawing expects.
+static uint32_t rgb_to_fb(uint32_t rgb) {
+    return rgb_pixel((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+}
+static uint32_t fb_to_rgb(uint32_t px) {
+    return (((px & 0xff) << 16) | (px & 0xff00) | ((px >> 16) & 0xff));   // R,G,B swap
+}
+
+int  sgfx_avail(void)  { return fb_ready ? 1 : 0; }
+int  sgfx_width(void)  { return (int)g_fb_w; }
+int  sgfx_height(void) { return (int)g_fb_h; }
+
+void sgfx_clear(uint32_t rgb) {
+    if (fb_ready) bar(0, 0, (int)g_fb_w - 1, (int)g_fb_h - 1, rgb_to_fb(rgb));
+}
+void sgfx_putpixel(int x, int y, uint32_t rgb) { if (fb_ready) putpixel(x, y, rgb_to_fb(rgb)); }
+uint32_t sgfx_getpixel(int x, int y) { return fb_ready ? fb_to_rgb(getpixel(x, y)) : 0; }
+
+void sgfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) {
+    if (fb_ready) draw_line(x1, y1, x2, y2, rgb_to_fb(rgb));
+}
+void sgfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) {
+    if (fb_ready) fill_rect(x1, y1, x2, y2, rgb_to_fb(rgb));
+}
+void sgfx_circle(int cx, int cy, int r, uint32_t rgb)      { if (fb_ready) draw_circle(cx, cy, r, rgb_to_fb(rgb)); }
+void sgfx_fillcircle(int cx, int cy, int r, uint32_t rgb)  { if (fb_ready) fill_circle(cx, cy, r, rgb_to_fb(rgb)); }
+void sgfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb)     { if (fb_ready) draw_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb)); }
+void sgfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { if (fb_ready) fill_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb)); }
+void sgfx_flood(int x, int y, uint32_t rgb) { if (fb_ready) flood_fill(x, y, rgb_to_fb(rgb)); }
+
+void sgfx_clip(int x1, int y1, int x2, int y2) { if (fb_ready) gfx_set_clip(x1, y1, x2, y2); }
+void sgfx_noclip(void)                         { if (fb_ready) gfx_clear_clip(); }
+
+// Scanline fill of an arbitrary (convex or concave) polygon, even-odd rule.
+void sgfx_fillpoly(const int *xy, int npts, uint32_t rgb) {
+    if (!fb_ready || npts < 3 || !xy) return;
+    uint32_t c = rgb_to_fb(rgb);
+    int ymin = xy[1], ymax = xy[1];
+    for (int i = 1; i < npts; i++) { int y = xy[i * 2 + 1]; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
+    if (ymin < 0) ymin = 0;
+    if (ymax > (int)g_fb_h - 1) ymax = (int)g_fb_h - 1;
+    for (int y = ymin; y <= ymax; y++) {
+        int xs[64], nx = 0;
+        for (int i = 0; i < npts; i++) {
+            int j = (i + 1) % npts;
+            int y0 = xy[i * 2 + 1], y1 = xy[j * 2 + 1];
+            int x0 = xy[i * 2],     x1 = xy[j * 2];
+            if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {   // half-open crossing
+                int xc = x0 + (int)((long)(y - y0) * (x1 - x0) / (y1 - y0));
+                if (nx < 64) xs[nx++] = xc;
+            }
+        }
+        for (int a = 0; a < nx - 1; a++)                        // insertion-ish sort
+            for (int b = a + 1; b < nx; b++)
+                if (xs[b] < xs[a]) { int t = xs[a]; xs[a] = xs[b]; xs[b] = t; }
+        for (int k = 0; k + 1 < nx; k += 2)
+            for (int x = xs[k]; x <= xs[k + 1]; x++) putpixel(x, y, c);
+    }
+}
+
+// Draw TrueType text at device pixel (x,y) (baseline start) in colour rgb, in
+// copy mode (the seed's colour wins regardless of BASIC's GCOL action).
+void sgfx_text(int x, int y, const char *s, int len, uint32_t rgb) {
+    if (!fb_ready) return;
+    int save = gfx_act; gfx_act = 0;
+    gtext_blit(x, y, s, len, rgb_to_fb(rgb));
+    gfx_act = save;
 }
 
 // --- render-to-sprite (NEWSPRITE / SPRITETARGET) ----------------------------

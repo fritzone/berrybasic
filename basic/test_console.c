@@ -82,6 +82,7 @@ unsigned long long con_micros(void) { static unsigned long long t; t += 10000; r
 int  con_inkey(int cs) { (void)cs; return -1; }
 int  con_pos(void) { return 0; }
 int  con_vpos(void) { return 0; }
+int  con_rows(void) { return 0; }       // never page in tests
 int  con_splash(const char *b) { (void)b; return 0; }
 
 void con_mode(int n) { (void)n; }
@@ -129,4 +130,5 @@ void con_sprite_get(long a, int x1, int y1, int x2, int y2) { (void)a; (void)x1;
 void con_sprite_put(long a, int x, int y) { (void)a; (void)x; (void)y; }
 void con_sprite_put_ex(long a, int x, int y, double sc, double an) { (void)a; (void)x; (void)y; (void)sc; (void)an; }
 void con_sprite_tint(int on, int r, int g, int b, int a) { (void)on; (void)r; (void)g; (void)b; (void)a; }
+void con_gtext(int x, int y, const char *s, int len) { (void)x; (void)y; (void)s; (void)len; }
 void con_mouse(int *x, int *y, int *b) { if (x) *x = 0; if (y) *y = 0; if (b) *b = 0; }

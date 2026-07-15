@@ -27,7 +27,7 @@
 #include <stddef.h>
 
 #define SEED_MAGIC        0x44454553u   // 'S','E','E','D' little-endian
-#define SEED_ABI_VERSION  6u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num
+#define SEED_ABI_VERSION  7u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num; v7 graphics
 
 // File open modes for the file_open service (match the storage layer). The seed
 // <stdio.h> maps fopen's "r"/"w"/"a"/"r+"/... strings onto these.
@@ -142,6 +142,43 @@ typedef struct SeedServices {
     // what the seed <stdio.h> uses for the printf %f/%e/%g conversions, so seed
     // and BASIC number output match exactly.
     int  (*fmt_num)(double v, char *out);
+
+    // --- graphics (ABI v7) -------------------------------------------------
+    // Physical-pixel drawing straight onto the framebuffer the seed's <graphics.h>
+    // (a BGI-style library) is built on. Coordinates are device pixels with the
+    // origin at the TOP-LEFT (x right, y down), NOT BASIC's logical bottom-left
+    // system; colours are 24-bit 0xRRGGBB. gfx_avail is 0 on the host build (and
+    // every draw call is then a no-op), so a portable seed checks it first.
+    // Drawing goes to whatever surface BASIC is currently targeting (the visible
+    // screen, or a BUFFER/SPRITETARGET), so a seed composes with BASIC graphics.
+    int  (*gfx_avail)(void);                          // 1 with a framebuffer, else 0
+    int  (*gfx_width)(void);                          // screen width in pixels
+    int  (*gfx_height)(void);                         // screen height in pixels
+    void (*gfx_clear)(uint32_t rgb);                  // fill the whole surface
+    void (*gfx_putpixel)(int x, int y, uint32_t rgb);
+    uint32_t (*gfx_getpixel)(int x, int y);           // 0xRRGGBB at (x,y)
+    void (*gfx_line)(int x1, int y1, int x2, int y2, uint32_t rgb);
+    void (*gfx_fillrect)(int x1, int y1, int x2, int y2, uint32_t rgb);
+    void (*gfx_circle)(int cx, int cy, int r, uint32_t rgb);         // outline
+    void (*gfx_fillcircle)(int cx, int cy, int r, uint32_t rgb);
+    void (*gfx_ellipse)(int cx, int cy, int rx, int ry, uint32_t rgb);   // outline
+    void (*gfx_fillellipse)(int cx, int cy, int rx, int ry, uint32_t rgb);
+    void (*gfx_fillpoly)(const int *xy, int npts, uint32_t rgb);     // xy = x0,y0,x1,y1,...
+    void (*gfx_flood)(int x, int y, uint32_t rgb);    // flood the region under (x,y)
+    void (*gfx_clip)(int x1, int y1, int x2, int y2); // restrict drawing to a rectangle
+    void (*gfx_noclip)(void);                         // remove the clip rectangle
+
+    // --- text: TrueType fonts (ABI v7) ------------------------------------
+    // Load and draw TrueType text (the same engine BASIC's GTEXT uses). The
+    // metric calls work even on the host (no framebuffer needed); gfx_text is a
+    // no-op there. Handles are 1..N; font_load returns 0 on failure.
+    int  (*font_load)(const char *name);              // load a .ttf -> handle, or 0
+    int  (*font_select)(int handle);                  // 1 ok, 0 unknown handle
+    void (*font_size)(int pixels);                    // glyph height in pixels
+    void (*font_style)(int bold, int italic, int underline);   // 0/1 flags
+    void (*gfx_text)(int x, int y, const char *s, int len, uint32_t rgb); // baseline at (x,y)
+    int  (*text_width)(const char *s, int len);       // pixel width in the current font
+    int  (*text_height)(void);                        // line height in pixels
 } SeedServices;
 
 // A seed's entry point. Returns a number (also usable as a status); a string
