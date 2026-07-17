@@ -142,3 +142,6 @@ void con_mouse(int *x, int *y, int *buttons) {
     if (y) *y = 0;
     if (buttons) *buttons = 0;
 }
+
+// No USB keyboard on the host: stdin gives characters, never key state.
+int con_keymods(void) { return 0; }

@@ -73,11 +73,16 @@ for bas in "$ROOT"/examples/*.bas; do
     [ -e "$bas" ] || break
     mcopy -i "$DATAPART" "$bas" "::$(basename "$bas" | tr '[:lower:]' '[:upper:]')"
 done
-# Native seeds (built by 'make seeds') so SEED/CALL examples work on hardware.
-for sed in "$ROOT"/build/seeds/*.sed; do
-    [ -e "$sed" ] || break
-    mcopy -i "$DATAPART" "$sed" "::$(basename "$sed" | tr '[:lower:]' '[:upper:]')"
-done
+# Native seeds (built by 'make seeds') go in their own /seed directory: SEED/CALL
+# resolve a bare "NAME.SED" to /seed/NAME.SED, and keeping them out of the root
+# leaves CAT's default listing uncluttered with user programs.
+if compgen -G "$ROOT/build/seeds/*.sed" >/dev/null; then
+    mmd -i "$DATAPART" ::SEED
+    for sed in "$ROOT"/build/seeds/*.sed; do
+        [ -e "$sed" ] || break
+        mcopy -i "$DATAPART" "$sed" "::SEED/$(basename "$sed" | tr '[:lower:]' '[:upper:]')"
+    done
+fi
 # Image files for LOADSPRITE (PNG/JPEG/BMP). Names are upper-cased to match the
 # 8.3 filesystem; keep basenames to 8 chars so e.g. images/ball.png -> BALL.PNG.
 for img in "$ROOT"/images/*.png "$ROOT"/images/*.jpg "$ROOT"/images/*.bmp; do

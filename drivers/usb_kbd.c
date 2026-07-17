@@ -272,7 +272,9 @@ static int  kbd_mps      = 8;
 static int  kbd_lowspeed = 0;
 static int  kbd_pid      = PID_DATA0;
 static int  kbd_ready    = 0;
+static int  kbd_iface    = 0;    // bInterfaceNumber: SET_REPORT is per-interface
 static uint8_t kbd_prev[8];
+static uint8_t kbd_led[4] __attribute__((aligned(4)));   // SET_REPORT payload
 
 // Mouse state (a second HID device on the same hub). Polled on its own DWC2
 // channel so it never disturbs keyboard polling.
@@ -334,7 +336,7 @@ static int setup_hid(int new_addr, int ep0_mps, int lowspeed) {
     // NOTE: read multi-byte fields byte-by-byte (the descriptor is not aligned,
     // and with the MMU off an unaligned 16/32-bit access would fault).
     int ep_found = 0, ep_num = 0, ep_mps = 8;
-    int in_hid_if = 0, if_proto = 0, hid_proto = 0;
+    int in_hid_if = 0, if_proto = 0, hid_proto = 0, if_num = 0, hid_ifnum = 0;
     uint8_t *p = ctrl_buf, *end = ctrl_buf + tlen;
     while (p < end && !ep_found) {
         if (p + 2 > end) break;
@@ -342,6 +344,7 @@ static int setup_hid(int new_addr, int ep0_mps, int lowspeed) {
         if (bLen < 2 || p + bLen > end) break;
         if (bType == 4) {  // interface
             in_hid_if = (p[5] == 3);  // bInterfaceClass == HID
+            if_num    = p[2];         // bInterfaceNumber (SET_REPORT needs it)
             if_proto  = p[7];         // bInterfaceProtocol
         } else if (bType == 5 && in_hid_if) {  // endpoint in HID interface
             uint32_t ea = p[2];   // bEndpointAddress
@@ -351,6 +354,7 @@ static int setup_hid(int new_addr, int ep0_mps, int lowspeed) {
                 ep_mps = (p[4] | ((uint32_t)p[5] << 8)) & 0x7FF;
                 if (ep_mps == 0) ep_mps = 8;
                 hid_proto = if_proto;
+                hid_ifnum = if_num;
                 ep_found  = 1;
                 uart_dec("[USB] hid EP: ", ep_num);
                 uart_dec("[USB] hid EP mps: ", ep_mps);
@@ -388,6 +392,7 @@ static int setup_hid(int new_addr, int ep0_mps, int lowspeed) {
     kbd_mps      = ep_mps;
     kbd_lowspeed = lowspeed;
     kbd_pid      = PID_DATA0;
+    kbd_iface    = hid_ifnum;
     kbd_ready    = 1;
     uart_puts("[USB] keyboard configured and ready\n");
     return 1;
@@ -591,19 +596,32 @@ int usb_kbd_init(void) {
 // Poll keyboard
 // ---------------------------------------------------------------------------
 
-char usb_kbd_getchar(void) {
+// Push the lock LEDs to the keyboard when they change. A HID output report goes
+// over the control pipe (channel 0), so this never disturbs the interrupt
+// transfer on channel 1 that reads the keys.
+static void kbd_sync_leds(void) {
+    if (!hid_leds_dirty()) return;
+    kbd_led[0] = (uint8_t)hid_leds();
+    // SET_REPORT (class, interface): wValue = report type 2 (Output) << 8 | id 0
+    if (ctrl_xfer(kbd_devaddr, kbd_mps, kbd_lowspeed,
+                  0x21, 0x09, 0x0200, (uint16_t)kbd_iface, 1, kbd_led) == 0)
+        hid_leds_ack();                  // told; a failure just retries next poll
+}
+
+int usb_kbd_getchar(void) {
     if (!kbd_ready) return 0;
 
     int r = dwc2_xfer(1, kbd_devaddr, kbd_ep, 1 /*IN*/, EP_INTR,
                       kbd_mps, kbd_pid, kbd_report, kbd_mps, kbd_lowspeed);
 
-    if (r == -4) return 0;  // NAK = no key
-
+    if (r == -4) { kbd_sync_leds(); return 0; }   // NAK = no key; a good moment
     if (r < 0) return 0;
 
     kbd_pid = (kbd_pid == PID_DATA0) ? PID_DATA1 : PID_DATA0;
 
-    return hid_report_char(kbd_report, kbd_prev);
+    int k = hid_report_key(kbd_report, kbd_prev);
+    kbd_sync_leds();                              // a lock key may have toggled
+    return k;
 }
 
 // ---------------------------------------------------------------------------

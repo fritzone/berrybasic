@@ -180,8 +180,10 @@ int remove(const char *path) { return seed_svc->file_remove(path) < 0 ? -1 : 0; 
 
 // --- printf family ----------------------------------------------------------
 // A compact integer/string formatter shared by every entry point. Supports the
-// flags '-' and '0', a field width, the length modifiers l/ll/z, and the
-// conversions d i u o x X p c s %. Floating point (%f/%e/%g) is not supported.
+// flags '-', '0', '+' and ' ', a field width, the length modifiers l/ll/z, and
+// the conversions d i u o x X p c s %. '+' and ' ' apply to the signed
+// conversions (d/i) only, as in standard C: '+' always shows a sign, ' ' puts a
+// space where the '-' would go. Floating point (%f/%e/%g) is not supported.
 
 typedef struct { char *buf; size_t cap, len; } sbuf;
 
@@ -203,21 +205,29 @@ static int core_format(sbuf *s, const char *fmt, va_list ap) {
     for (const char *f = fmt; *f; f++) {
         if (*f != '%') { sb_putc(s, *f); continue; }
         f++;
-        int left = 0, zero = 0;
-        while (*f == '-' || *f == '0') { if (*f == '-') left = 1; else zero = 1; f++; }
+        int left = 0, zero = 0, plus = 0, space = 0;
+        for (;; f++) {
+            if      (*f == '-') left  = 1;
+            else if (*f == '0') zero  = 1;
+            else if (*f == '+') plus  = 1;
+            else if (*f == ' ') space = 1;
+            else break;
+        }
         int width = 0;
         while (*f >= '0' && *f <= '9') width = width * 10 + (*f++ - '0');
         int lng = 0;                                    // 0=int 1=long 2=long long
         while (*f == 'l' || *f == 'z') { lng = (*f == 'z') ? 2 : lng + 1; f++; }
 
         char c = *f;
-        char tmp[24]; int tn = 0; const char *pfx = ""; int neg = 0;
+        char tmp[24]; int tn = 0; const char *pfx = ""; char sign = 0;
         if (c == 'd' || c == 'i') {
             long long v = (lng >= 2) ? va_arg(ap, long long)
                         : (lng == 1) ? (long long)va_arg(ap, long)
                                      : (long long)va_arg(ap, int);
-            unsigned long long u = v < 0 ? (neg = 1, (unsigned long long)(-v))
-                                         : (unsigned long long)v;
+            int neg = v < 0;
+            unsigned long long u = neg ? (unsigned long long)(-v)
+                                       : (unsigned long long)v;
+            sign = neg ? '-' : plus ? '+' : space ? ' ' : 0;
             tn = u_to_str(u, 10, 0, tmp);
         } else if (c == 'u' || c == 'x' || c == 'X' || c == 'o' || c == 'p') {
             unsigned long long u;
@@ -257,10 +267,10 @@ static int core_format(sbuf *s, const char *fmt, va_list ap) {
         }
 
         int plen = (pfx[0] ? 2 : 0);
-        int total = tn + neg + plen;
+        int total = tn + (sign ? 1 : 0) + plen;
         int pad = width - total;
         if (!left && !zero) sb_pad(s, ' ', pad);
-        if (neg) sb_putc(s, '-');
+        if (sign) sb_putc(s, sign);                     // '-', '+' or ' '
         for (int i = 0; pfx[i]; i++) sb_putc(s, pfx[i]);
         if (!left && zero)  sb_pad(s, '0', pad);
         while (tn > 0) sb_putc(s, tmp[--tn]);           // digits are reversed

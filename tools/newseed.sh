@@ -53,10 +53,14 @@ sed -e "s|@NAME@|$name|g" -e "s|@UPPER@|$UPPER|g" > "$DIR/$name.c" <<'EOF'
 //   Call:   PRINT CALL(h%, ...)          numeric result
 //           PRINT CALL$(h%, ...)         string result (via set_return_str)
 //
-// A seed must stay self-contained: work through argv, your own local helpers,
-// the seed C library (<stdlib.h>/<string.h>/<ctype.h> - the OS-independent
-// subset) and the svc services. Anything else (printf, file I/O, ...) fails to
-// link. See the SeedServices vtable in seed.h for the full service API.
+// A seed must stay self-contained: work through argv, your own helpers, the
+// seed C library (<stdlib.h>/<string.h>/<ctype.h> - the OS-independent subset)
+// and the svc services. Anything else (printf, file I/O, ...) fails to link.
+// See the SeedServices vtable in seed.h for the full service API.
+//
+// Split it up freely: every .c in this directory is compiled and linked into
+// the one blob, so helper functions can live in their own files (with a header
+// you #include here). Only this file defines the entry.
 #include "seed.h"
 #include <stdlib.h>
 #include <string.h>
@@ -98,22 +102,50 @@ CFLAGS  := -O2 -ffreestanding -nostdlib -fno-builtin -mcpu=cortex-a72 -mstrict-a
            -mcmodel=tiny -fno-pic -ffunction-sections -fdata-sections \
            -I$(SEED_API)/include -I$(SEED_API)
 
+CFLAGS  += -MMD -MP
+
+# Split the seed across as many files as you like: EVERY .c in this directory is
+# compiled and linked into the one blob, so drop helper files in beside
+# @NAME@.c and just #include your own header. Calls between them are ordinary
+# PC-relative branches, so the blob stays relocation-free.
+#
+# Exactly ONE file defines the entry (SEED_EXPORT / SEED_KEYWORD); the rest are
+# plain C. --gc-sections then drops whatever nothing reaches.
+SRC := $(wildcard *.c)
+OBJ := $(SRC:.c=.o)
+
 # The seed C library: every .c under seed/runtime/ is linked in; --gc-sections
 # keeps only what this seed actually uses.
 RT_SRC := $(wildcard $(SEED_API)/runtime/*.c)
 RT_OBJ := $(patsubst $(SEED_API)/runtime/%.c,rt_%.o,$(RT_SRC))
+
+# The self-containment gate. A seed runs at whatever address it is loaded to, so
+# every address inside it must be PC-relative. Reaching for libc already stops
+# the link; this catches the quieter one - an address resolved at link time and
+# baked in as a constant, which would then point near 0 instead of at the load
+# address. The usual source is a pointer that must really exist in memory:
+#
+#     static const char *names[] = { "a", "b" };   // 2x R_AARCH64_ABS64
+#
+# --emit-relocs keeps the relocation records after ld resolves them so we can
+# check which kind each address used; they aren't loadable, so the .sed is
+# unchanged. PC-relative types (ADR_PREL_*, CALL26, ...) are the good case.
+BAD_RELOC := R_AARCH64_(ABS(16|32|64)|MOVW_UABS)
 
 all: $(SEED).sed
 
 rt_%.o: $(SEED_API)/runtime/%.c
 @TAB@$(CC) $(CFLAGS) -c $< -o $@
 
-$(SEED).sed: $(SEED).c $(SEED_API)/seed.h $(SEED_API)/seed.ld $(RT_OBJ)
-@TAB@$(CC) $(CFLAGS) -c $(SEED).c -o $(SEED).o
-@TAB@$(LD) --gc-sections -T $(SEED_API)/seed.ld $(SEED).o $(RT_OBJ) -o $(SEED).elf
-@TAB@@if $(READELF) -r $(SEED).elf | grep -q '^Relocation section'; then \
-	    echo "SEED ERROR: $(SEED) is not self-contained (unresolved relocations):"; \
-	    $(READELF) -r $(SEED).elf; rm -f $@; exit 1; fi
+%.o: %.c
+@TAB@$(CC) $(CFLAGS) -c $< -o $@
+
+$(SEED).sed: $(OBJ) $(SEED_API)/seed.ld $(RT_OBJ)
+@TAB@$(LD) --emit-relocs --gc-sections -T $(SEED_API)/seed.ld $(OBJ) $(RT_OBJ) -o $(SEED).elf
+@TAB@@if $(READELF) -rW $(SEED).elf | grep -qE '$(BAD_RELOC)'; then \
+	    echo "SEED ERROR: $(SEED) is not position-independent - it has absolute"; \
+	    echo "  addresses baked in, which would point at the link-time address:"; \
+	    $(READELF) -rW $(SEED).elf | grep -E '$(BAD_RELOC)'; rm -f $@; exit 1; fi
 @TAB@$(OBJCOPY) -O binary $(SEED).elf $@
 @TAB@@echo "  built $@  (load on the card as @UPPER@.SED)"
 
@@ -123,7 +155,9 @@ install: $(SEED).sed
 @TAB@@echo "  installed to build/seeds/$(SEED).sed"
 
 clean:
-@TAB@rm -f $(SEED).o rt_*.o $(SEED).elf $(SEED).sed
+@TAB@rm -f $(OBJ) $(OBJ:.o=.d) rt_*.o rt_*.d $(SEED).elf $(SEED).sed
+
+-include $(OBJ:.o=.d) $(RT_OBJ:.o=.d)
 
 .PHONY: all install clean
 EOF

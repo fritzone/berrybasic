@@ -8,7 +8,7 @@
 int  xhci_kbd_init(uintptr_t mmio_base);
 
 // Poll the keyboard; returns an ASCII char or 0 if nothing newly pressed.
-char xhci_kbd_getchar(void);
+int  xhci_kbd_getchar(void);
 
 // 1 if a HID mouse was enumerated (on another port of the onboard hub) during
 // xhci_kbd_init.

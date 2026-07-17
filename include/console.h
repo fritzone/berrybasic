@@ -114,6 +114,17 @@ void con_sprite_tint(int on, int r, int g, int b, int a);
 // no framebuffer, or when no font is loaded.
 void con_gtext(int x, int y, const char *s, int len);
 
+// --- keyboard modifiers and locks -------------------------------------------
+// Which modifier keys are held and which locks are set, as a KMOD_* bitmask
+// (see drivers/usb_hid.h): SHIFT CTRL ALT ALTGR META, and CAPS NUM SCROLL.
+// These cannot come back from con_getkey, because Shift on its own is not a key
+// that types anything - it is state, and this is how you read it.
+//
+// It is a snapshot taken when the keyboard was last read, so poll a key first
+// (con_inkey(0) will do) or the answer is as old as your last read. 0 when no
+// USB keyboard is present (a serial terminal sends characters, not modifiers).
+int  con_keymods(void);
+
 // --- pointer (USB mouse) ----------------------------------------------------
 // Poll the mouse and report the current pointer position in raw framebuffer
 // pixels (origin top-left: x in 0..width-1, y in 0..height-1) and the button

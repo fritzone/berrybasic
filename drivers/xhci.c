@@ -148,9 +148,27 @@ static hid_ep_t kbd_ep_st;
 static hid_ep_t mou_ep_st;
 static uint8_t  kbd_prev[8];
 
-// Pending keyboard characters decoded by xhci_pump() (drained by getchar). Small
-// FIFO so a key decoded while servicing the ring for the mouse is not lost.
-static char     key_fifo[16];
+// The keyboard's *control* endpoint, snapshotted for the same reason hid_ep_t
+// exists: address_device_on() hands each new device a fresh ep0_ring and leaves
+// it in the globals, so once a second device (the mouse) is enumerated the
+// globals no longer describe the keyboard. Setting the lock LEDs is a control
+// transfer to the keyboard, long after that, so its EP0 has to be kept.
+typedef struct {
+    int      ready;
+    int      slot;
+    int      iface;      // bInterfaceNumber: SET_REPORT is addressed per-interface
+    trb_t   *ring;
+    uint32_t enq, cyc;
+    uint8_t *led;        // 1-byte DMA buffer for the output report
+} ctrl_ep_t;
+
+static ctrl_ep_t kbd_ctrl;
+
+// Pending keyboard keys decoded by xhci_pump() (drained by getchar). Small FIFO
+// so a key decoded while servicing the ring for the mouse is not lost. Keys are
+// int, not char: F-keys and friends live above 0xFF (see usb_hid.h).
+#define KEY_FIFO_N 16
+static int      key_fifo[KEY_FIFO_N];
 static int      key_head, key_tail;
 
 // Accumulated mouse movement decoded by xhci_pump() (drained by xhci_mouse_poll).
@@ -671,16 +689,21 @@ static int setup_int_endpoint(int dev_speed, uint32_t dev_route, int root_port,
     if (control_xfer(0x80, 6, (2 << 8), 0, tlen, buf) < 0) return 0;
 
     int ep_addr = 0, ep_mps = 8, ep_interval = 8, in_hid = 0, if_proto = 0, proto = 0;
+    int if_num = 0, hid_ifnum = 0;
     for (int p = 0; p + 2 <= tlen; ) {
         int blen = buf[p], btype = buf[p + 1];
         if (blen < 2) break;
-        if (btype == 4) { in_hid = (buf[p + 5] == 3); if_proto = buf[p + 7]; }  // interface
-        else if (btype == 5 && in_hid) {                       // endpoint
+        if (btype == 4) {                                      // interface
+            in_hid   = (buf[p + 5] == 3);
+            if_num   = buf[p + 2];                             // for SET_REPORT
+            if_proto = buf[p + 7];
+        } else if (btype == 5 && in_hid) {                     // endpoint
             if ((buf[p + 2] & 0x80) && (buf[p + 3] & 3) == 3) {
                 ep_addr = buf[p + 2] & 0x0f;
                 ep_mps  = (buf[p + 4] | (buf[p + 5] << 8)) & 0x7ff;
                 ep_interval = buf[p + 6];
                 proto = if_proto;
+                hid_ifnum = if_num;
                 break;
             }
         }
@@ -728,7 +751,45 @@ static int setup_int_endpoint(int dev_speed, uint32_t dev_route, int root_port,
     out->ring = epint_ring; out->enq = epint_enq; out->cyc = epint_cycle;
     out->buf = report_buf; out->len = rlen;
     if (out_proto) *out_proto = proto;
+
+    // Keep this device's EP0 if it is the keyboard. Setting the lock LEDs is a
+    // control transfer made much later, by which time the globals below will
+    // describe whatever was enumerated after it (typically the mouse).
+    if (proto == 1) {
+        kbd_ctrl.ready = 1;
+        kbd_ctrl.slot  = slot_id;
+        kbd_ctrl.iface = hid_ifnum;
+        kbd_ctrl.ring  = ep0_ring;
+        kbd_ctrl.enq   = ep0_enq;
+        kbd_ctrl.cyc   = ep0_cycle;
+        kbd_ctrl.led   = dma_alloc(4, 64);
+    }
     return 1;
+}
+
+// Push the lock LEDs to the keyboard when they change. control_xfer works on the
+// global EP0 ring, so the keyboard's is swapped in for the duration and the
+// caller's put back - including the ring's advanced enqueue pointer, which must
+// be carried forward or the next transfer would reuse a TRB the controller owns.
+static void xhci_sync_leds(void) {
+    if (!kbd_ctrl.ready || !hid_leds_dirty()) return;
+
+    trb_t   *save_ring = ep0_ring;
+    uint32_t save_enq  = ep0_enq, save_cyc = ep0_cycle;
+    int      save_slot = slot_id;
+
+    ep0_ring = kbd_ctrl.ring; ep0_enq = kbd_ctrl.enq; ep0_cycle = kbd_ctrl.cyc;
+    slot_id  = kbd_ctrl.slot;
+
+    kbd_ctrl.led[0] = (uint8_t)hid_leds();
+    // SET_REPORT (class, interface): wValue = report type 2 (Output) << 8 | id 0
+    int r = control_xfer(0x21, 0x09, 0x0200, (uint16_t)kbd_ctrl.iface, 1, kbd_ctrl.led);
+
+    kbd_ctrl.enq = ep0_enq; kbd_ctrl.cyc = ep0_cycle;
+    ep0_ring = save_ring; ep0_enq = save_enq; ep0_cycle = save_cyc;
+    slot_id  = save_slot;
+
+    if (r == 0) hid_leds_ack();            // a failure simply retries next poll
 }
 
 // Route a freshly configured HID endpoint to the keyboard or mouse slot by its
@@ -758,16 +819,16 @@ static void hid_rearm(hid_ep_t *e) {
     ring_db(e->slot, e->dci);
 }
 
-static void key_push(char c) {
+static void key_push(int c) {
     if (!c) return;
-    int nt = (key_tail + 1) % (int)sizeof(key_fifo);
+    int nt = (key_tail + 1) % KEY_FIFO_N;
     if (nt == key_head) return;                  // full: drop oldest-avoiding, just drop new
     key_fifo[key_tail] = c; key_tail = nt;
 }
-static char key_pop(void) {
+static int key_pop(void) {
     if (key_head == key_tail) return 0;
-    char c = key_fifo[key_head];
-    key_head = (key_head + 1) % (int)sizeof(key_fifo);
+    int c = key_fifo[key_head];
+    key_head = (key_head + 1) % KEY_FIFO_N;
     return c;
 }
 
@@ -787,7 +848,7 @@ static void xhci_pump(void) {
         int eid = (ev.control >> 16) & 0x1f;
         int cc  = COMP_CODE(ev.status);
         if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
-            if (cc == 1 || cc == 13) key_push(hid_report_char(kbd_ep_st.buf, kbd_prev));
+            if (cc == 1 || cc == 13) key_push(hid_report_key(kbd_ep_st.buf, kbd_prev));
             hid_rearm(&kbd_ep_st);
         } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
             if (cc == 1 || cc == 13) {
@@ -964,9 +1025,10 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     return kbd_ep_st.ready;
 }
 
-char xhci_kbd_getchar(void) {
+int xhci_kbd_getchar(void) {
     if (!kbd_ep_st.ready) return 0;
     xhci_pump();
+    xhci_sync_leds();                     // a lock key may have toggled
     return key_pop();
 }
 

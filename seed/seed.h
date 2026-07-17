@@ -27,7 +27,9 @@
 #include <stddef.h>
 
 #define SEED_MAGIC        0x44454553u   // 'S','E','E','D' little-endian
-#define SEED_ABI_VERSION  7u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num; v7 graphics
+#define SEED_ABI_VERSION 11u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num;
+                                        // v7 graphics; v8 records; v9 mouse; v10 double
+                                        // buffering; v11 keyboard modifiers
 
 // File open modes for the file_open service (match the storage layer). The seed
 // <stdio.h> maps fopen's "r"/"w"/"a"/"r+"/... strings onto these.
@@ -47,14 +49,74 @@
 #define SEED_GPIO_FALLING   0
 #define SEED_GPIO_RISING    1
 
+// Modifier and lock bits returned by the keymods service (values match the
+// KMOD_* set in drivers/usb_hid.h, which a seed does not include). Left and
+// right of a pair are folded together; ALTGR is the right-hand Alt, which types
+// the third legend on Nordic/German boards.
+#define SEED_KMOD_SHIFT  0x001
+#define SEED_KMOD_CTRL   0x002
+#define SEED_KMOD_ALT    0x004
+#define SEED_KMOD_ALTGR  0x008
+#define SEED_KMOD_META   0x010   // the Windows / Command key
+#define SEED_KMOD_CAPS   0x020   // lock states
+#define SEED_KMOD_NUM    0x040
+#define SEED_KMOD_SCROLL 0x080
+
+// Keys that type nothing, as returned by getkey/inkey (these match the KEY_*
+// set in drivers/usb_hid.h). Printable keys return their Latin-1 character, so
+// everything added here sits above 0xFF to stay clear of it.
+#define SEED_KEY_LEFT   0x11
+#define SEED_KEY_RIGHT  0x12
+#define SEED_KEY_UP     0x13
+#define SEED_KEY_DOWN   0x14
+#define SEED_KEY_HOME   0x15
+#define SEED_KEY_END    0x16
+#define SEED_KEY_INS    0x17
+#define SEED_KEY_ESC    0x1B
+#define SEED_KEY_DEL    0x7F
+#define SEED_KEY_F1     0x101    // F1..F12 are consecutive
+#define SEED_KEY_F12    0x10C
+#define SEED_KEY_F(n)   (SEED_KEY_F1 + (n) - 1)
+#define SEED_KEY_PGUP   0x10D
+#define SEED_KEY_PGDN   0x10E
+
+// Header flags (the `flags` field below).
+#define SEED_HDR_KEYWORD  0x0001u   // this seed registers a language keyword (see
+                                    // SEED_KEYWORD): a seed_keyword descriptor
+                                    // follows the header, and entry_off is past it.
+
 // First bytes of a .sed file. The entry point sits at byte `entry_off` from the
-// start of the blob (forced by seed.ld to be right after this header).
+// start of the blob (forced by seed.ld to be right after this header, or right
+// after the optional seed_keyword descriptor when SEED_HDR_KEYWORD is set).
 struct seed_header {
     uint32_t magic;       // SEED_MAGIC; rejects wrong-arch / stale files
     uint16_t version;     // SEED_ABI_VERSION the seed was built against
-    uint16_t flags;       // reserved (0)
+    uint16_t flags;       // SEED_HDR_* (0 for a plain seed)
     uint32_t entry_off;   // entry point, bytes from blob start
     uint32_t reserved;    // pad to 16 bytes / future use
+};
+
+// How a registered keyword is used from BASIC (the `kind` field below):
+#define SEED_KW_STATEMENT 0   // a command:            NAME arg, arg       (return ignored)
+#define SEED_KW_NUMFN     1   // a numeric function:   x = NAME(arg, arg)
+#define SEED_KW_STRFN     2   // a string function:    a$ = NAME$(arg, arg) (result via set_return_str)
+
+// A keyword a seed adds to the language. When SEED_HDR_KEYWORD is set this
+// descriptor sits immediately after the header (at offset sizeof(seed_header)),
+// so the interpreter can read it while scanning the /seed directory at startup
+// and wire NAME straight into the lexer — no SEED/CALL needed. The seed's entry
+// point is the keyword's implementation; the gathered arguments arrive as argv[].
+struct seed_keyword {
+    char     name[16];    // the keyword AS TYPED, uppercase, incl. a trailing '$'
+                          //   for a string function (e.g. "BOX", "HYPOT", "REV$")
+    uint16_t kind;        // SEED_KW_STATEMENT / SEED_KW_NUMFN / SEED_KW_STRFN
+    uint16_t min_args;    // fewest / most arguments accepted (inclusive). The
+    uint16_t max_args;    //   interpreter checks the count before calling.
+    uint16_t reserved;
+    uint32_t pad[2];      // -> 32 bytes total. Kept a multiple of 16 so the entry
+                          //   that follows (functions are 16-aligned) lands right
+                          //   after with no linker padding, i.e. entry_off ==
+                          //   sizeof(header)+sizeof(keyword). See seed.ld.
 };
 
 // One call argument: a BASIC number or a snapshot of a BASIC string. String
@@ -179,6 +241,78 @@ typedef struct SeedServices {
     void (*gfx_text)(int x, int y, const char *s, int len, uint32_t rgb); // baseline at (x,y)
     int  (*text_width)(const char *s, int len);       // pixel width in the current font
     int  (*text_height)(void);                        // line height in pixels
+
+    // --- records (ABI v8) --------------------------------------------------
+    // BASIC's user-defined types (TYPE point : x, y : ENDTYPE / DIM e(99) AS
+    // point). A record is reached by *name*, exactly like a numeric array - it
+    // is never passed in as an argument.
+    //
+    // The numeric fields of one element are stored contiguously, so a record -
+    // or a whole array of records - is a strided array of doubles, and
+    // rec_array hands a seed a direct pointer to it. Element `e`, field `f` is
+    //
+    //     base[e * stride + f]        f from rec_field(), 0 <= e < nelem
+    //
+    // which is what makes "update 10,000 particles" worth writing as a seed.
+    // Text fields are NOT in that block (the interpreter moves string bytes
+    // around), so they are copied in and out by name, like any other string.
+
+    // Pointer to element 0's numeric fields; *nelem elements of *stride doubles
+    // each. 0 (with *nelem = 0) if `name` is not a record. The pool never moves,
+    // so the pointer stays valid for the whole RUN.
+    double *(*rec_array)(const char *name, int *nelem, int *stride);
+
+    // Index of a numeric field within one element, for use with rec_array().
+    // -1 if there is no such field, or if it is a text field.
+    int  (*rec_field)(const char *name, const char *field);
+
+    // Text fields, copied. get returns the full length even if truncated (like
+    // get_str); both are no-ops/0 if the record, element or field is unknown.
+    int  (*rec_get_str)(const char *name, int elem, const char *field,
+                        char *buf, int buflen);
+    void (*rec_set_str)(const char *name, int elem, const char *field,
+                        const char *buf, int len);
+
+    // --- pointer / mouse (ABI v9) ------------------------------------------
+    // Poll the USB mouse and report the pointer: position in *raw framebuffer
+    // pixels* (origin top-left - the same space the gfx_* calls draw in, and
+    // the same numbers BASIC's MOUSEX/MOUSEY report) and a button bitmask
+    // (bit0 = left, bit1 = right, bit2 = middle). Any pointer may be 0. With no
+    // mouse present, or on the host build, everything reads back 0.
+    //
+    // The call *is* the poll. The interpreter services the mouse between BASIC
+    // statements, so while a seed is running nothing else is moving the
+    // pointer: a seed that wants a live mouse must call this itself, in its own
+    // loop. Keyboard input is the pair above (getkey / inkey), which behave
+    // exactly like BASIC's GET and INKEY.
+    void (*mouse)(int *x, int *y, int *buttons);
+
+    // --- double buffering (ABI v10) ----------------------------------------
+    // Draw the next frame off-screen and present it in one go, so a redrawing
+    // loop never shows a half-finished screen. This is the same mechanism as
+    // BASIC's BUFFER ON / FLIP, and the *same state*: a seed that turns it on
+    // should put the setting back as it found it (gfx_buffered() reports it),
+    // or a program that was buffering its own graphics will stop working.
+    //
+    // gfx_backbuffer(1) routes every drawing call - the gfx_* above, and the
+    // seed's <graphics.h> on top of them - to an off-screen buffer; the visible
+    // screen then holds still until gfx_flip() copies the buffer onto it. The
+    // buffer keeps its contents across flips, so a loop is free to redraw only
+    // the parts that changed. Returns 0 on success, <0 if the buffer could not
+    // be allocated (the screen is then simply undoubled - drawing still works).
+    int  (*gfx_backbuffer)(int on);
+    void (*gfx_flip)(void);
+    int  (*gfx_buffered)(void);
+
+    // --- keyboard modifiers and locks (ABI v11) ----------------------------
+    // Which modifiers are held and which locks are set, as a bitmask of the
+    // SEED_KMOD_* values above. getkey/inkey cannot tell you this:
+    // Shift on its own types nothing, so it is state rather than a key.
+    //
+    // Like the mouse, it is a snapshot refreshed when the keyboard is read, so
+    // call inkey(0) first in a polling loop or you get however stale the last
+    // read left it. 0 when no USB keyboard is present.
+    int  (*keymods)(void);
 } SeedServices;
 
 // A seed's entry point. Returns a number (also usable as a status); a string
@@ -236,5 +370,47 @@ extern const SeedServices *seed_svc;   // set on entry; used by the seed libc
     }                                                                          \
     static double name##_body(const SeedServices *svc,                         \
                               const seed_arg *argv, int argc)
+
+// ---------------------------------------------------------------------------
+// SEED_KEYWORD — register a new BASIC keyword.
+//
+// Like SEED_EXPORT, but the seed also carries a seed_keyword descriptor, so at
+// startup the interpreter scans /seed, finds this seed, and adds `kwname` to the
+// language. The keyword is then used directly — no SEED/CALL:
+//
+//   SEED_KEYWORD("HYPOT", SEED_KW_NUMFN, 2, 2) {        // r = HYPOT(3, 4)
+//       double a = argv[0].num, b = argv[1].num;
+//       return sqrt(a*a + b*b);
+//   }
+//
+//   SEED_KEYWORD("SHOUT", SEED_KW_STATEMENT, 1, 1) {    // SHOUT "hi"
+//       for (int i = 0; i < argv[0].len; i++) svc->putc(toupper(argv[0].str[i]));
+//       svc->putc('\n');
+//       return 0;
+//   }
+//
+// A string function (SEED_KW_STRFN) returns its text through svc->set_return_str
+// and is named with a trailing '$'. `kwmin`/`kwmax` bound the argument count.
+// Only seeds that use this macro become keywords; SEED_EXPORT seeds stay plain.
+// ---------------------------------------------------------------------------
+#define SEED_KEYWORD(kwname, kwkind, kwmin, kwmax)                             \
+    static double seed_kw_body(const SeedServices *svc,                       \
+                               const seed_arg *argv, int argc);               \
+    static const struct seed_header                                           \
+        __attribute__((section(".seed.header"), used)) seed_hdr_ = {          \
+            SEED_MAGIC, (uint16_t)SEED_ABI_VERSION, SEED_HDR_KEYWORD,         \
+            (uint32_t)(sizeof(struct seed_header) +                           \
+                       sizeof(struct seed_keyword)), 0 };                     \
+    static const struct seed_keyword                                          \
+        __attribute__((section(".seed.keyword"), used)) seed_kw_desc_ = {     \
+            kwname, (uint16_t)(kwkind), (uint16_t)(kwmin), (uint16_t)(kwmax), 0 };\
+    __attribute__((section(".seed.entry"), used))                            \
+    double seed_kw_entry(const SeedServices *svc,                            \
+                         const seed_arg *argv, int argc) {                    \
+        seed_svc = svc;                                                       \
+        return seed_kw_body(svc, argv, argc);                                 \
+    }                                                                         \
+    static double seed_kw_body(const SeedServices *svc,                       \
+                               const seed_arg *argv, int argc)
 
 #endif // SEED_H

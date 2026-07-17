@@ -52,6 +52,11 @@ int  getmaxy(void) { int h = seed_svc->gfx_height(); return h > 0 ? h - 1 : 0; }
 int  getmaxcolor(void) { return 15; }
 void cleardevice(void) { seed_svc->gfx_noclip(); seed_svc->gfx_clear(bk_color); }
 
+// --- double buffering ------------------------------------------------------
+int  setdoublebuffer(int on) { return seed_svc->gfx_backbuffer(on); }
+void flippage(void)          { seed_svc->gfx_flip(); }
+int  getdoublebuffer(void)   { return seed_svc->gfx_buffered(); }
+
 // --- colour ----------------------------------------------------------------
 unsigned int rgb(int r, int g, int b) { return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255); }
 void setcolor(int c)                 { cur_color = pal(c); }

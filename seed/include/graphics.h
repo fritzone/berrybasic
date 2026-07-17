@@ -102,6 +102,25 @@ void outtextxy(int x, int y, const char *s);
 int  textwidth(const char *s);
 int  textheight(const char *s);
 
+// --- double buffering ------------------------------------------------------
+// Draw the next frame off-screen, then show it in one go, so an animating or
+// redrawing loop never displays a half-drawn screen. The off-screen buffer
+// keeps its contents between flips, so a loop may redraw only what changed.
+//
+//   setdoublebuffer(1);
+//   for (;;) { ...draw...; flippage(); }      // each frame appears complete
+//   setdoublebuffer(0);                       // back to drawing on the screen
+//
+// This is the same buffer, and the same on/off setting, as BASIC's BUFFER ON /
+// FLIP: if you turn it on, put it back the way you found it before returning
+// (getdoublebuffer() reports the current setting) so you don't break a program
+// that was buffering its own graphics.
+int  setdoublebuffer(int on);   // 1 = draw off-screen; 0 = straight to the screen.
+                                //   Returns 0 on success, <0 if no buffer could
+                                //   be had (drawing then just goes to the screen).
+void flippage(void);            // present the finished frame (no-op when off)
+int  getdoublebuffer(void);     // 1 if drawing is currently going off-screen
+
 // --- small conveniences ----------------------------------------------------
 void gdelay(int centiseconds);           // busy-wait using the seed clock
 

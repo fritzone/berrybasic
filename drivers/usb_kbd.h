@@ -7,7 +7,7 @@
 int  usb_kbd_init(void);
 
 // Poll keyboard. Returns ASCII character or 0 if nothing pressed.
-char usb_kbd_getchar(void);
+int  usb_kbd_getchar(void);
 
 // 1 if a HID mouse was found and configured during usb_kbd_init.
 int  usb_mouse_present(void);

@@ -29,7 +29,7 @@ static const unsigned char us_normal[104] = {
     ']', '\\','#', ';', '\'','`', ',', '.',
     '/', 0,   0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,
-    0,   0,   KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
+    0,   KEY_INS, KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
     KEY_LEFT, KEY_DOWN, KEY_UP, 0, '/', '*', '-', '+',
     '\n','1', '2', '3', '4', '5', '6', '7',
     '8', '9', '0', '.', '\\',0,   0,   '='
@@ -45,7 +45,7 @@ static const unsigned char us_shift[104] = {
     '}', '|', '~', ':', '"', '~', '<', '>',
     '?', 0,   0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,
-    0,   0,   KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
+    0,   KEY_INS, KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
     KEY_LEFT, KEY_DOWN, KEY_UP, 0, '/', '*', '-', '+',
     '\n','1', '2', '3', '4', '5', '6', '7',
     '8', '9', '0', '.', '|', 0,   0,   '='
@@ -204,23 +204,93 @@ int hid_set_layout(const char *code) {
 
 const char *hid_layout_code(void) { return cur_code; }
 
-char hid_to_ascii(uint8_t kc, uint8_t mod) {
-    if (kc == 0 || kc >= 104) return 0;
-    if (!resolved) resolve(0);                   // default to US on first use
-    if (mod & 0x40) return (char)cur_altgr[kc];  // AltGr (right Alt): third legend
-    return (char)((mod & 0x22) ? cur_shift[kc] : cur_normal[kc]);  // 0x22 = either Shift
+// --- keys with no character -------------------------------------------------
+// The layout tables only hold characters, so the keys that type nothing are
+// resolved first, straight from the usage code. None of them move between
+// layouts, which is why they need no per-layout override.
+static int special_key(uint8_t kc) {
+    if (kc >= 0x3A && kc <= 0x45) return KEY_F(kc - 0x3A + 1);   // F1..F12
+    switch (kc) {
+        case 0x29: return KEY_ESC;
+        case 0x4B: return KEY_PGUP;
+        case 0x4E: return KEY_PGDN;
+        default:   return 0;
+    }
 }
 
-char hid_report_char(const uint8_t report[8], uint8_t prev[8]) {
-    char out = 0;
-    uint8_t mod = report[0];
+// --- modifier / lock state --------------------------------------------------
+static uint8_t g_mod;                       // raw HID modifier byte, last report
+static int     g_caps, g_num = 1, g_scroll; // NumLock starts on: the keypad
+                                            // types digits, which is what the
+                                            // layout tables give it.
+static int     g_leds_dirty = 1;            // tell the device at the first poll
+
+int hid_modifiers(void) {
+    int m = 0;
+    if (g_mod & 0x22) m |= KMOD_SHIFT;       // either Shift
+    if (g_mod & 0x11) m |= KMOD_CTRL;        // either Ctrl
+    if (g_mod & 0x04) m |= KMOD_ALT;         // left Alt
+    if (g_mod & 0x40) m |= KMOD_ALTGR;       // right Alt = AltGr
+    if (g_mod & 0x88) m |= KMOD_META;        // either GUI/Windows
+    if (g_caps)       m |= KMOD_CAPS;
+    if (g_num)        m |= KMOD_NUM;
+    if (g_scroll)     m |= KMOD_SCROLL;
+    return m;
+}
+
+int  hid_leds(void) {                        // the HID output report byte
+    return (g_num ? 1 : 0) | (g_caps ? 2 : 0) | (g_scroll ? 4 : 0);
+}
+int  hid_leds_dirty(void) { return g_leds_dirty; }
+void hid_leds_ack(void)   { g_leds_dirty = 0; }
+
+// CapsLock inverts the shift state of the *letter* keys only - not the digits
+// or symbols - so it is applied to the result rather than to the lookup. Latin-1
+// has its letters in two contiguous runs, with the division signs sitting in the
+// middle of them (0xD7 x, 0xF7 /), which are not letters and must not flip.
+static int caps_flip(int c) {
+    if (c >= 'a'  && c <= 'z')                return c - 32;
+    if (c >= 'A'  && c <= 'Z')                return c + 32;
+    if (c >= 0xE0 && c <= 0xFE && c != 0xF7)  return c - 32;
+    if (c >= 0xC0 && c <= 0xDE && c != 0xD7)  return c + 32;
+    return c;
+}
+
+int hid_to_key(uint8_t kc, uint8_t mod) {
+    int sp = special_key(kc);
+    if (sp) return sp;
+    if (kc == 0 || kc >= 104) return 0;
+    if (!resolved) resolve(0);                   // default to US on first use
+    if (mod & 0x40) return cur_altgr[kc];        // AltGr (right Alt): third legend
+    int c = (mod & 0x22) ? cur_shift[kc] : cur_normal[kc];   // 0x22 = either Shift
+    if (g_caps) c = caps_flip(c);
+    return c;
+}
+
+// The lock keys toggle their lock and type nothing. Returns 1 if `kc` was one.
+static int lock_key(uint8_t kc) {
+    switch (kc) {
+        case 0x39: g_caps   = !g_caps;   break;  // CapsLock
+        case 0x53: g_num    = !g_num;    break;  // NumLock
+        case 0x47: g_scroll = !g_scroll; break;  // ScrollLock
+        default: return 0;
+    }
+    g_leds_dirty = 1;                            // the backend will SET_REPORT
+    return 1;
+}
+
+int hid_report_key(const uint8_t report[8], uint8_t prev[8]) {
+    int out = 0;
+    g_mod = report[0];                           // refresh the modifier snapshot
     for (int i = 2; i < 8; i++) {
         uint8_t kc = report[i];
         if (kc == 0) continue;
         int held = 0;
         for (int j = 2; j < 8; j++)
             if (prev[j] == kc) { held = 1; break; }
-        if (!held) { out = hid_to_ascii(kc, mod); break; }
+        if (held) continue;
+        if (lock_key(kc)) continue;              // toggles a lock, types nothing
+        if (!out) out = hid_to_key(kc, g_mod);   // first newly-pressed key wins
     }
     for (int k = 0; k < 8; k++) prev[k] = report[k];
     return out;

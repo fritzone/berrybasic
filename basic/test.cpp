@@ -600,6 +600,22 @@ TEST_CASE("CAT SIMPLE lists plain names without icons") {
     REQUIRE_THAT(out, !ContainsSubstring("[BAS] CATME2.BAS"));  // plain, not the rich form
 }
 
+TEST_CASE("CAT lists a named directory without CD-ing into it") {
+    std::filesystem::create_directory("CATSUB");
+    { std::ofstream f("CATSUB/INSIDE.BAS"); f << "10 PRINT 1\n"; }
+    std::string rich   = run_raw("CAT \"CATSUB\"\n");
+    std::string simple = run_raw("CAT SIMPLE \"CATSUB\"\n");
+    std::filesystem::remove("CATSUB/INSIDE.BAS");
+    std::filesystem::remove("CATSUB");
+    REQUIRE_THAT(rich,   ContainsSubstring("[BAS] INSIDE.BAS"));   // rich form of the subdir
+    REQUIRE_THAT(simple, ContainsSubstring("INSIDE.BAS"));         // plain form of the subdir
+    REQUIRE_THAT(simple, !ContainsSubstring("[BAS] INSIDE.BAS"));
+}
+
+TEST_CASE("CAT of a missing directory reports an error") {
+    REQUIRE_THAT(run_raw("CAT \"NOSUCHDIR\"\n"), ContainsSubstring("not found"));
+}
+
 // --- Sound: the portable queued/background tone player ----------------------
 // These reach past PRINT into the engine itself (sound_pump / sound_cur_freq /
 // sound_queued from basic.h). run() leaves the enqueued notes un-pumped (the
@@ -1004,7 +1020,113 @@ TEST_CASE("EXEC GOTO branches the program") {
 // --- Keyboard layouts (HID decode + the KEYBOARD statement) -----------------
 // Validate the layout tables directly through the shared decoder, then the BASIC
 // surface. mod bits: 0x02 = Shift, 0x40 = AltGr (right Alt).
-static char K(uint8_t kc, uint8_t mod = 0) { return hid_to_ascii(kc, mod); }
+static int K(uint8_t kc, uint8_t mod = 0) { return hid_to_key(kc, mod); }
+
+// Feed a synthetic 8-byte boot report through the decoder. `kc` is the key held
+// (0 = none), `mod` the HID modifier byte. Each call is one report, so pressing
+// a key means: report with the key, then a report without it.
+struct Kbd {
+    uint8_t prev[8] = {0};
+    int press(uint8_t kc, uint8_t mod = 0) {
+        uint8_t down[8] = {mod, 0, kc, 0, 0, 0, 0, 0};
+        int k = hid_report_key(down, prev);
+        uint8_t up[8] = {mod, 0, 0, 0, 0, 0, 0, 0};
+        hid_report_key(up, prev);
+        return k;
+    }
+    int hold(uint8_t mod) {                       // modifier down, no key
+        uint8_t r[8] = {mod, 0, 0, 0, 0, 0, 0, 0};
+        return hid_report_key(r, prev);
+    }
+};
+
+TEST_CASE("keys that type nothing still report themselves") {
+    REQUIRE(hid_set_layout("US") == 1);
+    REQUIRE(K(0x29) == KEY_ESC);                  // Escape - was silently dropped
+    REQUIRE(K(0x3A) == KEY_F1);
+    REQUIRE(K(0x3E) == KEY_F(5));
+    REQUIRE(K(0x45) == KEY_F12);
+    REQUIRE(K(0x4B) == KEY_PGUP);
+    REQUIRE(K(0x4E) == KEY_PGDN);
+    REQUIRE(KEY_F12 - KEY_F1 == 11);              // F1..F12 are consecutive
+}
+
+TEST_CASE("special keys stay clear of the character range") {
+    // Latin-1 uses every code up to 0xFF, so a key that types nothing must not
+    // collide with one that does (KEY_F1 must not be 'æ').
+    REQUIRE(KEY_F1 > 0xFF);
+    REQUIRE(KEY_PGDN > 0xFF);
+    REQUIRE(K(0x3A, 0x02) == KEY_F1);             // shift doesn't change it
+    REQUIRE(K(0x3A, 0x40) == KEY_F1);             // nor does AltGr
+}
+
+TEST_CASE("modifiers are readable as state, not as keys") {
+    REQUIRE(hid_set_layout("US") == 1);
+    Kbd k;
+    REQUIRE(k.hold(0x02) == 0);                   // Shift alone types nothing ...
+    REQUIRE((hid_modifiers() & KMOD_SHIFT) != 0); // ... but is visible as state
+    REQUIRE(k.hold(0x01) == 0);
+    REQUIRE((hid_modifiers() & KMOD_CTRL) != 0);
+    REQUIRE(k.hold(0x04) == 0);
+    REQUIRE((hid_modifiers() & KMOD_ALT) != 0);
+    REQUIRE((hid_modifiers() & KMOD_ALTGR) == 0); // left Alt is not AltGr
+    REQUIRE(k.hold(0x40) == 0);
+    REQUIRE((hid_modifiers() & KMOD_ALTGR) != 0);
+    REQUIRE(k.hold(0x00) == 0);
+    REQUIRE((hid_modifiers() & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT | KMOD_ALTGR)) == 0);
+}
+
+TEST_CASE("CapsLock toggles, types nothing, and capitalises letters") {
+    REQUIRE(hid_set_layout("US") == 1);
+    Kbd k;
+    int caps0 = hid_modifiers() & KMOD_CAPS;
+    REQUIRE(k.press(0x39) == 0);                  // the CapsLock key types nothing
+    REQUIRE((hid_modifiers() & KMOD_CAPS) != caps0);   // ... it toggles the lock
+    REQUIRE(k.press(0x04) == 'A');                     // ... and letters come up
+    REQUIRE(k.press(0x04, 0x02) == 'a');               // Shift inverts it back
+    REQUIRE(k.press(0x1E) == '1');                     // digits are unaffected
+    REQUIRE(k.press(0x39) == 0);                       // off again
+    REQUIRE((hid_modifiers() & KMOD_CAPS) == caps0);
+    REQUIRE(k.press(0x04) == 'a');
+}
+
+TEST_CASE("CapsLock capitalises the Latin-1 letters too") {
+    REQUIRE(hid_set_layout("NO") == 1);
+    Kbd k;
+    REQUIRE((unsigned char)k.press(0x2F) == 0xE5);     // å
+    k.press(0x39);                                     // CapsLock on
+    REQUIRE((unsigned char)k.press(0x2F) == 0xC5);     // Å
+    k.press(0x39);                                     // and off again
+    REQUIRE(hid_set_layout("US") == 1);
+}
+
+TEST_CASE("the lock LEDs follow the lock keys") {
+    Kbd k;
+    hid_leds_ack();                               // start from a told state
+    REQUIRE(hid_leds_dirty() == 0);
+    int before = hid_leds();
+    k.press(0x39);                                // CapsLock
+    REQUIRE(hid_leds_dirty() == 1);               // the backend must SET_REPORT
+    REQUIRE((hid_leds() & 2) != (before & 2));    // bit1 = CapsLock
+    hid_leds_ack();
+    REQUIRE(hid_leds_dirty() == 0);
+    k.press(0x39);                                // put it back
+    hid_leds_ack();
+}
+
+TEST_CASE("a lock key pressed with another key doesn't eat it") {
+    REQUIRE(hid_set_layout("US") == 1);
+    uint8_t prev[8] = {0};
+    uint8_t down[8] = {0, 0, 0x39, 0x05, 0, 0, 0, 0};   // CapsLock + 'b' together
+    int k = hid_report_key(down, prev);
+    REQUIRE(k == 'B');                            // caps applied, key still delivered
+    uint8_t up[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    hid_report_key(up, prev);
+    uint8_t c2[8] = {0, 0, 0x39, 0, 0, 0, 0, 0};  // CapsLock off again
+    hid_report_key(c2, prev);
+    hid_report_key(up, prev);
+    hid_leds_ack();
+}
 
 TEST_CASE("US layout: number-row shifts and symbols") {
     REQUIRE(hid_set_layout("US") == 1);
@@ -1420,4 +1542,266 @@ TEST_CASE("LIST SIMPLE still honours a line range") {
     REQUIRE_THAT(out, ContainsSubstring("20 PRINT 2"));
     REQUIRE_THAT(out, ContainsSubstring("30 PRINT 3"));
     REQUIRE_THAT(out, !ContainsSubstring("10 PRINT 1"));
+}
+
+TEST_CASE("LIST \"file\" lists a program file from disk (.BAS default)") {
+    { std::ofstream f("LISTME.BAS"); f << "10 PRINT 1\n20 PRINT 2\n"; }
+    std::string out = run_raw("LIST \"LISTME\"\n");        // extension defaulted to .BAS
+    std::remove("LISTME.BAS");
+    REQUIRE_THAT(out, ContainsSubstring("10"));
+    REQUIRE_THAT(out, ContainsSubstring("PRINT 1"));
+    REQUIRE_THAT(out, ContainsSubstring("20"));
+    REQUIRE_THAT(out, ContainsSubstring("PRINT 2"));
+}
+
+TEST_CASE("LIST SIMPLE \"file\" prints the file lines verbatim") {
+    { std::ofstream f("LISTME3.BAS"); f << "10 REM hi there\n"; }
+    std::string out = run_raw("LIST SIMPLE \"LISTME3\"\n");
+    std::remove("LISTME3.BAS");
+    REQUIRE_THAT(out, ContainsSubstring("10 REM hi there"));
+}
+
+TEST_CASE("LIST of a file leaves the program in memory untouched") {
+    { std::ofstream f("LISTME2.BAS"); f << "10 PRINT 99\n"; }
+    std::string out = run_raw("5 PRINT 7\nLIST \"LISTME2\"\nLIST\n");
+    std::remove("LISTME2.BAS");
+    REQUIRE_THAT(out, ContainsSubstring("PRINT 99"));      // shown from the file
+    REQUIRE_THAT(out, ContainsSubstring("PRINT 7"));       // memory still intact
+}
+
+TEST_CASE("LIST of a missing file reports an error") {
+    REQUIRE_THAT(run_raw("LIST \"NOSUCHFILE\"\n"), ContainsSubstring("not found"));
+}
+
+// --- user-defined types (records) -------------------------------------------
+
+TEST_CASE("TYPE ... ENDTYPE defines a record and DIM AS gives it storage") {
+    REQUIRE_THAT(run("10 TYPE pt : x, y : ENDTYPE\n"
+                     "20 DIM p AS pt\n"
+                     "30 p.x = 3 : p.y = 4\n"
+                     "40 PRINT p.x + p.y"),
+                 ContainsSubstring("7"));
+}
+
+TEST_CASE("record fields take their kind from the name suffix") {
+    std::string out = run("10 TYPE rec : n$, i%, f : ENDTYPE\n"
+                          "20 DIM r AS rec\n"
+                          "30 r.n$ = \"hi\" : r.i% = 3.9 : r.f = 3.9\n"
+                          "40 PRINT r.n$ : PRINT r.i% : PRINT r.f");
+    REQUIRE_THAT(out, ContainsSubstring("hi"));
+    REQUIRE_THAT(out, ContainsSubstring("3\n"));       // % truncates
+    REQUIRE_THAT(out, ContainsSubstring("3.9"));       // plain field keeps the fraction
+}
+
+TEST_CASE("a record's fields start at zero and empty") {
+    REQUIRE_THAT(run("10 TYPE rec : n$, x : ENDTYPE\n"
+                     "20 DIM r AS rec\n"
+                     "30 PRINT r.x; \"[\"; r.n$; \"]\""),
+                 ContainsSubstring("0[]"));
+}
+
+TEST_CASE("the TYPE field list may span several lines") {
+    REQUIRE_THAT(run("10 TYPE player\n"
+                     "20   name$, score\n"
+                     "30 ENDTYPE\n"
+                     "40 DIM p AS player\n"
+                     "50 p.name$ = \"ann\" : p.score = 5\n"
+                     "60 PRINT p.name$; p.score"),
+                 ContainsSubstring("ann5"));
+}
+
+TEST_CASE("a type or field name may be a word that is also a keyword") {
+    // POINT, SIZE and TIME are keywords; as names they are unambiguous.
+    REQUIRE_THAT(run("10 TYPE point : size, time : ENDTYPE\n"
+                     "20 DIM p AS point\n"
+                     "30 p.size = 2 : p.time = 40\n"
+                     "40 PRINT p.size * p.time"),
+                 ContainsSubstring("80"));
+}
+
+TEST_CASE("DIM AS makes an array of records") {
+    REQUIRE_THAT(run("10 TYPE pt : x, y : ENDTYPE\n"
+                     "20 DIM e(5) AS pt\n"
+                     "30 FOR i = 0 TO 5 : e(i).x = i : e(i).y = i*i : NEXT\n"
+                     "40 PRINT e(3).x; \",\"; e(3).y; \",\"; e(5).y"),
+                 ContainsSubstring("3,9,25"));
+}
+
+TEST_CASE("an array of records needs an index") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM e(3) AS pt\n"
+                     "30 PRINT e.x"),
+                 ContainsSubstring("Expected an index"));
+}
+
+TEST_CASE("a record index is range checked") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM e(3) AS pt\n"
+                     "30 PRINT e(4).x"),
+                 ContainsSubstring("out of range"));
+}
+
+TEST_CASE("assigning one record to another copies it") {
+    REQUIRE_THAT(run("10 TYPE pt : x, n$ : ENDTYPE\n"
+                     "20 DIM p AS pt : DIM q AS pt\n"
+                     "30 p.x = 1 : p.n$ = \"a\"\n"
+                     "40 q = p\n"
+                     "50 q.x = 9 : q.n$ = \"b\"\n"                  // a copy, not an alias
+                     "60 PRINT p.x; p.n$; q.x; q.n$"),
+                 ContainsSubstring("1a9b"));
+}
+
+TEST_CASE("a whole-record copy works on array elements") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM e(3) AS pt : DIM p AS pt\n"
+                     "30 p.x = 42\n"
+                     "40 e(2) = p\n"
+                     "50 PRINT e(2).x"),
+                 ContainsSubstring("42"));
+}
+
+TEST_CASE("records of different types can't be copied") {
+    REQUIRE_THAT(run("10 TYPE a : x : ENDTYPE\n"
+                     "20 TYPE b : x : ENDTYPE\n"
+                     "30 DIM p AS a : DIM q AS b\n"
+                     "40 q = p"),
+                 ContainsSubstring("different types"));
+}
+
+TEST_CASE("a record passes to a PROC by reference") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM p AS pt\n"
+                     "30 p.x = 3\n"
+                     "40 PROCbump(p)\n"
+                     "50 PRINT p.x\n"
+                     "60 END\n"
+                     "70 DEF PROCbump(r AS pt)\n"
+                     "80   r.x = r.x + 100\n"
+                     "90 ENDPROC"),
+                 ContainsSubstring("103"));
+}
+
+TEST_CASE("an array element passes to a PROC by reference") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM e(3) AS pt\n"
+                     "30 e(2).x = 5\n"
+                     "40 PROCbump(e(2))\n"
+                     "50 PRINT e(2).x; \",\"; e(1).x\n"
+                     "60 END\n"
+                     "70 DEF PROCbump(r AS pt)\n"
+                     "80   r.x = r.x * 3\n"
+                     "90 ENDPROC"),
+                 ContainsSubstring("15,0"));
+}
+
+TEST_CASE("a record parameter mixes with plain ones") {
+    REQUIRE_THAT(run("10 TYPE pt : x, y : ENDTYPE\n"
+                     "20 DIM p AS pt\n"
+                     "30 PROCmove(p, 3, 4)\n"
+                     "40 PRINT p.x; \",\"; p.y\n"
+                     "50 END\n"
+                     "60 DEF PROCmove(r AS pt, dx, dy)\n"
+                     "70   r.x = r.x + dx : r.y = r.y + dy\n"
+                     "80 ENDPROC"),
+                 ContainsSubstring("3,4"));
+}
+
+TEST_CASE("a record passes to an FN") {
+    REQUIRE_THAT(run("10 TYPE pt : x, y : ENDTYPE\n"
+                     "20 DIM p AS pt\n"
+                     "30 p.x = 3 : p.y = 4\n"
+                     "40 PRINT FNsum(p)\n"
+                     "50 END\n"
+                     "60 DEF FNsum(r AS pt) = r.x + r.y"),
+                 ContainsSubstring("7"));
+}
+
+TEST_CASE("a field value still passes to a plain parameter") {
+    // PROCshow(p.x) is an expression argument, not a record reference.
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM p AS pt\n"
+                     "30 p.x = 8\n"
+                     "40 PROCshow(p.x)\n"
+                     "50 END\n"
+                     "60 DEF PROCshow(v)\n"
+                     "70   PRINT v * 2\n"
+                     "80 ENDPROC"),
+                 ContainsSubstring("16"));
+}
+
+TEST_CASE("a record argument needs an AS parameter, and vice versa") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 DIM p AS pt\n"
+                     "30 PROCplain(p)\n"
+                     "40 END\n"
+                     "50 DEF PROCplain(v)\n"
+                     "60 ENDPROC"),
+                 ContainsSubstring("needs an AS parameter"));
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n"
+                     "20 PROCrec(5)\n"
+                     "30 END\n"
+                     "40 DEF PROCrec(r AS pt)\n"
+                     "50 ENDPROC"),
+                 ContainsSubstring("must be a record"));
+}
+
+TEST_CASE("record string fields survive a garbage collection") {
+    // Churn far more string bytes than the GC heap holds, so record string
+    // fields must be found as roots and relocated.
+    REQUIRE_THAT(run("10 TYPE rec : n$ : ENDTYPE\n"
+                     "20 DIM e(3) AS rec\n"
+                     "30 FOR i = 0 TO 3 : e(i).n$ = \"name\" + STR$(i) : NEXT\n"
+                     "40 FOR i = 1 TO 2000 : j$ = STRING$(100, \"x\") : NEXT\n"
+                     "50 FOR i = 0 TO 3 : PRINT e(i).n$; : NEXT"),
+                 ContainsSubstring("name0name1name2name3"));
+}
+
+TEST_CASE("record errors are reported") {
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n20 DIM p AS pt\n30 PRINT p.zz"),
+                 ContainsSubstring("No such field"));
+    REQUIRE_THAT(run("10 DIM p AS nosuch"),          ContainsSubstring("No such type"));
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n20 TYPE pt : y : ENDTYPE"),
+                 ContainsSubstring("already defined"));
+    REQUIRE_THAT(run("10 ENDTYPE"),                  ContainsSubstring("ENDTYPE without"));
+    REQUIRE_THAT(run("10 TYPE pt : x"),              ContainsSubstring("without a matching ENDTYPE"));
+    REQUIRE_THAT(run("10 TYPE pt : x, x : ENDTYPE"), ContainsSubstring("already defined"));
+    REQUIRE_THAT(run("10 TYPE pt : x : ENDTYPE\n20 DIM p$ AS pt"),
+                 ContainsSubstring("can't have a $ or % suffix"));
+    REQUIRE_THAT(run("10 TYPE pt : n$ : ENDTYPE\n20 DIM p AS pt\n30 p.n$ = 5"),
+                 ContainsSubstring("Type mismatch"));
+}
+
+TEST_CASE("RUN clears types and records") {
+    // The second RUN redefines the same type: it must not collide with the first.
+    std::string prog = "10 TYPE pt : x : ENDTYPE\n20 DIM p AS pt\n30 p.x = 1\n40 PRINT p.x\n";
+    REQUIRE_THAT(run_raw(prog + "RUN\nRUN\n"), ContainsSubstring("1"));
+    REQUIRE_THAT(run_raw(prog + "RUN\nRUN\n"), !ContainsSubstring("already defined"));
+}
+
+TEST_CASE("READ fills record fields") {
+    REQUIRE_THAT(run("10 TYPE player : name$, score% : ENDTYPE\n"
+                     "20 DIM team(2) AS player\n"
+                     "30 FOR i = 0 TO 2 : READ team(i).name$, team(i).score% : NEXT\n"
+                     "40 FOR i = 0 TO 2 : PRINT team(i).name$; team(i).score%; : NEXT\n"
+                     "50 DATA \"ann\", 120, \"bob\", 95, \"cy\", 143"),
+                 ContainsSubstring("ann120bob95cy143"));
+}
+
+TEST_CASE("INPUT fills record fields and array elements") {
+    REQUIRE_THAT(run_raw("10 TYPE pt : x, n$ : ENDTYPE\n20 DIM p AS pt\n"
+                         "30 INPUT p.x, p.n$\n40 PRINT p.x; p.n$\nRUN\n42, bob\n"),
+                 ContainsSubstring("42bob"));
+    // INPUT used to accept only scalars; a shared target resolver gave it arrays.
+    REQUIRE_THAT(run_raw("10 DIM a(3)\n20 INPUT a(1)\n30 PRINT a(1) * 2\nRUN\n7\n"),
+                 ContainsSubstring("14"));
+}
+
+TEST_CASE("INPUT truncates into an integer variable") {
+    REQUIRE_THAT(run_raw("10 INPUT n%\n20 PRINT n%\nRUN\n3.9\n"), ContainsSubstring("3"));
+}
+
+TEST_CASE("LIST indents a TYPE block") {
+    std::string out = run_raw("10 TYPE player\n20 name$, score\n30 ENDTYPE\nLIST\n");
+    REQUIRE_THAT(out, ContainsSubstring("  name$, score"));   // fields indented one level
+    REQUIRE_THAT(out, ContainsSubstring("30 ENDTYPE"));       // closer back at column 0
 }

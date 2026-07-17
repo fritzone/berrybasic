@@ -25,8 +25,11 @@ INCLUDES = -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(DRIVERS_DIR) -I$(BASIC_DIR) -I$(
 # memory where unaligned 16/32-bit accesses fault. This stops the compiler
 # from synthesising unaligned loads/stores (e.g. merging two byte reads of a
 # USB descriptor field into one ldrh), which otherwise crashes enumeration.
+# -MMD -MP: emit a .d file per object listing every header (and #included .inc
+# fragment) it depends on, so edits to a header or to basic.c's interp_*.inc
+# fragments correctly trigger a rebuild. The .d files are pulled in below.
 CFLAGS  = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
-          $(INCLUDES) -mcpu=cortex-a72 -mstrict-align $(CFLAGS_EXTRA)
+          $(INCLUDES) -mcpu=cortex-a72 -mstrict-align -MMD -MP $(CFLAGS_EXTRA)
 
 LDFLAGS = -T $(KERNEL_DIR)/linker.ld
 
@@ -58,6 +61,11 @@ $(KERNEL): $(ELF)
 
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Pull in the auto-generated header/fragment dependencies (from -MMD). This is
+# what makes a header edit (or a change to one of basic.c's interp_*.inc
+# fragments) rebuild every object that includes it.
+-include $(OBJ:.o=.d)
 
 $(BUILD_DIR)/%.o: %.S | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -145,8 +153,8 @@ coverage:
 
 # Native "seeds": position-independent AArch64 blobs that BASIC loads with SEED
 # and calls with CALL/CALL$. Built with the same bare-metal toolchain as the
-# kernel, linked flat (seed/seed.ld), and gated on having ZERO relocations left
-# (any survivor means the seed reached for something it can't relocate).
+# kernel, linked flat (seed/seed.ld), and gated on being genuinely
+# position-independent (see SEED_BAD_RELOC below).
 #   make seeds
 # -I.../include gives seeds the freestanding seed libc (<stdlib.h>, <string.h>,
 # <ctype.h>); -I.../seed finds "seed.h".
@@ -161,6 +169,23 @@ SEED_CFLAGS = -O2 -ffreestanding -nostdlib -fno-builtin -mcpu=cortex-a72 -mstric
 SEED_RT_SRC = $(wildcard $(SEED_DIR)/runtime/*.c)
 SEED_RT_OBJ = $(patsubst $(SEED_DIR)/runtime/%.c,$(BUILD_DIR)/seeds/rt_%.o,$(SEED_RT_SRC))
 
+# The self-containment gate. A seed is copied to whatever address a slot happens
+# to be at, so every address inside it must be computed relative to the program
+# counter. Undefined symbols (reaching for libc) already stop the link; what
+# this catches is the quieter failure: an address *resolved at link time* and
+# baked into the blob as a constant, which ld is perfectly happy to do and which
+# would then point at the link-time address (near 0) rather than the load
+# address. The classic source is a pointer that must really exist in memory:
+#
+#     static const char *names[] = { "a", "b" };   // 2x R_AARCH64_ABS64
+#
+# --emit-relocs keeps the relocation records in the .elf *after* ld resolves
+# them, so we can see which kind each address used. PC-relative types
+# (ADR_PREL_*, CALL26, JUMP26, LD_PREL_*) are exactly what we want; the absolute
+# ones below are the bug. The records are not SHF_ALLOC, so objcopy leaves them
+# out and the .sed blob is byte-for-byte what it was without the flag.
+SEED_BAD_RELOC = R_AARCH64_(ABS(16|32|64)|MOVW_UABS)
+
 seeds: $(SEED_OUT)
 
 $(BUILD_DIR)/seeds/rt_%.o: $(SEED_DIR)/runtime/%.c | $(BUILD_DIR)
@@ -170,11 +195,13 @@ $(BUILD_DIR)/seeds/rt_%.o: $(SEED_DIR)/runtime/%.c | $(BUILD_DIR)
 $(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR)/seed.ld $(SEED_RT_OBJ) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/seeds
 	$(CC) $(SEED_CFLAGS) -c $< -o $(BUILD_DIR)/seeds/$*.o
-	$(LD) --gc-sections -T $(SEED_DIR)/seed.ld \
+	$(LD) --emit-relocs --gc-sections -T $(SEED_DIR)/seed.ld \
 	    $(BUILD_DIR)/seeds/$*.o $(SEED_RT_OBJ) -o $(BUILD_DIR)/seeds/$*.elf
-	@if $(CROSS)readelf -r $(BUILD_DIR)/seeds/$*.elf | grep -q '^Relocation section'; then \
-	    echo "SEED ERROR: $< is not self-contained (unresolved relocations):"; \
-	    $(CROSS)readelf -r $(BUILD_DIR)/seeds/$*.elf; rm -f $@; exit 1; fi
+	@if $(CROSS)readelf -rW $(BUILD_DIR)/seeds/$*.elf | grep -qE '$(SEED_BAD_RELOC)'; then \
+	    echo "SEED ERROR: $< is not position-independent - it has absolute addresses"; \
+	    echo "  baked in, which would point at the link-time address once loaded:"; \
+	    $(CROSS)readelf -rW $(BUILD_DIR)/seeds/$*.elf | grep -E '$(SEED_BAD_RELOC)'; \
+	    rm -f $@; exit 1; fi
 	$(OBJCOPY) -O binary $(BUILD_DIR)/seeds/$*.elf $@
 	@echo "  built seed $@"
 

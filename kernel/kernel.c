@@ -59,6 +59,7 @@ static int g_gl_w  = 1280, g_gl_h = 1024;
 static int g_term_cols    = FB_WIDTH  / CHAR_W;
 static int g_term_rows    = FB_HEIGHT / CHAR_H;
 static int cursor_visible = 0;   // whether the cursor glyph is currently drawn
+static int cursor_insert  = 1;   // line editor: 1 = insert (bar caret), 0 = overwrite (block)
 static uint32_t text_color = COLOR_WHITE;   // current foreground (BBC COLOUR)
 static uint32_t text_bg    = COLOR_BLACK;   // current text background (VDU 17,128+c)
 
@@ -103,16 +104,41 @@ static uint32_t rgb_pixel(int r, int g, int b) {
 // Terminal
 // ---------------------------------------------------------------------------
 
-// BBC-style flashing block cursor at the current cell. show=1 draws it, show=0
-// erases it. The cursor always sits on the (empty) next-write cell, so erasing
-// to black never clobbers a real glyph.
+// Flashing text caret at the current cell. Its shape follows the line editor's
+// mode (see cursor_insert): overwrite mode shows a 50% checkerboard block, while
+// insert mode shows a thin vertical bar down the left edge of the cell. Either
+// way the caret never hides the character — the checkerboard leaves half the
+// cell's pixels untouched so the glyph shows through the "holes", and the bar
+// only touches the leftmost columns. The cell is saved before the pattern is
+// laid down, so lifting the caret restores exactly what was there — glyph or
+// background — with no redraw.
+//   show=1 overlays the pattern, show=0 restores. The visible==show guard is
+// essential: the save buffer holds one cell only, so we must never overlay
+// twice, and term_advance() clears cursor_visible by hand after a scroll has
+// already carried the drawn caret away (its save buffer is then simply stale
+// and correctly ignored, because the next show re-saves first).
+#define CARET_BAR_W 2                           // insert-mode bar width, in pixels
+static uint32_t caret_under[CHAR_W * CHAR_H];   // pixels hidden by the caret
+
 static void cursor_set(int show) {
     if (!fb_ready) return;
     if (show && !cursor_enabled) return;   // VDU 23,1,0 disables the caret
+    show = show ? 1 : 0;
+    if (show == cursor_visible) return;    // already in that state
     int px = cursor_col * CHAR_W;
     int py = cursor_row * CHAR_H;
-    bar(px, py, px + CHAR_W - 1, py + CHAR_H - 1,
-        show ? COLOR_WHITE : COLOR_BLACK);
+    for (int y = 0; y < CHAR_H; y++)
+        for (int x = 0; x < CHAR_W; x++) {
+            int i = y * CHAR_W + x;
+            if (show) {
+                caret_under[i] = getpixel(px + x, py + y);
+                int lit = cursor_insert ? (x < CARET_BAR_W)   // insert: left-edge bar
+                                        : (((x ^ y) & 1) == 0); // overwrite: checkerboard
+                if (lit) putpixel(px + x, py + y, COLOR_WHITE);
+            } else {
+                putpixel(px + x, py + y, caret_under[i]);
+            }
+        }
     cursor_visible = show;
 }
 
@@ -227,13 +253,24 @@ static void boot_msg(const char *s) {
     if (fb_ready) term_puts(s);
 }
 
-// Return the next input character from any keyboard (DWC2 USB-C or xHCI USB-A),
-// falling back to the UART, or 0 if nothing is pending.
-static char term_pollchar(void) {
-    char c = 0;
-    if (g_kbd_ok)  c = usb_kbd_getchar();
+static int read_esc_seq(void);   // serial escape-sequence decode (defined below)
+
+// Return the next key from any keyboard (DWC2 USB-C or xHCI USB-A), falling back
+// to the UART, or 0 if nothing is pending. A key is an int: printable keys are
+// their Latin-1 character, the rest are the KEY_* codes in usb_hid.h.
+//
+// The USB decode already yields KEY_* codes. A serial terminal instead sends the
+// arrows and friends as escape sequences (ESC [ A ...), so those are decoded
+// here rather than in one caller - that way a serial arrow key and a USB arrow
+// key are the same key to everything above, GET and the line editor alike.
+static int term_pollchar(void) {
+    int c = 0;
+    if (g_kbd_ok)        c = usb_kbd_getchar();
     if (!c && g_xhci_ok) c = xhci_kbd_getchar();
-    if (!c)        c = uart_getc();
+    if (c) return c;                              // already a decoded key
+
+    c = (unsigned char)uart_getc();
+    if (c == 0x1B) c = read_esc_seq();            // serial: ESC [ A -> KEY_UP, ...
     return c;
 }
 
@@ -268,7 +305,7 @@ static const char *hist_get(int age) {           // age 1 = most recent
 static char poll_byte_ms(int ms) {
     uint32_t t0 = TIMER_CLO;
     for (;;) {
-        char c = term_pollchar();
+        int c = term_pollchar();
         if (c) return c;
         if (TIMER_CLO - t0 >= (uint32_t)ms * 1000) return 0;
     }
@@ -276,8 +313,8 @@ static char poll_byte_ms(int ms) {
 
 // Map a terminal CSI escape sequence (after ESC) to an editing key, for serial
 // use. The HID keyboard delivers KEY_* codes directly.
-static char read_esc_seq(void) {
-    if (poll_byte_ms(20) != '[') return 0;
+static int read_esc_seq(void) {
+    if (poll_byte_ms(20) != '[') return KEY_ESC;      // nothing followed: a bare Esc
     char b = poll_byte_ms(20);
     switch (b) {
         case 'A': return KEY_UP;
@@ -286,7 +323,10 @@ static char read_esc_seq(void) {
         case 'D': return KEY_LEFT;
         case 'H': return KEY_HOME;
         case 'F': return KEY_END;
+        case '2': poll_byte_ms(20); return KEY_INS;   // ESC [ 2 ~
         case '3': poll_byte_ms(20); return KEY_DEL;   // ESC [ 3 ~
+        case '5': poll_byte_ms(20); return KEY_PGUP;  // ESC [ 5 ~
+        case '6': poll_byte_ms(20); return KEY_PGDN;  // ESC [ 6 ~
         default:  return 0;
     }
 }
@@ -316,8 +356,10 @@ static void edit_render(int sc, int sr, const char *prompt,
 }
 
 // Full line editor: prints `prompt`, starts with `prefill_len` editable chars in
-// buf, supports cursor movement (Left/Right/Home/End), insert/backspace/delete,
-// and Up/Down command history. Returns the final length.
+// buf, supports cursor movement (Left/Right/Home/End), backspace/delete, Up/Down
+// command history, and an Insert key that toggles insert vs. overwrite editing
+// (the caret shows a bar in insert mode, a block in overwrite). Returns the
+// final length.
 int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
     int len = prefill_len;
     if (len > maxlen - 1) len = maxlen - 1;
@@ -335,8 +377,7 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
     uint32_t last_blink = TIMER_CLO;
 
     for (;;) {
-        char c = term_pollchar();
-        if (c == 0x1B) c = read_esc_seq();       // serial arrow keys (ESC [ ...)
+        int c = term_pollchar();
         if (!c) {
             uint32_t now = TIMER_CLO;
             if (now - last_blink >= CURSOR_BLINK_US) {
@@ -384,11 +425,22 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
                 kstrcpy(buf, hist_age == 0 ? saved : hist_get(hist_age), maxlen);
                 len = kstrlen(buf); pos = len;
             }
-        } else if (((unsigned char)c >= 32 && (unsigned char)c <= 126) ||
-                   (unsigned char)c >= 0xA0) {    // printable ASCII or Latin-1 (æ ø å …)
-            if (len < maxlen - 1) {
+        } else if (c == KEY_INS) {               // toggle insert / overwrite
+            cursor_insert = !cursor_insert;
+            if (fb_ready) {                       // redraw the caret in its new shape now
+                if (cursor_visible) cursor_set(0);
+                edit_cursor_at(sc, sr, pos);
+                cursor_set(1);
+            }
+            last_blink = TIMER_CLO;
+            continue;                             // buffer unchanged; skip the redraw
+        } else if ((c >= 32 && c <= 126) ||
+                   (c >= 0xA0 && c <= 0xFF)) {    // printable ASCII or Latin-1 (æ ø å …)
+            if (!cursor_insert && pos < len) {
+                buf[pos++] = (char)c;             // overwrite the character under the caret
+            } else if (len < maxlen - 1) {        // insert (or append at end of line)
                 for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
-                buf[pos++] = c; len++; buf[len] = 0;
+                buf[pos++] = (char)c; len++; buf[len] = 0;
             }
         } else {
             continue;                              // ignore other control codes
@@ -453,8 +505,8 @@ const char *con_get_keyboard(void)             { return hid_layout_code(); }
 int con_getkey(void) {
     uint32_t last_blink = TIMER_CLO;
     for (;;) {
-        char c = term_pollchar();
-        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return (unsigned char)c; }
+        int c = term_pollchar();
+        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
@@ -480,8 +532,8 @@ int con_inkey(int centiseconds) {
     uint32_t limit = (centiseconds > 0) ? (uint32_t)centiseconds * 10000u : 0;
     uint32_t last_blink = TIMER_CLO;
     for (;;) {
-        char c = term_pollchar();
-        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return (unsigned char)c; }
+        int c = term_pollchar();
+        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
         if (TIMER_CLO - t0 >= limit) { pointer_hide(); return -1; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
@@ -514,6 +566,15 @@ static void mouse_service(void) {
     if (g_mouse_y < 0) g_mouse_y = 0;
     if (g_mouse_x > (int)g_fb_w - 1) g_mouse_x = (int)g_fb_w - 1;
     if (g_mouse_y > (int)g_fb_h - 1) g_mouse_y = (int)g_fb_h - 1;
+}
+
+// The modifier/lock snapshot from the shared HID decoder. Both USB backends feed
+// the same decoder, so this is right whichever one enumerated; with no USB
+// keyboard at all there are no modifiers to report (a serial terminal sends
+// characters, not key state).
+int con_keymods(void) {
+    if (!g_kbd_ok && !g_xhci_ok) return 0;
+    return hid_modifiers();
 }
 
 void con_mouse(int *x, int *y, int *buttons) {

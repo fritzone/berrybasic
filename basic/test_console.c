@@ -132,3 +132,6 @@ void con_sprite_put_ex(long a, int x, int y, double sc, double an) { (void)a; (v
 void con_sprite_tint(int on, int r, int g, int b, int a) { (void)on; (void)r; (void)g; (void)b; (void)a; }
 void con_gtext(int x, int y, const char *s, int len) { (void)x; (void)y; (void)s; (void)len; }
 void con_mouse(int *x, int *y, int *b) { if (x) *x = 0; if (y) *y = 0; if (b) *b = 0; }
+
+// No USB keyboard in the harness: input is fed as characters, never key state.
+int con_keymods(void) { return 0; }
