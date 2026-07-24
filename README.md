@@ -2,9 +2,9 @@
 
 **A bare-metal BASIC for the Raspberry Pi 4.** No operating system, no shell, no runtime: the Pi boots straight into a `>` prompt in about a second, and the whole machine is yours.
 
-***BerryBasiC *** is a modern, BBC-flavoured BASIC that runs as the *only* program on the hardware. It brings back the directness the 8-bit home computers had (type a statement, watch it happen, poke a pin, light a pixel) on hardware that can actually keep up. It is not nostalgia for old syntax. It is nostalgia for **transparency**: a machine small enough that one person can understand it from the first instruction to the last pixel.
+***BerryBasiC*** is a modern, BBC-flavoured BASIC that runs as the *only* program on the hardware. It brings back the directness the 8-bit home computers had (type a statement, watch it happen, poke a pin, light a pixel) on hardware that can actually keep up. It is not nostalgia for old syntax. It is nostalgia for **transparency**: a machine small enough that one person can understand it from the first instruction to the last pixel.
 
-BerryBasiC is a modern, BBC-flavoured BASIC that runs as the *only* program on the hardware. It brings back the directness the 8-bit home computers had — type a statement, watch it happen, poke a pin, light a pixel — on hardware that can actually keep up. It is not nostalgia for old syntax. It is nostalgia for **transparency**: a machine small enough that one person can understand it from the first instruction to the last pixel.
+***BerryBasiC*** is a modern, BBC-flavoured BASIC that runs as the *only* program on the hardware. It brings back the directness the 8-bit home computers had — type a statement, watch it happen, poke a pin, light a pixel — on hardware that can actually keep up. It is not nostalgia for old syntax. It is nostalgia for **transparency**: a machine small enough that one person can understand it from the first instruction to the last pixel.
 
 ## Features
 
