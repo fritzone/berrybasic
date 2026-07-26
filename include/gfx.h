@@ -30,6 +30,8 @@ void     sgfx_fillcircle(int cx, int cy, int r, uint32_t rgb);
 void     sgfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb);  // outline
 void     sgfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb);
 void     sgfx_fillpoly(const int *xy, int npts, uint32_t rgb);    // xy = x0,y0,x1,y1,...
+void     sgfx_line_style(int width, int join, int cap);           // seed pen (device px)
+void     sgfx_polyline(const int *pts, int n, int closed, uint32_t rgb);  // stroked run
 void     sgfx_flood(int x, int y, uint32_t rgb);                  // fill region under (x,y)
 void     sgfx_clip(int x1, int y1, int x2, int y2);               // restrict to a rectangle
 void     sgfx_noclip(void);                                       // remove the clip

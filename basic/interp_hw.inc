@@ -239,7 +239,8 @@ static void stmt_tone(void) {
 
 // SCREEN width, height : switch the display resolution for this program.
 // SCREEN (no arguments) restores the startup resolution. The system also restores
-// it automatically when the program finishes (see run_program). The BBC logical
-// coordinate system (0..1279 x 0..1023) is unchanged, so graphics keep working;
-// only pixel density and the text grid change. Read the current size with the
-// SCREENW / SCREENH functions.
+// it automatically when the program finishes (see run_program). In MODE 1 the BBC
+// logical coordinate system (0..1279 x 0..1023) is unchanged, so graphics keep
+// working and only pixel density and the text grid change; in MODE 2 the drawable
+// range IS the resolution, so it moves with the change (the backend updates the
+// extent). Read the current size with the SCREENW / SCREENH functions.

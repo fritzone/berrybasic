@@ -1946,6 +1946,8 @@ More about configuration will follow at a later stage in the book.
 
 A USB mouse (plugged into a USB-A port on real hardware, or supplied with `-device usb-mouse` under QEMU) drives an on-screen pointer. Position is reported in **raw framebuffer pixels** with the origin at the **top-left** corner: X runs 0 to screen-width-1, Y runs 0 to screen-height-1. The pointer starts at the centre of the screen and is clamped to the screen edges.
 
+> **These are `MODE 2` coordinates.** In `MODE 2` (native pixels, top-left origin) `MOUSEX`/`MOUSEY` map **1:1** onto drawing coordinates - `CIRCLE FILL MOUSEX, MOUSEY, 8` paints exactly under the pointer, with no arithmetic. In `MODE 1` (logical, bottom-left origin) they do not line up: to draw at the pointer you must flip and scale, e.g. `X = MOUSEX * 1280 / SCREENW : Y = 1023 - MOUSEY * 1024 / SCREENH`. If your program is mouse-driven, `MODE 2` is much the simpler choice.
+
 The **button value** is a bitmask:
 
 | Bit | Value | Button |
@@ -2177,7 +2179,7 @@ VDU 23, 7, m, d, 0; 0; 0;   : scroll the text viewport one cell
                               (d: 0 = right, 1 = left, 2 = down, 3 = up)
 ```
 
-The remaining `VDU 23` sub-functions (cursor appearance, cursor-movement flags, MODE 7 extensions, user-defined screen modes and line thickness) are accepted but have no effect on this fixed-resolution display.
+The remaining `VDU 23` sub-functions (cursor appearance, cursor-movement flags, MODE 7 extensions, user-defined screen modes and the BBC line-thickness code) are accepted but have no effect on this fixed-resolution display. (For thick lines, use `LINEWIDTH` - see *Line width, joins and caps*.)
 
 # The More Advanced BerryBasiC Constructs
 
@@ -2226,9 +2228,7 @@ and
 
 `TYPE` is a **declaration that runs**, exactly like `DIM`: the statement has to execute before the type can be used, so put your types near the top of the program. `RUN` and `NEW` clear every type and record, so a program always starts from a clean slate.
 
-A type or field name may be a word that is otherwise a keyword - `TYPE point : size, time : ENDTYPE` is perfectly legal, even though `POINT`, `SIZE` and `TIME` all mean something elsewhere. Names appear only where nothing else could be intended, so there is no ambiguity to trip over.
-
-Please note: due to a slight misalignment in the parsing code, please do not use remarks in the `TYPE` declaration lines.
+A type or field name may be a word that is otherwise a keyword - `TYPE point : size, time : ENDTYPE` is perfectly legal, even though `POINT`, `SIZE` and `TIME` all mean something elsewhere. Names appear only where nothing else could be intended, so there is no ambiguity to trip over. A `REM` comment is fine on a `TYPE` line too - it ends the line as it does anywhere else.
 
 ### DIM ... AS - making one
 
@@ -2610,7 +2610,9 @@ A worked button example:
 
 # BGI: The BerryBasiC Graphics Interface
 
-***BerryBasiC*** draws on a graphics screen which is using BBC-style **logical coordinates**: x runs 0 to 1279, y runs 0 to 1023, with the origin at the **bottom-left** (y increases upwards - the opposite of the mouse's pixel coordinates). The low-level primitives below are the classic BBC set; with an extended graphics library set that follows, and adds high-level shapes, truecolour with sprites and animation on top of them.
+***BerryBasiC*** has **two graphics coordinate modes**, chosen with `MODE`. `MODE 1` (the default) uses BBC-style **logical coordinates**: x runs 0 to 1279, y runs 0 to 1023, with the origin at the **bottom-left** (y increases upwards - the opposite of the mouse's pixel coordinates), and the whole logical space is scaled onto the panel so a program looks the same at any resolution. `MODE 2` is **native**: coordinates are physical framebuffer pixels at the current resolution, with the origin at the **top-left** and y increasing downwards - the convention every modern graphics API, the mouse, and the seed graphics all use. The two modes are compared in *MODE* below; everything else in this chapter (colours, shapes, sprites, text, buffering) works identically in both. Unless a section says otherwise, its examples are written for the default `MODE 1`.
+
+The low-level primitives below are the classic BBC set; with an extended graphics library set that follows, and adds high-level shapes, truecolour with sprites and animation on top of them.
 
 ## Screen resolution
 
@@ -2657,10 +2659,60 @@ Report the current physical resolution in pixels.
 
 ## MODE
 
-Resets the screen, palette, viewports and graphics origin to their defaults. Unlike BBC BASIC, the mode number does **not** change the resolution - use `SCREEN` for that - so `MODE` mainly clears and resets the screen.
+`MODE n` selects the graphics **coordinate mode** and, like the BBC's `MODE`, resets the graphics state - it restores the default palette, clears the text and graphics viewports, resets the graphics origin, and clears the screen. Unlike BBC BASIC the number does **not** change the resolution (use `SCREEN` for that); what it chooses is how coordinates are read.
 
 ```basic
-MODE 1
+MODE 1        : REM BBC logical coordinates (the default)
+MODE 2        : REM native pixel coordinates
+```
+
+Only `1` and `2` are valid; any other number raises `No such graphics mode` and leaves the mode unchanged.
+
+|  | `MODE 1` (legacy BBC, default) | `MODE 2` (native) |
+|---|---|---|
+| Coordinate space | fixed 1280 × 1024 logical | current resolution (`SCREENW` × `SCREENH`) |
+| Origin | bottom-left | **top-left** |
+| y direction | up | **down** |
+| Scaling | logical → physical, resolution-independent | **1:1, none** |
+| Lengths (radius, etc.) | scaled to the panel | 1:1 pixels |
+| Same program on a bigger screen | same layout, sharper | **covers more area** (pixels are absolute) |
+| Matches `MOUSEX`/`MOUSEY` | no (needs a flip + scale) | **yes, exactly** |
+| Matches seed graphics coords | no (needs conversion) | **yes, exactly** |
+
+`MODE 1` is the default and the mode every other example in this manual assumes. **Boot, `RUN`, `NEW` and the end of a program all return to `MODE 1`**, so the prompt is always in `MODE 1` and an existing program never inherits `MODE 2` from a previous run.
+
+### MODE 2 - native coordinates
+
+In `MODE 2` one BASIC unit is one physical pixel, the origin is the top-left corner, and y grows downward. Use it when you want **pixel-exact** work:
+
+- a UI or HUD laid out to the pixel;
+- a sprite-heavy game where positions are absolute pixels;
+- anything that mixes drawing with the **mouse** (`MOUSEX`/`MOUSEY` are already in these coordinates - no flip, no scale) or with a **native seed** (seed graphics draw in exactly this space, so a seed and the BASIC program that calls it finally agree on where a pixel is).
+
+```basic
+10 MODE 2
+20 GCOL 255, 0, 0 : PLOT 69, 0, 0                 : REM the TOP-LEFT pixel
+30 CIRCLE FILL SCREENW/2, SCREENH/2, 100          : REM centred, radius exactly 100 px
+```
+
+Because coordinates are physical pixels, in `MODE 2` a `SCREEN` change moves the **drawable range**: after `SCREEN 800, 600`, valid x is 0..799 and y is 0..599. (In `MODE 1` a `SCREEN` change leaves coordinates alone - that is the point of logical units.)
+
+> **The trade-off.** A `MODE 2` program is **not** resolution-independent: the same code covers a different amount of screen on a different panel, because a pixel is a pixel. That is the deliberate price of pixel-exactness. If you want a layout that looks the same everywhere, use `MODE 1`; if you want to address the panel exactly as it is, use `MODE 2`.
+
+The same square in each mode - both fill the upper-left quadrant, from opposite conventions:
+
+```basic
+10 MODE 1 : RECTANGLE FILL 0, 512, 640, 512               : REM upper-left (y up)
+20 A = GET
+30 MODE 2 : RECTANGLE FILL 0, 0, SCREENW/2, SCREENH/2     : REM upper-left (y down)
+```
+
+### GMODE
+
+`GMODE` reads back the active graphics mode (`1` or `2`) - so a library that must work in either can branch on it:
+
+```basic
+IF GMODE = 2 THEN y = MY ELSE y = 1023 - MY      : REM adapt to the coordinate convention
 ```
 
 ## GCOL - graphics colour and plot action
@@ -2854,6 +2906,57 @@ FILL 275, 210            : REM fill the inside of the outline
 ```
 
 Note the two uses of the word `FILL`: as a *modifier* right after a shape keyword (`RECTANGLE FILL ...`) it makes that shape solid; as a *statement* on its own (`FILL x, y`) it flood-fills from a point.
+
+### Line width, joins and caps
+
+By default every line and outline is a **hairline** - one pixel wide. `LINEWIDTH` sets a thicker pen, and `LINEJOIN` / `LINECAP` control how the corners and ends of those thick strokes are finished. The pen affects `LINE`, `DRAW`, `PLOT` lines, and the *outline* form of `RECTANGLE`, `CIRCLE` and `ELLIPSE` (a `FILL`ed shape is unaffected).
+
+#### LINEWIDTH
+
+`LINEWIDTH n` sets the pen width in **coordinate units** - so it scales with the screen the same way a radius does (`LINEWIDTH 10` in `MODE 1` is ten logical units; in `MODE 2` it is ten pixels). `LINEWIDTH 1` (or 0) restores the fast one-pixel hairline.
+
+```basic
+10 LINEWIDTH 6
+20 LINE 100, 100, 900, 700        : REM a 6-unit-thick line
+30 CIRCLE 500, 400, 200           : REM ... and a 6-unit-thick ring
+```
+
+#### LINEJOIN - corners of an outline
+
+`LINEJOIN` chooses how the corners of a stroked outline (a `RECTANGLE`, or a seed polygon) are joined:
+
+| `LINEJOIN` | Corner |
+|-----------|--------|
+| `MITER` (the default) | extended to a **sharp** point (`MITRE` is accepted too) |
+| `BEVEL` | cut off **flat** across the corner |
+| `ROUND` | **rounded** off with an arc |
+
+```basic
+10 LINEWIDTH 16
+20 LINEJOIN BEVEL : RECTANGLE 100, 100, 300, 200    : REM clipped corners
+30 LINEJOIN ROUND : RECTANGLE 500, 100, 300, 200    : REM rounded corners
+```
+
+A very sharp miter (a narrow spike) automatically falls back to a bevel, so it never shoots off to infinity.
+
+#### LINECAP - ends of a line
+
+`LINECAP` chooses how the open ends of a thick line are finished:
+
+| `LINECAP` | End |
+|----------|-----|
+| `BUTT` (the default) | cut off **square** exactly at the end point |
+| `ROUND` | a **half-disc** past the end point |
+| `SQUARE` | a **square** extending half the width past the end point |
+
+```basic
+10 LINEWIDTH 20 : LINECAP ROUND
+20 LINE 200, 400, 900, 400        : REM a thick line with rounded ends
+```
+
+The pen resets to its default (width 1, miter joins, butt caps) on `MODE`, `RUN` and `NEW`, so a program always starts with a hairline.
+
+> Thick strokes are drawn as filled shapes, so they compose correctly in **store** mode (the default) and under a truecolour `GCOL`. A thick stroke drawn in an `EOR`/`AND` plot action can double-hit where its pieces overlap at a join, so those actions are best kept for hairlines.
 
 ### Sprites - GGET and GPUT
 
@@ -3740,6 +3843,8 @@ A seed never links against the interpreter; instead it is handed a small set of 
 | files (`file_open`, `file_read`, ...)        | read and write SD-card files - the base of the seed `<stdio.h>` (see below)                      |
 | graphics (`gfx_line`, `gfx_fillcircle`, ...) | draw straight onto the framebuffer - the base of the seed `<graphics.h>` BGI library (see below) |
 | `gfx_backbuffer`, `gfx_flip`, `gfx_buffered` | double buffering - the same back buffer as BASIC's `BUFFER`/`FLIP` (see below)                   |
+| `gfx_mode`                                   | BASIC's graphics mode (1 or 2), to convert coordinates BASIC passed in (see *Graphics from a Seed*) |
+| `gfx_line_style`, `gfx_polyline`             | the seed line pen (width/join/cap) and a stroked polyline - the base of `setlinewidth` etc. (see below) |
 | text (`font_load`, `gfx_text`, ...)          | load and draw TrueType fonts                                                                     |
 
 Variable and array names are passed exactly as BASIC stores them: upper case, including the `$` or `%` suffix - e.g. `"X"`, `"N%"`, `"A$"`.
@@ -3971,9 +4076,17 @@ The full example ships as `seed/examples/pinblink.c` (built to `PINBLINK.SED`).
 
 A seed can draw straight onto the screen through `<graphics.h>`, the **B**erryBasiC**G**raphics**I**nterface library. The familiar names are all here - `line`, `rectangle`, `bar`, `circle`, `arc`, `pieslice`, `drawpoly`/`fillpoly`, `floodfill`, `setcolor`, `setfillstyle`, `outtextxy` - and they run at native speed, so a seed can animate or render far faster than the interpreter.
 
-Unlike the BASIC graphics linbrary of `MODE 1`, which work in BBC logical coordinates (0..1279 × 0..1023, origin bottom-left), the seed graphics address the framebuffer directly in device pixels: origin TOP-LEFT, x right, y down, matching how most modern graphics count.
+Seed graphics address the framebuffer directly in device pixels: origin TOP-LEFT, x right, y down, matching how most modern graphics count. **This is exactly BASIC's `MODE 2`** - so in `MODE 2` a seed's coordinates and the BASIC program's coincide, and you can pass one to the other with no conversion at all. In `MODE 1` (BBC logical, bottom-left origin) they do not: the seed has to convert.
 
-**What this means in practice.** If a BASIC program passes coordinates to a seed and the seed draws it with, the result lands in the wrong place: mirrored vertically and scaled by `screen_width/1280`. The seed has to convert. On a 1280×720 screen, BASIC's `640, 512` (screen centre) becomes device pixel `(640, 360)`; the seed would need `px = bx * W / 1280` and `py = (H-1) - by * H / 1024` to get there.
+**The rule.** Drawing through `gfx_*` / the BGI calls is **always** device pixels, whatever mode BASIC is in - the mode never changes how the seed *draws*. What the mode changes is how to read coordinates a BASIC program **passed to your seed as arguments**: they are in BASIC's *current* mode. A seed reads that mode with `gfx_mode()`, or - simpler - converts with `gfx_from_basic()`:
+
+```c
+int px, py;
+gfx_from_basic((int)argv[0].num, (int)argv[1].num, &px, &py);   // BASIC's coords -> device pixels
+line(px - 10, py, px + 10, py);                                 // then draw in device pixels
+```
+
+`gfx_from_basic` is an identity in `MODE 2` and applies the flip+scale in `MODE 1`; `gfx_to_basic` is the inverse, for handing coordinates back. `gfx_mode()` returns `1` or `2`. The BBC logical extent those helpers convert against is exposed as `GFX_BBC_W` / `GFX_BBC_H` (1280 × 1024) - the only place a seed should reference those numbers. The bundled `seed/examples/nativexy.c` (the `NATIVEXY` keyword) demonstrates the round-trip: a crosshair drawn from BASIC coordinates lands exactly where BASIC's own `PLOT 69, x, y` would, in either mode.
 
 While the term BGI might be familiar to some of our more seasoned readers, this implementation differs from the DOS original only in the modern direction: colours are **24-bit truecolour** (the classic sixteen colour *names* - `RED`, `LIGHTBLUE`, `YELLOW`, ... - still work as a palette via `setcolor`, and `setrgbcolor(r,g,b)` unlocks the rest), and text is drawn with scalable **TrueType** fonts instead of the old bitmap `.CHR` fonts. Coordinates are device pixels with the origin at the **top-left** (the BGI convention - note this is upside-down from BASIC's own bottom-left graphics).
 
@@ -4071,6 +4184,26 @@ Outlines use the drawing colour (`setcolor`); filled shapes use the fill colour 
 | `void drawpoly(int numpoints,const int *polypoints)`                         | a polyline through `numpoints` `x,y` pairs (repeat the first point last to close)           |
 | `void fillpoly(int numpoints,const int *polypoints)`                         | a filled polygon (any convex or concave shape)                                              |
 | `void floodfill(int x,int y,int border)`                                     | flood the area around `(x,y)` with the fill colour (`border` is accepted for compatibility) |
+
+#### Line style - width, joins and caps
+
+A seed has its own pen, in **device pixels** (independent of BASIC's `LINEWIDTH`). `line` honours the width and cap; `rectangle` and `drawpoly` honour the width and join; `circle`/`ellipse` outlines honour the width.
+
+| Function                                                | What it does                                                                        |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `void setlinewidth(int width)`                          | pen width in pixels (1 = hairline)                                                   |
+| `void setlinejoin(int join)`                            | corner style: `JOIN_MITER` (default), `JOIN_BEVEL`, `JOIN_ROUND`                     |
+| `void setlinecap(int cap)`                              | line-end style: `CAP_BUTT` (default), `CAP_ROUND`, `CAP_SQUARE`                      |
+| `void setlinestyle(int linestyle,unsigned pat,int thickness)` | classic BGI form - sets the **width** (`NORM_WIDTH` 1 / `THICK_WIDTH` 3 or any value); `linestyle`/`pat` are accepted but drawing is always solid |
+
+```c
+setlinewidth(10);
+setlinejoin(JOIN_ROUND);
+int box[8] = { 100,100, 300,100, 300,300, 100,300 };
+drawpoly(4, box);            // (repeat the first point to close, or use rectangle())
+```
+
+The pen resets to its default (width 1, miter, butt) on `initgraph()`. Thick strokes compose in store mode; see the BASIC *Line width, joins and caps* note about `EOR`.
 
 #### Viewport
 
@@ -4702,7 +4835,7 @@ Two further notes. Hub ports are capped at **8** (and default to 4 if the hub de
 - **PIO, one block at a time, no DMA.** Every 512-byte block is shovelled through the data FIFO by the CPU. There is no multi-block transfer and no high-speed/UHS clock tuning - the card runs at a conservative clock. This is why loading a large PNG or TrueType font takes a visible moment: it is the honest cost of a driver you can read in one sitting.
 - **FAT16 and FAT32 only.** No FAT12, and **no exFAT** - which matters in practice, because cards larger than 32 GB ship formatted as exFAT. Reformat them as FAT32. No ext4, no NTFS.
 - **The second partition only.** `stg_init()` mounts partition 2 (falling back to partition 1 on old single-partition cards). Any other partition is invisible to `CAT`, `LOAD` and `SAVE`.
-- **No RTC, so every timestamp is a fiction.** The Pi 4 has no battery-backed clock and BerryBasiC does not set the time from anywhere, so `fat.c` stamps every file it writes **2026-01-01**. The dates in a rich `CAT` listing are decoration, not history. Likewise `TIME` counts microseconds since *boot*, not since 1970.
+- **No RTC, so every timestamp is a fiction.** The Pi 4 has no battery-backed clock and BerryBasiC does not set the time from anywhere, so `fat.c` stamps every file it writes **2026-01-01**. The dates in a rich `CAT` listing are decoration, not history. Likewise `TIME` counts centiseconds since *boot*, not wall-clock time since 1970.
 - **No journalling, no caching, no wear levelling.** Writes go straight at the card. A power cut in the middle of a `SAVE` can leave a truncated file or a cross-linked FAT; if a card starts behaving oddly, run `fsck` on it from a PC.
 - No permissions, no file locking, no symlinks.
 
@@ -4888,6 +5021,9 @@ When something goes wrong, BerryBasiC stops the current operation and prints a m
 
 | Message                              | Usually means                                               |
 | ------------------------------------ | ----------------------------------------------------------- |
+| `No such graphics mode`              | `MODE n` with `n` other than 1 or 2                         |
+| `Expected MITER, BEVEL or ROUND`     | a `LINEJOIN` with an unknown join style                     |
+| `Expected BUTT, ROUND or SQUARE`     | a `LINECAP` with an unknown cap style                       |
 | `Could not allocate the back buffer` | `BUFFER ON` when there isn't room for a full-screen buffer  |
 | `Expected ON or OFF`                 | a `BUFFER` statement without `ON` or `OFF`                  |
 | `Bad sprite size`                    | `NEWSPRITE` with a zero or negative width/height            |
@@ -4968,6 +5104,9 @@ The interpreter's capacity limits. For **hardware** limits - what the drivers do
 | Back buffer (`BUFFER ON`)                  | one, full-screen                             |
 | Active sprite target (`SPRITETARGET`)      | one at a time                                |
 | Loaded TrueType fonts (`LOADFONT`)         | 8 at once                                    |
+| Graphics coordinate modes (`MODE`)         | 2 (1 = BBC logical 1280×1024, 2 = native pixels) |
+
+Graphics coordinates come in two spaces, chosen with `MODE`: `MODE 1` is a fixed 1280 × 1024 logical grid (origin bottom-left, scaled to the panel), `MODE 2` is the physical resolution in pixels (origin top-left). See *MODE*.
 
 ---
 
@@ -5013,7 +5152,7 @@ Grouped by purpose. Functions are marked *(fn)* and used inside expressions; eve
 
 **Time:** `TIME` (read or set)
 
-**Screen & VDU:** `VDU` · `MODE` · `SCREEN` · `SCREENW` *(fn)* · `SCREENH` *(fn)*
+**Screen & VDU:** `VDU` · `MODE` (1 = BBC logical, 2 = native pixels) · `GMODE` *(fn)* · `SCREEN` · `SCREENW` *(fn)* · `SCREENH` *(fn)*
 
 **Sound:** `SOUND` · `SOUND OFF` · `TONE`
 
@@ -5021,7 +5160,7 @@ Grouped by purpose. Functions are marked *(fn)* and used inside expressions; eve
 
 **Hardware (I2C):** `I2CWRITE` · `I2CREAD` · `I2CPROBE` *(fn)*
 
-**Graphics:** `GCOL` · `PLOT` · `MOVE` · `DRAW` · `CLG` · `POINT` *(fn)* · `LINE` · `RECTANGLE` · `CIRCLE` · `ELLIPSE` · `FILL` · `RGB` *(fn)*
+**Graphics:** `GCOL` · `PLOT` · `MOVE` · `DRAW` · `CLG` · `POINT` *(fn)* · `LINE` · `RECTANGLE` · `CIRCLE` · `ELLIPSE` · `FILL` · `RGB` *(fn)* · `LINEWIDTH` · `LINEJOIN` (`MITER`/`BEVEL`/`ROUND`) · `LINECAP` (`BUTT`/`ROUND`/`SQUARE`)
 
 **Sprites:** `GGET` · `GPUT` (plain, or `GPUT addr,x,y,scale,angle`) · `LOADSPRITE` *(fn)* · `SAVESPRITE` · `SPRW` *(fn)* · `SPRH` *(fn)*
 

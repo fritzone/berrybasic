@@ -185,6 +185,9 @@ static void exec_statement(void) {
             case KW_CIRCLE:    stmt_circle();    return;
             case KW_ELLIPSE:   stmt_ellipse();   return;
             case KW_FILL:      stmt_fill();      return;
+            case KW_LINEWIDTH: stmt_linewidth(); return;
+            case KW_LINEJOIN:  stmt_linejoin();  return;
+            case KW_LINECAP:   stmt_linecap();   return;
             case KW_GGET:      stmt_gget();      return;
             case KW_GPUT:      stmt_gput();      return;
             case KW_BUFFER:    stmt_buffer();    return;
@@ -274,6 +277,8 @@ static void exec_statement(void) {
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
                            for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;
                            seed_heap_reset(); coll_reset();
+                           con_set_gfx_mode(1);   // back to the default coordinate regime
+                           con_line_width(1); con_line_join(CON_JOIN_MITER); con_line_cap(CON_CAP_BUTT);
                            for_sp = 0; gosub_sp = 0; return;
             default:       err("That keyword can't be used as a command");  return;
         }
@@ -482,6 +487,9 @@ static void run_program(int start_pc, int start_off) {
         prog_n = main_n;                       // strip imported module lines
         con_screen(0, 0);                      // restore the startup resolution (no-op if unchanged)
         con_backbuffer(0);                     // un-buffer so the prompt draws to the visible screen
+        con_set_gfx_mode(1);                   // the prompt is always MODE 1; never inherit MODE 2
+        con_line_width(1); con_line_join(CON_JOIN_MITER); con_line_cap(CON_CAP_BUTT);  // default BASIC pen
+        sgfx_line_style(1, CON_JOIN_MITER, CON_CAP_BUTT);   // ... and the seed pen
     }
 }
 

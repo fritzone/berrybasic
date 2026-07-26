@@ -637,6 +637,7 @@ static value_t prim_base(void) {
                            return v_num((double)gpio_read_all());
             case KW_SCREENW: lex_next(); return v_num(con_screen_w());
             case KW_SCREENH: lex_next(); return v_num(con_screen_h());
+            case KW_GMODE:   lex_next(); return v_num(con_gfx_mode());
             case KW_FONTHEIGHT: lex_next(); return v_num(ttf_line_height());
             case KW_KEYMOD: lex_next(); return v_num(con_keymods());
             case KW_KEYBOARDS: { lex_next(); const char *c = con_get_keyboard();

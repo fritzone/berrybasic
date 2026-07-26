@@ -44,6 +44,7 @@ enum {
     KW_SOUND, KW_TONE,                                             // audio statements
     KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
     KW_LINE, KW_RECTANGLE, KW_CIRCLE, KW_ELLIPSE, KW_FILL,         // shape commands
+    KW_LINEWIDTH, KW_LINEJOIN, KW_LINECAP,                        // thick-line pen
     KW_GGET, KW_GPUT, KW_SAVESPRITE,                              // sprite capture / stamp / save
     KW_BUFFER, KW_FLIP,                                           // double buffering: BUFFER ON/OFF + FLIP
     KW_GTINT,                                                     // GTINT r,g,b,a / GTINT OFF : sprite tint
@@ -59,6 +60,7 @@ enum {
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
     KW_PINS,                                          // PINS : read all header pins at once
     KW_SCREEN, KW_SCREENW, KW_SCREENH,                // SCREEN statement + current-resolution values
+    KW_GMODE,                                         // GMODE : active graphics mode (1 or 2)
     KW_FONTHEIGHT,                                    // FONTHEIGHT : line height of the current font (px)
     KW_KEYBOARD, KW_KEYBOARDS,                        // KEYBOARD "NO" statement + KEYBOARD$ (current layout)
     KW_KEYMOD,                                        // KEYMOD : modifier/lock bitmask
@@ -144,6 +146,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "POINT", KW_POINT },
     { "LINE",  KW_LINE  }, { "RECTANGLE", KW_RECTANGLE }, { "CIRCLE", KW_CIRCLE },
     { "ELLIPSE", KW_ELLIPSE }, { "FILL", KW_FILL }, { "RGB", KW_RGB },
+    { "LINEWIDTH", KW_LINEWIDTH }, { "LINEJOIN", KW_LINEJOIN }, { "LINECAP", KW_LINECAP },
     { "LOADSPRITE", KW_LOADSPRITE }, { "SPRW", KW_SPRW }, { "SPRH", KW_SPRH },
     { "DIROPEN", KW_DIROPEN }, { "DIRNEXT", KW_DIRNEXT },
     { "DIRNAME$", KW_DIRNAMES }, { "DIRSIZE", KW_DIRSIZE }, { "DIRTYPE", KW_DIRTYPE },
@@ -173,6 +176,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },
     { "POS",   KW_POS   }, { "VPOS", KW_VPOS  },
     { "SCREEN", KW_SCREEN }, { "SCREENW", KW_SCREENW }, { "SCREENH", KW_SCREENH },
+    { "GMODE", KW_GMODE },
     { "KEYBOARD", KW_KEYBOARD }, { "KEYBOARD$", KW_KEYBOARDS },
     { "KEYMOD", KW_KEYMOD },
     { "MOUSE", KW_MOUSE }, { "MOUSEX", KW_MOUSEX },

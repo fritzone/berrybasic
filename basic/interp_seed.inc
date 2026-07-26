@@ -375,6 +375,9 @@ static void svc_gfx_flip(void)                    { con_flip(); }
 static int  svc_gfx_buffered(void)                { return con_buffered(); }
 // Modifier/lock state: not a key, so getkey/inkey can never carry it.
 static int  svc_keymods(void)                     { return con_keymods(); }
+// The BASIC graphics mode (1 or 2). gfx_* drawing is always device pixels; this
+// lets a seed convert coordinates BASIC passed in its current mode.
+static int  svc_gfx_mode(void)                    { return con_gfx_mode(); }
 
 // A key that the ON KEY event consumed while detecting the press, held for the
 // handler (or the next GET) to read. GET/INKEY go through these wrappers so the
@@ -549,6 +552,8 @@ static void svc_gfx_fillcircle(int cx, int cy, int r, uint32_t rgb) { sgfx_fillc
 static void svc_gfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_ellipse(cx, cy, rx, ry, rgb); }
 static void svc_gfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_fillellipse(cx, cy, rx, ry, rgb); }
 static void svc_gfx_fillpoly(const int *xy, int npts, uint32_t rgb) { sgfx_fillpoly(xy, npts, rgb); }
+static void svc_gfx_line_style(int w, int j, int c) { sgfx_line_style(w, j, c); }
+static void svc_gfx_polyline(const int *pts, int n, int cl, uint32_t rgb) { sgfx_polyline(pts, n, cl, rgb); }
 static void svc_gfx_flood(int x, int y, uint32_t rgb) { sgfx_flood(x, y, rgb); }
 static void svc_gfx_clip(int x1, int y1, int x2, int y2) { sgfx_clip(x1, y1, x2, y2); }
 static void svc_gfx_noclip(void) { sgfx_noclip(); }
@@ -582,6 +587,8 @@ static const SeedServices g_svc = {
     svc_mouse,
     svc_gfx_backbuffer, svc_gfx_flip, svc_gfx_buffered,
     svc_keymods,
+    svc_gfx_mode,
+    svc_gfx_line_style, svc_gfx_polyline,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma

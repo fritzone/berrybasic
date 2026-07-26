@@ -73,6 +73,21 @@ void linerel(int dx, int dy);
 int  getx(void);
 int  gety(void);
 
+// --- line style: width, joins and caps for thick strokes -------------------
+// The pen is in device pixels. `line` honours width + cap; `rectangle` and
+// `drawpoly` honour width + join; `circle`/`ellipse` outlines honour width. The
+// classic BGI setlinestyle is supported for width only (linestyle/pattern are
+// accepted but drawing is always solid). NORM_WIDTH / THICK_WIDTH are the two
+// classic widths; setlinewidth takes any width.
+enum { SOLID_LINE = 0, DOTTED_LINE, CENTER_LINE, DASHED_LINE, USERBIT_LINE };
+enum { NORM_WIDTH = 1, THICK_WIDTH = 3 };
+enum { JOIN_MITER = 0, JOIN_BEVEL = 1, JOIN_ROUND = 2 };   // for setlinejoin
+enum { CAP_BUTT = 0, CAP_ROUND = 1, CAP_SQUARE = 2 };      // for setlinecap
+void setlinestyle(int linestyle, unsigned upattern, int thickness);  // classic (width only)
+void setlinewidth(int width);        // pen width in pixels (1 = hairline)
+void setlinejoin(int join);          // JOIN_MITER / JOIN_BEVEL / JOIN_ROUND
+void setlinecap(int cap);            // CAP_BUTT / CAP_ROUND / CAP_SQUARE
+
 // --- shapes (outline uses the drawing colour, fills use the fill colour) ----
 void line(int x1, int y1, int x2, int y2);
 void rectangle(int left, int top, int right, int bottom);
@@ -120,6 +135,23 @@ int  setdoublebuffer(int on);   // 1 = draw off-screen; 0 = straight to the scre
                                 //   be had (drawing then just goes to the screen).
 void flippage(void);            // present the finished frame (no-op when off)
 int  getdoublebuffer(void);     // 1 if drawing is currently going off-screen
+
+// --- graphics mode and coordinate conversion --------------------------------
+// Drawing through this library is ALWAYS device pixels, origin top-left, y down -
+// whatever coordinate mode BASIC is in. What the mode changes is how coordinates
+// a BASIC program *passes to your seed* should be read: in MODE 2 they are the
+// same device pixels you draw in (an identity), in MODE 1 they are BBC logical
+// units (1280x1024, origin bottom-left) and must be converted.
+#define GFX_BBC_W 1280           // the BBC logical extent MODE 1 coordinates use
+#define GFX_BBC_H 1024
+
+int  gfx_mode(void);             // BASIC's graphics mode: 1 = BBC logical, 2 = native pixels
+
+// Convert a coordinate pair as BASIC meant it (in the current mode) into the
+// device pixels the gfx_* / BGI calls draw in. The inverse hands device pixels
+// back as the coordinates BASIC is using. In MODE 2 both are the identity.
+void gfx_from_basic(int bx, int by, int *px, int *py);
+void gfx_to_basic(int px, int py, int *bx, int *by);
 
 // --- small conveniences ----------------------------------------------------
 void gdelay(int centiseconds);           // busy-wait using the seed clock

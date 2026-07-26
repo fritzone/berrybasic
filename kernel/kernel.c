@@ -54,8 +54,15 @@ static uint32_t g_start_h = FB_HEIGHT;
 // (0 = the screen framebuffer); g_gl_* are the logical coordinate extent - the
 // BBC 1280x1024 space for the screen, but the sprite's own pixels (1:1, origin
 // bottom-left) when drawing into a sprite.
+#define GFX_LW 1280            // MODE 1 logical coordinate extent (BBC-style)
+#define GFX_LH 1024
 static int g_tgt_w = 0, g_tgt_h = 0;
-static int g_gl_w  = 1280, g_gl_h = 1024;
+static int g_gl_w  = GFX_LW, g_gl_h = GFX_LH;
+// Graphics coordinate regime (MODE). 1 = BBC logical (1280x1024 scaled to the
+// panel, origin bottom-left); 2 = native (physical pixels at the current
+// resolution, origin top-left, 1:1). g_gfx_flip is derived (mode 1 flips y).
+static int g_gfx_mode = 1;
+static int g_gfx_flip = 1;
 static int g_term_cols    = FB_WIDTH  / CHAR_W;
 static int g_term_rows    = FB_HEIGHT / CHAR_H;
 static int cursor_visible = 0;   // whether the cursor glyph is currently drawn
@@ -722,9 +729,6 @@ int con_splash(const char *banner) {
 // two as centre + a point on the circumference).
 // ---------------------------------------------------------------------------
 
-#define GFX_LW 1280
-#define GFX_LH 1024
-
 // Current graphics target dimensions. gl_* is the logical coordinate extent and
 // gt_* the destination pixel size; they differ only while SPRITETARGET is active
 // (both become the sprite's size, so drawing addresses sprite pixels directly).
@@ -749,17 +753,51 @@ static int gpx1, gpy1;      // previous point
 static int gpx2, gpy2;      // the one before that
 static int gfx_ox = 0, gfx_oy = 0;   // graphics origin (VDU 29 / ORIGIN)
 
-static int lx2px(int x) { return (x + gfx_ox) * gt_w()  / gl_w(); }
-static int ly2py(int y) { return (gt_h() - 1) - ((y + gfx_oy) * gt_h() / gl_h()); }
+// Line pen: width in *coordinate units* (scaled to pixels like a radius), the
+// join style for corners (GJOIN_*) and the cap style for open ends (GCAP_*).
+// Width 1 uses the fast single-pixel primitives; >1 uses the thick stroker.
+static int gfx_line_w = 1, gfx_join = GJOIN_MITER, gfx_cap = GCAP_BUTT;
+// The seed graphics pen (device pixels, unscaled) - separate from the BASIC pen
+// above; set via sgfx_line_style, used by the sgfx_* seed primitives further down.
+static int sgfx_w = 1, sgfx_join = GJOIN_MITER, sgfx_cap = GCAP_BUTT;
+
+// The one place the coordinate convention lives. In MODE 2 the mapping is 1:1
+// with a top-left origin (no scale, no y-flip); in MODE 1 it scales the logical
+// extent onto the target and flips y so the origin is bottom-left. A SPRITETARGET
+// makes gl_* == gt_* so the scale is already identity there in both modes; only
+// the flip differs (suppressed in MODE 2), which is why these key off g_gfx_mode
+// rather than the target.
+static int lx2px(int x) {
+    if (g_gfx_mode == 2) return x + gfx_ox;                          // 1:1, no scale
+    return (x + gfx_ox) * gt_w() / gl_w();
+}
+static int ly2py(int y) {
+    if (g_gfx_mode == 2) return y + gfx_oy;                          // top-left, y down
+    return (gt_h() - 1) - ((y + gfx_oy) * gt_h() / gl_h());
+}
 // Inverse transforms (physical pixel -> logical, origin-relative).
-static int px2lx(int px) { return px * gl_w() / gt_w() - gfx_ox; }
-static int py2ly(int py) { return (gt_h() - 1 - py) * gl_h() / gt_h() - gfx_oy; }
+static int px2lx(int px) {
+    if (g_gfx_mode == 2) return px - gfx_ox;
+    return px * gl_w() / gt_w() - gfx_ox;
+}
+static int py2ly(int py) {
+    if (g_gfx_mode == 2) return py - gfx_oy;
+    return (gt_h() - 1 - py) * gl_h() / gt_h() - gfx_oy;
+}
 
 static int isqrt_i(int v) {
     if (v <= 0) return 0;
     int r = 0;
     while ((r + 1) * (r + 1) <= v) r++;
     return r;
+}
+
+// The line pen width in physical (target) pixels. A coordinate-unit width scales
+// to the target like a radius does (gt_w()/gl_w()), so it is 1:1 in MODE 2 and on
+// a sprite target; never less than 1.
+static int line_pw(void) {
+    int w = gfx_line_w * gt_w() / gl_w();
+    return w < 1 ? 1 : w;
 }
 
 // Reset the default text/graphics viewports and graphics origin (VDU 26).
@@ -777,11 +815,37 @@ static void reset_colours(void) {
     text_bg    = bbc_palette[0];     // COLOUR 128
     gfx_fg = 7; gfx_bg = 0; gfx_act = 0;
     gfx_fg_true = 0; gfx_bg_true = 0;
+    gfx_line_w = 1; gfx_join = GJOIN_MITER; gfx_cap = GCAP_BUTT;   // reset the BASIC pen
+    sgfx_w = 1; sgfx_join = GJOIN_MITER; sgfx_cap = GCAP_BUTT;     // ... and the seed pen
     gfx_set_op(0);
 }
 
+// LINEWIDTH / LINEJOIN / LINECAP : the pen for thick lines and shape outlines.
+// width is in coordinate units (0/1 = a hairline); unknown join/cap fall back to
+// the defaults (miter / butt).
+void con_line_width(int width) { gfx_line_w = width < 1 ? 1 : width; }
+void con_line_join(int join) { gfx_join = (join >= GJOIN_MITER && join <= GJOIN_ROUND) ? join : GJOIN_MITER; }
+void con_line_cap(int cap)   { gfx_cap  = (cap  >= GCAP_BUTT  && cap  <= GCAP_SQUARE) ? cap  : GCAP_BUTT; }
+
+// Set the coordinate regime and the matching logical extent, WITHOUT touching the
+// screen, colours or viewports. The lightweight restore used by RUN/NEW/program
+// end so a program never inherits MODE 2, while whatever is on screen is left as
+// it is. MODE 2's extent is the live panel size (so lengths scale 1:1 and range
+// checks are correct); MODE 1's is the fixed BBC logical space.
+void con_set_gfx_mode(int n) {
+    if (n != 1 && n != 2) n = 1;
+    g_gfx_mode = n;
+    g_gfx_flip = (n == 1);
+    if (g_tgt_w > 0) return;                   // a SPRITETARGET owns the extent; leave it
+    if (n == 2) { g_gl_w = (int)g_fb_w; g_gl_h = (int)g_fb_h; }   // native: extent = panel
+    else        { g_gl_w = GFX_LW;      g_gl_h = GFX_LH;      }   // legacy: fixed logical
+}
+
+// MODE n: switch coordinate regime AND reset graphics state (colours, viewports,
+// origin) and clear the screen - the classic BBC MODE behaviour. Unknown modes
+// fall back to legacy (the interpreter raises the error; the backend stays lenient).
 void con_mode(int n) {
-    (void)n;                                  // resolution is fixed; MODE just resets
+    con_set_gfx_mode(n);
     reset_colours();
     reset_viewports();
     vdu5_mode = 0; vdu_enabled = 1; cursor_enabled = 1;
@@ -789,6 +853,8 @@ void con_mode(int n) {
     cursor_col = 0; cursor_row = 0; cursor_visible = 0;
     uart_puts("\r\n");
 }
+
+int con_gfx_mode(void) { return g_gfx_mode; }
 
 void con_gcol(int action, int colour) {
     gfx_act = action & 7;
@@ -841,17 +907,23 @@ void con_plot(int code, int x, int y) {
     int x1 = lx2px(gpx1), y1 = ly2py(gpy1);
     int x2 = lx2px(gpx2), y2 = ly2py(gpy2);
 
+    int pw = line_pw();
     switch (group) {
-        case 0:    draw_line(x1, y1, x0, y0, col); break;          // line
-        case 64:   draw_line(x0, y0, x0, y0, col); break;          // single point
+        case 0:    if (pw > 1) stroke_line(x1, y1, x0, y0, pw, gfx_cap, col);  // line
+                   else        draw_line(x1, y1, x0, y0, col);
+                   break;
+        case 64:   if (pw > 1) fill_circle(x0, y0, pw / 2, col);   // point -> a fat dot
+                   else        draw_line(x0, y0, x0, y0, col);
+                   break;
         case 80:   fill_triangle(x0, y0, x1, y1, x2, y2, col); break;   // triangle
         case 96:   fill_rect(x1, y1, x0, y0, col); break;          // rectangle
         case 144:                                                   // circle outline
         case 152: {                                                 // circle fill
             int dx = x0 - x1, dy = y0 - y1;
             int r  = isqrt_i(dx * dx + dy * dy);
-            if (group == 152) fill_circle(x1, y1, r, col);
-            else              draw_circle(x1, y1, r, col);
+            if (group == 152)     fill_circle(x1, y1, r, col);
+            else if (pw > 1)      stroke_circle(x1, y1, r, pw, col);
+            else                  draw_circle(x1, y1, r, col);
             break;
         }
         default:   draw_line(x1, y1, x0, y0, col); break;          // fallback: line
@@ -889,8 +961,11 @@ int  con_buffered(void) { return gfx_buffered(); }
 
 void con_line(int x1, int y1, int x2, int y2) {
     if (!fb_ready) return;
+    int px1 = lx2px(x1), py1 = ly2py(y1), px2 = lx2px(x2), py2 = ly2py(y2);
+    int pw = line_pw();
     gfx_set_op(gfx_act);
-    draw_line(lx2px(x1), ly2py(y1), lx2px(x2), ly2py(y2), gcol_fg());
+    if (pw > 1) stroke_line(px1, py1, px2, py2, pw, gfx_cap, gcol_fg());
+    else        draw_line(px1, py1, px2, py2, gcol_fg());
     gfx_set_op(0);
     gpx0 = x2; gpy0 = y2;                 // leave the graphics cursor at the end
 }
@@ -899,9 +974,16 @@ void con_line(int x1, int y1, int x2, int y2) {
 void con_rectangle(int x, int y, int w, int h, int fill) {
     if (!fb_ready) return;
     int x0 = lx2px(x), y0 = ly2py(y), x1 = lx2px(x + w), y1 = ly2py(y + h);
+    int pw = line_pw();
     gfx_set_op(gfx_act);
-    if (fill) fill_rect(x0, y0, x1, y1, gcol_fg());
-    else      draw_rect(x0, y0, x1, y1, gcol_fg());
+    if (fill) {
+        fill_rect(x0, y0, x1, y1, gcol_fg());
+    } else if (pw > 1) {                          // thick outline: a closed stroked polygon
+        int pts[8] = { x0, y0, x1, y0, x1, y1, x0, y1 };
+        stroke_polyline(pts, 4, 1 /*closed*/, pw, gfx_join, gfx_cap, gcol_fg());
+    } else {
+        draw_rect(x0, y0, x1, y1, gcol_fg());
+    }
     gfx_set_op(0);
 }
 
@@ -910,9 +992,11 @@ void con_circle(int x, int y, int r, int fill) {
     int cx = lx2px(x), cy = ly2py(y);
     int rp = r * gt_w() / gl_w();                  // scale to a round radius in target pixels
     if (rp < 0) rp = -rp;
+    int pw = line_pw();
     gfx_set_op(gfx_act);
-    if (fill) fill_circle(cx, cy, rp, gcol_fg());
-    else      draw_circle(cx, cy, rp, gcol_fg());
+    if (fill)         fill_circle(cx, cy, rp, gcol_fg());
+    else if (pw > 1)  stroke_circle(cx, cy, rp, pw, gcol_fg());   // thick ring
+    else              draw_circle(cx, cy, rp, gcol_fg());
     gfx_set_op(0);
 }
 
@@ -921,9 +1005,11 @@ void con_ellipse(int x, int y, int rx, int ry, int fill) {
     int cx = lx2px(x), cy = ly2py(y);
     int rpx = rx * gt_w() / gl_w();
     int rpy = ry * gt_h() / gl_h();
+    int pw = line_pw();
     gfx_set_op(gfx_act);
-    if (fill) fill_ellipse(cx, cy, rpx, rpy, gcol_fg());
-    else      draw_ellipse(cx, cy, rpx, rpy, gcol_fg());
+    if (fill)         fill_ellipse(cx, cy, rpx, rpy, gcol_fg());
+    else if (pw > 1)  stroke_ellipse(cx, cy, rpx, rpy, pw, gcol_fg());
+    else              draw_ellipse(cx, cy, rpx, rpy, gcol_fg());
     gfx_set_op(0);
 }
 
@@ -1160,15 +1246,38 @@ void sgfx_clear(uint32_t rgb) {
 void sgfx_putpixel(int x, int y, uint32_t rgb) { if (fb_ready) putpixel(x, y, rgb_to_fb(rgb)); }
 uint32_t sgfx_getpixel(int x, int y) { return fb_ready ? fb_to_rgb(getpixel(x, y)) : 0; }
 
+// The seed's own line pen (device pixels) is declared with the other gfx state
+// up top so reset_colours() can reset it. Set via sgfx_line_style; honoured by
+// sgfx_line / sgfx_circle / sgfx_ellipse / sgfx_polyline.
+void sgfx_line_style(int width, int join, int cap) {
+    sgfx_w    = width < 1 ? 1 : width;
+    sgfx_join = (join >= GJOIN_MITER && join <= GJOIN_ROUND) ? join : GJOIN_MITER;
+    sgfx_cap  = (cap  >= GCAP_BUTT  && cap  <= GCAP_SQUARE) ? cap  : GCAP_BUTT;
+}
+void sgfx_polyline(const int *pts, int n, int closed, uint32_t rgb) {
+    if (fb_ready) stroke_polyline(pts, n, closed, sgfx_w < 1 ? 1 : sgfx_w,
+                                  sgfx_join, sgfx_cap, rgb_to_fb(rgb));
+}
+
 void sgfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) {
-    if (fb_ready) draw_line(x1, y1, x2, y2, rgb_to_fb(rgb));
+    if (!fb_ready) return;
+    if (sgfx_w > 1) stroke_line(x1, y1, x2, y2, sgfx_w, sgfx_cap, rgb_to_fb(rgb));
+    else            draw_line(x1, y1, x2, y2, rgb_to_fb(rgb));
 }
 void sgfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) {
     if (fb_ready) fill_rect(x1, y1, x2, y2, rgb_to_fb(rgb));
 }
-void sgfx_circle(int cx, int cy, int r, uint32_t rgb)      { if (fb_ready) draw_circle(cx, cy, r, rgb_to_fb(rgb)); }
+void sgfx_circle(int cx, int cy, int r, uint32_t rgb) {
+    if (!fb_ready) return;
+    if (sgfx_w > 1) stroke_circle(cx, cy, r, sgfx_w, rgb_to_fb(rgb));
+    else            draw_circle(cx, cy, r, rgb_to_fb(rgb));
+}
 void sgfx_fillcircle(int cx, int cy, int r, uint32_t rgb)  { if (fb_ready) fill_circle(cx, cy, r, rgb_to_fb(rgb)); }
-void sgfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb)     { if (fb_ready) draw_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb)); }
+void sgfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) {
+    if (!fb_ready) return;
+    if (sgfx_w > 1) stroke_ellipse(cx, cy, rx, ry, sgfx_w, rgb_to_fb(rgb));
+    else            draw_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb));
+}
 void sgfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { if (fb_ready) fill_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb)); }
 void sgfx_flood(int x, int y, uint32_t rgb) { if (fb_ready) flood_fill(x, y, rgb_to_fb(rgb)); }
 
@@ -1239,11 +1348,14 @@ int con_target_sprite(long addr) {
     return 0;
 }
 
-// Return drawing to the screen (or the back buffer, if BUFFER ON).
+// Return drawing to the screen (or the back buffer, if BUFFER ON). Restore the
+// screen extent for the CURRENT mode - the panel size in MODE 2, the fixed BBC
+// logical space in MODE 1 - not a hard-coded legacy extent.
 void con_target_screen(void) {
     gfx_reset_target();
     g_tgt_w = 0; g_tgt_h = 0;
-    g_gl_w  = GFX_LW; g_gl_h = GFX_LH;
+    if (g_gfx_mode == 2) { g_gl_w = (int)g_fb_w; g_gl_h = (int)g_fb_h; }
+    else                 { g_gl_w = GFX_LW;      g_gl_h = GFX_LH;      }
 }
 
 // --- tilemap ----------------------------------------------------------------
@@ -1319,6 +1431,10 @@ static int vdu_word(int i)  { return vdu_q[i] | (vdu_q[i+1] << 8); }
 static int vdu_sword(int i) { int v = vdu_word(i); return v >= 32768 ? v - 65536 : v; }
 static int gfx_char_w(void) { return CHAR_W * gl_w() / gt_w(); }
 static int gfx_char_h(void) { return CHAR_H * gl_h() / gt_h(); }
+// Signed logical y-delta that moves the VDU 5 graphics text cursor DOWN one line.
+// In MODE 1 (y up) moving down means decreasing the logical y; in MODE 2 (y down)
+// it means increasing it - so a line feed goes down the screen in both modes.
+static int gfx_line_down(void) { return g_gfx_flip ? -gfx_char_h() : gfx_char_h(); }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 // --- VDU 5: text at the graphics cursor -------------------------------------
@@ -1339,7 +1455,7 @@ static void gfx_text_char(unsigned char uc) {
     gpx0 += gfx_char_w();
 }
 static void gfx_text_cr(void) { gpx0 = gfx_vp_left(); }
-static void gfx_text_lf(void) { gpy0 -= gfx_char_h(); }
+static void gfx_text_lf(void) { gpy0 += gfx_line_down(); }
 static void gfx_text_bs(void) { gpx0 -= gfx_char_w(); }
 
 // Output a printable character: at the graphics cursor in VDU 5 mode, otherwise
@@ -1391,12 +1507,12 @@ static void vdu_execute(int cmd) {
                  else if (cursor_col < tv_r) cursor_col++;
                  else term_advance();
                  break;
-        case 10: if (vdu5_mode) gpy0 -= gfx_char_h();      // cursor down (LF)
+        case 10: if (vdu5_mode) gpy0 += gfx_line_down();   // cursor down (LF)
                  else { if (++cursor_row > tv_b) { scroll_rect(tv_l*CHAR_W, tv_t*CHAR_H,
                             (tv_r+1)*CHAR_W-1, (tv_b+1)*CHAR_H-1, CHAR_H, text_bg);
                             cursor_row = tv_b; } }
                  break;
-        case 11: if (vdu5_mode) gpy0 += gfx_char_h();      // cursor up
+        case 11: if (vdu5_mode) gpy0 -= gfx_line_down();   // cursor up
                  else if (cursor_row > tv_t) cursor_row--;
                  break;
         case 12: con_cls(); break;                         // clear text (CLS)
@@ -1667,6 +1783,10 @@ int con_screen(int w, int h) {
     cleardevice();
     cursor_col = 0; cursor_row = 0; cursor_visible = 0;
     g_mouse_x = (int)g_fb_w / 2; g_mouse_y = (int)g_fb_h / 2;
+    // In MODE 2 the coordinate space IS the resolution, so a SCREEN change moves
+    // the drawable range with it. (MODE 1's logical extent is deliberately
+    // resolution-independent, so it is left alone.)
+    if (g_gfx_mode == 2 && g_tgt_w == 0) { g_gl_w = (int)g_fb_w; g_gl_h = (int)g_fb_h; }
     return 1;
 }
 

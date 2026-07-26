@@ -18,6 +18,8 @@ void     sgfx_fillcircle(int cx, int cy, int r, uint32_t rgb) { (void)cx; (void)
 void     sgfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { (void)cx; (void)cy; (void)rx; (void)ry; (void)rgb; }
 void     sgfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { (void)cx; (void)cy; (void)rx; (void)ry; (void)rgb; }
 void     sgfx_fillpoly(const int *xy, int npts, uint32_t rgb) { (void)xy; (void)npts; (void)rgb; }
+void     sgfx_line_style(int w, int j, int c) { (void)w; (void)j; (void)c; }
+void     sgfx_polyline(const int *pts, int n, int cl, uint32_t rgb) { (void)pts; (void)n; (void)cl; (void)rgb; }
 void     sgfx_flood(int x, int y, uint32_t rgb) { (void)x; (void)y; (void)rgb; }
 void     sgfx_clip(int x1, int y1, int x2, int y2) { (void)x1; (void)y1; (void)x2; (void)y2; }
 void     sgfx_noclip(void) { }

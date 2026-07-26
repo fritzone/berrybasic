@@ -67,7 +67,36 @@ static void stmt_mode(void) {
     lex_next();                                  // consume MODE
     int n = (int)need_num();
     if (g_err) return;
+    if (n != 1 && n != 2) { err("No such graphics mode"); return; }
     con_mode(n);
+}
+
+// LINEWIDTH n : set the pen width (coordinate units) for thick lines and outlines.
+static void stmt_linewidth(void) {
+    lex_next();                                  // consume LINEWIDTH
+    int w = (int)need_num();
+    if (g_err) return;
+    con_line_width(w);
+}
+
+// LINEJOIN MITER | BEVEL | ROUND : how the corners of a stroked outline are drawn.
+static void stmt_linejoin(void) {
+    lex_next();                                  // consume LINEJOIN
+    if      (word_is("MITER") || word_is("MITRE")) con_line_join(CON_JOIN_MITER);
+    else if (word_is("BEVEL"))                     con_line_join(CON_JOIN_BEVEL);
+    else if (word_is("ROUND"))                     con_line_join(CON_JOIN_ROUND);
+    else { err("Expected MITER, BEVEL or ROUND"); return; }
+    lex_next();
+}
+
+// LINECAP BUTT | ROUND | SQUARE : how the open ends of a stroked line are drawn.
+static void stmt_linecap(void) {
+    lex_next();                                  // consume LINECAP
+    if      (word_is("BUTT"))   con_line_cap(CON_CAP_BUTT);
+    else if (word_is("ROUND"))  con_line_cap(CON_CAP_ROUND);
+    else if (word_is("SQUARE")) con_line_cap(CON_CAP_SQUARE);
+    else { err("Expected BUTT, ROUND or SQUARE"); return; }
+    lex_next();
 }
 
 // A packed colour from RGB() carries bit 30, so it can't be mistaken for a

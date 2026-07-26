@@ -27,9 +27,10 @@
 #include <stddef.h>
 
 #define SEED_MAGIC        0x44454553u   // 'S','E','E','D' little-endian
-#define SEED_ABI_VERSION 11u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num;
+#define SEED_ABI_VERSION 13u            // v2 alloc; v3 realloc; v4 GPIO; v5 files; v6 fmt_num;
                                         // v7 graphics; v8 records; v9 mouse; v10 double
-                                        // buffering; v11 keyboard modifiers
+                                        // buffering; v11 keyboard modifiers; v12 gfx mode;
+                                        // v13 line style (width/join/cap + polyline)
 
 // File open modes for the file_open service (match the storage layer). The seed
 // <stdio.h> maps fopen's "r"/"w"/"a"/"r+"/... strings onto these.
@@ -313,6 +314,26 @@ typedef struct SeedServices {
     // call inkey(0) first in a polling loop or you get however stale the last
     // read left it. 0 when no USB keyboard is present.
     int  (*keymods)(void);
+
+    // --- graphics mode (ABI v12) -------------------------------------------
+    // The BASIC graphics mode currently in force: 1 = BBC logical coordinates
+    // (1280x1024, origin bottom-left), 2 = native device pixels (origin
+    // top-left) - i.e. the same convention this API already uses. A seed that
+    // wants to hand coordinates back to BASIC, or interpret coordinates BASIC
+    // passed in, uses this to know which space they are in. Drawing through
+    // gfx_* is ALWAYS device pixels regardless of the mode.
+    int (*gfx_mode)(void);
+
+    // --- line style (ABI v13) ----------------------------------------------
+    // The pen for thick lines and outlines, in DEVICE PIXELS (seeds always draw
+    // in device pixels). width 1 = a hairline; join is how outline corners are
+    // finished (0 miter, 1 bevel, 2 round) and cap how open line ends are (0
+    // butt, 1 round, 2 square). This is the seed's own pen, independent of
+    // BASIC's LINEWIDTH. gfx_line / gfx_circle / gfx_ellipse honour width + cap;
+    // gfx_polyline strokes a run of points honouring width, join and cap
+    // (closed != 0 = a closed polygon, joins at every vertex, no caps).
+    void (*gfx_line_style)(int width, int join, int cap);
+    void (*gfx_polyline)(const int *pts, int n, int closed, uint32_t rgb);
 } SeedServices;
 
 // A seed's entry point. Returns a number (also usable as a status); a string

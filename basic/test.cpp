@@ -276,7 +276,7 @@ TEST_CASE("LIST reproduces stored lines but not module lines") {
 
 TEST_CASE("graphics statements parse and run") {
     std::string p =
-        "10 MODE 0\n"
+        "10 MODE 1\n"
         "20 GCOL 255,0,0\n"
         "30 GCOL 0,5\n"
         "40 COLOUR 5,255,140,0\n"
@@ -296,6 +296,51 @@ TEST_CASE("graphics statements parse and run") {
         "180 PRINT \"C=\";POINT(5,5)\n"
         "190 PRINT \"GFX-OK\"\n";
     REQUIRE_THAT(run(p), ContainsSubstring("GFX-OK"));
+}
+
+TEST_CASE("line-style statements parse and run") {
+    // Host graphics are a no-op, so this checks parse/dispatch/validation only;
+    // the geometry itself is verified on the target under QEMU.
+    REQUIRE_THAT(run("10 LINEWIDTH 8\n"
+                     "20 LINEJOIN ROUND\n"
+                     "30 LINECAP SQUARE\n"
+                     "40 RECTANGLE 100,100,200,150\n"
+                     "50 LINE 0,0,100,100\n"
+                     "60 PRINT \"OK\""),
+                 ContainsSubstring("OK"));
+    // every join and cap word is accepted (incl. the MITRE spelling)
+    for (const char *j : { "MITER", "MITRE", "BEVEL", "ROUND" })
+        REQUIRE_THAT(run(std::string("10 LINEJOIN ") + j + "\n20 PRINT \"J\""),
+                     ContainsSubstring("J"));
+    for (const char *c : { "BUTT", "ROUND", "SQUARE" })
+        REQUIRE_THAT(run(std::string("10 LINECAP ") + c + "\n20 PRINT \"C\""),
+                     ContainsSubstring("C"));
+}
+
+TEST_CASE("a bad line join or cap is rejected") {
+    REQUIRE_THAT(run("10 LINEJOIN WOBBLY"), ContainsSubstring("Expected MITER, BEVEL or ROUND"));
+    REQUIRE_THAT(run("10 LINECAP FLARED"),  ContainsSubstring("Expected BUTT, ROUND or SQUARE"));
+}
+
+TEST_CASE("GMODE reports the graphics mode; MODE switches it") {
+    REQUIRE_THAT(run("10 PRINT GMODE"),                 ContainsSubstring("1"));   // default
+    REQUIRE_THAT(run("10 MODE 2 : PRINT GMODE"),        ContainsSubstring("2"));
+    REQUIRE_THAT(run("10 MODE 2 : MODE 1 : PRINT GMODE"), ContainsSubstring("1"));
+}
+
+TEST_CASE("an unknown graphics mode is rejected") {
+    REQUIRE_THAT(run("10 MODE 3"),  ContainsSubstring("No such graphics mode"));
+    REQUIRE_THAT(run("10 MODE 0"),  ContainsSubstring("No such graphics mode"));
+    // ... and the mode is unchanged by the failed attempt.
+    REQUIRE_THAT(run("10 MODE 2\n20 MODE 3\n30 PRINT GMODE"),
+                 ContainsSubstring("No such graphics mode"));
+}
+
+TEST_CASE("a program never inherits MODE 2 from the previous run") {
+    // Set MODE 2, run, then the prompt (and the next run) must be back in MODE 1.
+    REQUIRE_THAT(run_raw("10 MODE 2\nRUN\nPRINT GMODE\n"), ContainsSubstring("1"));
+    // NEW also restores MODE 1.
+    REQUIRE_THAT(run_raw("MODE 2\nNEW\nPRINT GMODE\n"),    ContainsSubstring("1"));
 }
 
 TEST_CASE("sprites: GGET / GPUT parse and run") {
@@ -1608,6 +1653,25 @@ TEST_CASE("the TYPE field list may span several lines") {
                      "50 p.name$ = \"ann\" : p.score = 5\n"
                      "60 PRINT p.name$; p.score"),
                  ContainsSubstring("ann5"));
+}
+
+TEST_CASE("a REM is allowed in a TYPE declaration") {
+    // REM used to be read as a field name (it is a keyword whose spelling
+    // read_name_word accepts), eating the comment text as extra fields.
+    REQUIRE_THAT(run("10 TYPE pt : x, y : REM a 2D point\n"
+                     "20 ENDTYPE\n"
+                     "30 DIM p AS pt\n"
+                     "40 p.x = 3 : p.y = 4\n"
+                     "50 PRINT p.x + p.y"),
+                 ContainsSubstring("7"));
+    // ... on its own line inside the block, and trailing a field line.
+    REQUIRE_THAT(run("10 TYPE box\n"
+                     "20   REM the dimensions\n"
+                     "30   w, h : REM width and height\n"
+                     "40 ENDTYPE\n"
+                     "50 DIM b AS box : b.w = 10 : b.h = 2\n"
+                     "60 PRINT b.w * b.h"),
+                 ContainsSubstring("20"));
 }
 
 TEST_CASE("a type or field name may be a word that is also a keyword") {

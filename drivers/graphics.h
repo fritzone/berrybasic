@@ -63,6 +63,21 @@ void fill_ellipse(int cx, int cy, int rx, int ry, uint32_t color);
 // (honours the clip rectangle; writes solid pixels regardless of plot op).
 void flood_fill(int x, int y, uint32_t color);
 
+// --- thick strokes: wide lines and outlines with joins and caps -------------
+// Join = how corners of a stroked polyline/outline are finished; cap = how the
+// open ends of a stroked line are finished. `width` is the full pixel width.
+enum { GJOIN_MITER = 0, GJOIN_BEVEL = 1, GJOIN_ROUND = 2 };
+enum { GCAP_BUTT  = 0, GCAP_ROUND = 1, GCAP_SQUARE = 2 };
+
+// Stroke a polyline of n points (pts = x0,y0,x1,y1,...): a wide line following
+// the points, joined at each interior vertex. closed != 0 makes it a closed
+// polygon (every vertex is a join, no caps). Honours the current plot op.
+void stroke_polyline(const int *pts, int n, int closed, int width,
+                     int join, int cap, uint32_t color);
+void stroke_line(int x0, int y0, int x1, int y1, int width, int cap, uint32_t color);
+void stroke_circle(int cx, int cy, int r, int width, uint32_t color);       // thick outline
+void stroke_ellipse(int cx, int cy, int rx, int ry, int width, uint32_t color);
+
 // Shift the whole framebuffer up by `pixels` rows; fill the exposed bottom
 // `pixels` rows with `fill`. Used by the text console to scroll.
 void scroll_up(int pixels, uint32_t fill);

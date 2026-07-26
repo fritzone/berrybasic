@@ -19,6 +19,8 @@ static unsigned int fill_color = 0xFFFFFF;   // fill colour (bar / pieslice / fi
 static int fill_pat = SOLID_FILL;
 static int cp_x = 0, cp_y = 0;               // current position (moveto/lineto)
 static int just_h = LEFT_TEXT, just_v = TOP_TEXT;
+static int s_lw = 1, s_lj = JOIN_MITER, s_lc = CAP_BUTT;   // line pen (see setlinewidth)
+static void push_line_style(void);
 
 static int  slen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
 static unsigned int pal(int c)  { return g_pal[c & 15]; }
@@ -44,6 +46,7 @@ static double dsin_deg(double d) { return s_sin(d * BGI_PI / 180.0); }
 int initgraph(void) {
     cur_color = 0xFFFFFF; bk_color = 0x000000; fill_color = 0xFFFFFF;
     fill_pat = SOLID_FILL; cp_x = cp_y = 0; just_h = LEFT_TEXT; just_v = TOP_TEXT;
+    s_lw = 1; s_lj = JOIN_MITER; s_lc = CAP_BUTT; push_line_style();   // default pen
     return seed_svc->gfx_avail();
 }
 void closegraph(void) { seed_svc->gfx_noclip(); }
@@ -79,13 +82,23 @@ int  getx(void)                    { return cp_x; }
 int  gety(void)                    { return cp_y; }
 
 // --- shapes ----------------------------------------------------------------
+// --- line style -------------------------------------------------------------
+// The pen (width/join/cap) lives in the kernel graphics layer; the seed keeps a
+// copy so each setter can push the full triple through the one service.
+static void push_line_style(void) { seed_svc->gfx_line_style(s_lw, s_lj, s_lc); }
+void setlinewidth(int w)  { s_lw = w < 1 ? 1 : w; push_line_style(); }
+void setlinejoin(int j)   { s_lj = j; push_line_style(); }
+void setlinecap(int c)    { s_lc = c; push_line_style(); }
+void setlinestyle(int linestyle, unsigned upattern, int thickness) {
+    (void)linestyle; (void)upattern;            // pattern/dash not supported (solid only)
+    setlinewidth(thickness);
+}
+
 void line(int x1, int y1, int x2, int y2) { seed_svc->gfx_line(x1, y1, x2, y2, cur_color); }
 
 void rectangle(int l, int t, int r, int b) {
-    seed_svc->gfx_line(l, t, r, t, cur_color);
-    seed_svc->gfx_line(r, t, r, b, cur_color);
-    seed_svc->gfx_line(r, b, l, b, cur_color);
-    seed_svc->gfx_line(l, b, l, t, cur_color);
+    int pts[8] = { l, t, r, t, r, b, l, b };
+    seed_svc->gfx_polyline(pts, 4, 1 /*closed*/, cur_color);   // honours width + join
 }
 void bar(int l, int t, int r, int b) {
     if (fill_pat != EMPTY_FILL) seed_svc->gfx_fillrect(l, t, r, b, fill_color);
@@ -145,8 +158,7 @@ void sector(int cx, int cy, int a0, int a1, int rx, int ry) {
 void pieslice(int x, int y, int a0, int a1, int r) { sector(x, y, a0, a1, r, r); }
 
 void drawpoly(int npts, const int *p) {
-    for (int i = 0; i + 1 < npts; i++)
-        seed_svc->gfx_line(p[i * 2], p[i * 2 + 1], p[(i + 1) * 2], p[(i + 1) * 2 + 1], cur_color);
+    seed_svc->gfx_polyline(p, npts, 0 /*open*/, cur_color);   // honours width + join + caps
 }
 void fillpoly(int npts, const int *p) {
     if (npts < 2) return;
@@ -195,6 +207,23 @@ void outtext(const char *s) {
 }
 
 // --- conveniences ----------------------------------------------------------
+// --- graphics mode and coordinate conversion --------------------------------
+int gfx_mode(void) { return seed_svc->gfx_mode(); }
+
+void gfx_from_basic(int bx, int by, int *px, int *py) {
+    if (seed_svc->gfx_mode() == 2) { if (px) *px = bx; if (py) *py = by; return; }
+    int w = seed_svc->gfx_width(), h = seed_svc->gfx_height();
+    if (px) *px = bx * w / GFX_BBC_W;
+    if (py) *py = (h - 1) - by * h / GFX_BBC_H;          // BBC y-up -> device y-down
+}
+
+void gfx_to_basic(int px, int py, int *bx, int *by) {
+    if (seed_svc->gfx_mode() == 2) { if (bx) *bx = px; if (by) *by = py; return; }
+    int w = seed_svc->gfx_width(), h = seed_svc->gfx_height();
+    if (bx) *bx = px * GFX_BBC_W / w;
+    if (by) *by = (h - 1 - py) * GFX_BBC_H / h;
+}
+
 void gdelay(int cs) {
     unsigned t = seed_svc->time_cs();
     while ((unsigned)(seed_svc->time_cs() - t) < (unsigned)cs) { }

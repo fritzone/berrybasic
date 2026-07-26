@@ -915,6 +915,8 @@ static void stmt_type(void) {
     int endoff  = 0;
     for (;;) {
         while (tok == T_COLON || tok == T_COMMA) lex_next();
+        if (tok == T_KW && tok_kw == KW_REM) tok = T_EOL;   // a REM comments out the
+                                                            // rest of the line, as always
         if (tok == T_EOL) {                      // continue on the next program line
             if (pc < 0 || pc + 1 >= prog_n) { err("TYPE without a matching ENDTYPE"); return; }
             lex_at(++pc, 0);

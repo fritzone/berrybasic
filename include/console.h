@@ -43,9 +43,17 @@ int  con_rows(void);                   // text rows on screen, or 0 if unpaged (
 int  con_splash(const char *banner);
 
 // --- BBC-style graphics -----------------------------------------------------
-// Coordinates are BBC logical units: x in 0..1279, y in 0..1023, origin at the
-// bottom-left, independent of the physical screen resolution.
-void con_mode(int n);                    // MODE n: clear text+graphics, reset state
+// MODE n selects the graphics coordinate regime: 1 = BBC logical coordinates
+// (1280x1024, origin bottom-left, scaled to the panel, resolution-independent);
+// 2 = native coordinates (physical pixels at the current resolution, origin
+// TOP-LEFT, y down, 1:1 - the same convention as the seed sgfx_* API and
+// MOUSEX/MOUSEY). Any other n falls back to 1. MODE also resets colours,
+// viewports and origin and clears the screen. con_set_gfx_mode switches only the
+// coordinate regime, leaving the screen and state untouched (used to restore
+// MODE 1 at RUN/NEW/program end). con_gfx_mode reads the active mode (1 or 2).
+void con_mode(int n);
+void con_set_gfx_mode(int n);
+int  con_gfx_mode(void);
 // SCREEN width,height: switch the physical display resolution for the duration of
 // a program. A non-positive w or h restores the startup resolution. Returns 1 on
 // success, 0 on failure (or on backends without a real framebuffer). con_screen_w
@@ -54,6 +62,19 @@ int  con_screen(int w, int h);
 int  con_screen_w(void);
 int  con_screen_h(void);
 void con_gcol(int action, int colour);   // GCOL action,colour: graphics fg + plot op
+
+// The line pen for thick lines and shape outlines. `width` is in coordinate units
+// (1 = a hairline); `join` is how outline corners are finished (0 miter, 1 bevel,
+// 2 round) and `cap` how open line ends are finished (0 butt, 1 round, 2 square).
+// LINE / DRAW / PLOT lines honour width + cap; RECTANGLE outlines honour width +
+// join; CIRCLE / ELLIPSE outlines honour width. Reset to 1 / miter / butt by MODE
+// and at the start of a run. Values for join and cap (match the driver's GJOIN_*
+// / GCAP_*):
+enum { CON_JOIN_MITER = 0, CON_JOIN_BEVEL = 1, CON_JOIN_ROUND  = 2 };
+enum { CON_CAP_BUTT   = 0, CON_CAP_ROUND  = 1, CON_CAP_SQUARE  = 2 };
+void con_line_width(int width);          // pen width, in coordinate units
+void con_line_join(int join);            // CON_JOIN_*
+void con_line_cap(int cap);              // CON_CAP_*
 void con_plot(int code, int x, int y);   // PLOT code,x,y (master graphics primitive)
 void con_clg(void);                      // CLG: clear graphics area to gfx background
 int  con_point(int x, int y);            // POINT(x,y): logical colour 0..7, or -1 off-screen

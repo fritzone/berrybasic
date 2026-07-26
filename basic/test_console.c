@@ -85,7 +85,11 @@ int  con_vpos(void) { return 0; }
 int  con_rows(void) { return 0; }       // never page in tests
 int  con_splash(const char *b) { (void)b; return 0; }
 
-void con_mode(int n) { (void)n; }
+// Track the graphics mode so GMODE and the RUN/NEW reset are unit-testable.
+static int tc_gfx_mode = 1;
+void con_mode(int n) { tc_gfx_mode = (n == 2) ? 2 : 1; }
+void con_set_gfx_mode(int n) { tc_gfx_mode = (n == 2) ? 2 : 1; }
+int  con_gfx_mode(void) { return tc_gfx_mode; }
 
 // In-memory current resolution, so SCREEN / SCREENW / SCREENH are exercised by
 // the unit tests. Mirrors the kernel clamp and "startup" restore.
@@ -106,6 +110,9 @@ int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
 const char *con_get_keyboard(void)             { return hid_layout_code(); }
 
 void con_gcol(int a, int c) { (void)a; (void)c; }
+void con_line_width(int w) { (void)w; }
+void con_line_join(int j) { (void)j; }
+void con_line_cap(int c) { (void)c; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}
 int  con_point(int x, int y) { (void)x; (void)y; return -1; }

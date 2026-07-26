@@ -360,6 +360,149 @@ void draw_ellipse(int cx, int cy, int rx, int ry, uint32_t color) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Thick strokes: wide lines and shape outlines with selectable joins and caps.
+// Everything is physical pixels (the console layer maps logical -> pixels and a
+// logical width -> a pixel width before calling here). A stroke is built from
+// filled convex pieces - a rectangle per segment (two triangles), a wedge per
+// interior vertex (the join), and a piece per open end (the cap) - so it honours
+// the current plot op through fill_triangle / fill_circle like every primitive.
+// In STORE mode (the default) the overlaps between pieces are harmless; EOR/AND
+// thick strokes would double-hit the overlaps and are not recommended.
+// ---------------------------------------------------------------------------
+
+static double gfsqrt(double x) {                 // double sqrt (Newton), x >= 0
+    if (x <= 0) return 0;
+    double g = x > 1 ? x : 1;
+    for (int i = 0; i < 24; i++) g = 0.5 * (g + x / g);
+    return g;
+}
+static int iround(double v) { return (int)(v < 0 ? v - 0.5 : v + 0.5); }
+
+// The rectangular body of one segment p0->p1, offset by +/-hw along the (unit)
+// left normal (nx,ny), as two triangles.
+static void seg_quad(double x0, double y0, double x1, double y1,
+                     double nx, double ny, double hw, uint32_t color) {
+    int ax = iround(x0 + nx*hw), ay = iround(y0 + ny*hw);
+    int bx = iround(x0 - nx*hw), by = iround(y0 - ny*hw);
+    int cx = iround(x1 - nx*hw), cy = iround(y1 - ny*hw);
+    int dx = iround(x1 + nx*hw), dy = iround(y1 + ny*hw);
+    fill_triangle(ax, ay, bx, by, cx, cy, color);
+    fill_triangle(ax, ay, cx, cy, dx, dy, color);
+}
+
+// Fill the join wedge at vertex v between incoming unit dir d0 and outgoing d1.
+static void do_join(double vx, double vy, double d0x, double d0y,
+                    double d1x, double d1y, double hw, int join, uint32_t color) {
+    double cross = d0x*d1y - d0y*d1x;
+    if (cross > -1e-9 && cross < 1e-9) return;            // straight: no wedge
+    if (join == GJOIN_ROUND) { fill_circle(iround(vx), iround(vy), iround(hw), color); return; }
+    double n0x = -d0y, n0y = d0x, n1x = -d1y, n1y = d1x;  // left normals
+    double s = (cross > 0) ? -1.0 : 1.0;                  // outer side of the turn
+    double oax = vx + s*n0x*hw, oay = vy + s*n0y*hw;      // outer corner, incoming edge
+    double obx = vx + s*n1x*hw, oby = vy + s*n1y*hw;      // outer corner, outgoing edge
+    fill_triangle(iround(oax), iround(oay), iround(obx), iround(oby),
+                  iround(vx), iround(vy), color);         // bevel triangle
+    if (join == GJOIN_MITER) {
+        double det = -cross;                              // = d0x*(-d1y) - (-d1x)*d0y
+        if (det > -1e-9 && det < 1e-9) return;
+        double t = ((obx-oax)*(-d1y) - (-d1x)*(oby-oay)) / det;
+        double mx = oax + t*d0x, my = oay + t*d0y;        // outer edges meet here
+        double dmx = mx - vx, dmy = my - vy;
+        if (gfsqrt(dmx*dmx + dmy*dmy) <= hw * 10.0)        // miter limit (ratio ~10)
+            fill_triangle(iround(oax), iround(oay), iround(obx), iround(oby),
+                          iround(mx), iround(my), color);  // sharp miter tip
+    }
+}
+
+// Fill the end cap at (ex,ey), the segment running toward (tx,ty).
+static void do_cap(double ex, double ey, double tx, double ty,
+                   double hw, int cap, uint32_t color) {
+    if (cap == GCAP_BUTT) return;
+    double dx = tx-ex, dy = ty-ey, l = gfsqrt(dx*dx + dy*dy);
+    if (l < 1e-6) return;
+    double ux = dx/l, uy = dy/l, nx = -uy, ny = ux;
+    if (cap == GCAP_ROUND) { fill_circle(iround(ex), iround(ey), iround(hw), color); return; }
+    double bx = ex - ux*hw, by = ey - uy*hw;             // extend hw beyond the end
+    int p1x = iround(ex + nx*hw), p1y = iround(ey + ny*hw);
+    int p2x = iround(ex - nx*hw), p2y = iround(ey - ny*hw);
+    int p3x = iround(bx - nx*hw), p3y = iround(by - ny*hw);
+    int p4x = iround(bx + nx*hw), p4y = iround(by + ny*hw);
+    fill_triangle(p1x, p1y, p2x, p2y, p3x, p3y, color);
+    fill_triangle(p1x, p1y, p3x, p3y, p4x, p4y, color);
+}
+
+void stroke_polyline(const int *pts, int n, int closed, int width,
+                     int join, int cap, uint32_t color) {
+    if (n < 1 || width < 1) return;
+    double hw = width * 0.5;
+    if (n == 1) { if (cap == GCAP_ROUND) fill_circle(pts[0], pts[1], iround(hw), color); return; }
+
+    int segs = closed ? n : n - 1;
+    for (int i = 0; i < segs; i++) {                      // segment bodies
+        int j = (i + 1) % n;
+        double x0 = pts[2*i], y0 = pts[2*i+1], x1 = pts[2*j], y1 = pts[2*j+1];
+        double dx = x1-x0, dy = y1-y0, len = gfsqrt(dx*dx + dy*dy);
+        if (len < 1e-6) continue;
+        double ux = dx/len, uy = dy/len;
+        seg_quad(x0, y0, x1, y1, -uy, ux, hw, color);
+    }
+    int vs = closed ? 0 : 1, ve = closed ? n : n - 1;    // joins at interior (all if closed)
+    for (int vi = vs; vi < ve; vi++) {
+        int p = (vi - 1 + n) % n, q = (vi + 1) % n;
+        double vx = pts[2*vi], vy = pts[2*vi+1];
+        double d0x = vx - pts[2*p], d0y = vy - pts[2*p+1], l0 = gfsqrt(d0x*d0x + d0y*d0y);
+        double d1x = pts[2*q] - vx, d1y = pts[2*q+1] - vy, l1 = gfsqrt(d1x*d1x + d1y*d1y);
+        if (l0 < 1e-6 || l1 < 1e-6) continue;
+        do_join(vx, vy, d0x/l0, d0y/l0, d1x/l1, d1y/l1, hw, join, color);
+    }
+    if (!closed) {                                       // caps at the two open ends
+        do_cap(pts[0], pts[1], pts[2], pts[3], hw, cap, color);
+        do_cap(pts[2*(n-1)], pts[2*(n-1)+1], pts[2*(n-2)], pts[2*(n-2)+1], hw, cap, color);
+    }
+}
+
+void stroke_line(int x0, int y0, int x1, int y1, int width, int cap, uint32_t color) {
+    int pts[4] = { x0, y0, x1, y1 };
+    stroke_polyline(pts, 2, 0, width, GJOIN_MITER, cap, color);
+}
+
+// A thick circle outline of centre radius r and full width `width`, as a filled
+// annulus (gap-free scanline between the inner and outer radii). Joins/caps do
+// not apply to a smooth closed curve.
+void stroke_circle(int cx, int cy, int r, int width, uint32_t color) {
+    if (r < 0) r = -r;
+    double hw = width * 0.5;
+    int ro = iround(r + hw), ri = iround(r - hw);
+    if (ri < 0) ri = 0;
+    long ro2 = (long)ro*ro, ri2 = (long)ri*ri;
+    for (int y = -ro; y <= ro; y++) {
+        long yy = (long)y*y;
+        if (yy > ro2) continue;
+        int xo = (int)gsqrt(ro2 - yy);
+        if (yy <= ri2) {
+            int xi = (int)gsqrt(ri2 - yy);
+            hspan(cx - xo, cx - xi, cy + y, color);
+            hspan(cx + xi, cx + xo, cy + y, color);
+        } else {
+            hspan(cx - xo, cx + xo, cy + y, color);
+        }
+    }
+}
+
+// A thick ellipse outline: concentric 1px outlines spanning the width. (Each
+// draw_ellipse is itself gap-free; adjacent radii differ by one pixel.)
+void stroke_ellipse(int cx, int cy, int rx, int ry, int width, uint32_t color) {
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    double hw = width * 0.5;
+    int lo = -iround(hw), hi = iround(hw);
+    for (int k = lo; k <= hi; k++) {
+        int erx = rx + k, ery = ry + k;
+        if (erx >= 0 && ery >= 0) draw_ellipse(cx, cy, erx, ery, color);
+    }
+}
+
 // Scanline flood fill. A fixed span-seed stack bounds memory; seeding one entry
 // per contiguous run keeps it small. Matches by RGB (alpha ignored). Best effort:
 // if the stack fills on a huge region it simply stops early.

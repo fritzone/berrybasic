@@ -81,8 +81,12 @@ int con_rows(void) { return 0; }        // no paging on the host CLI
 int con_splash(const char *banner) { (void)banner; return 0; }   // no logo on host; caller prints banner
 
 // Graphics are framebuffer-only; the host backend has no display, so these are
-// no-ops (POINT always reports "off-screen").
-void con_mode(int n) { (void)n; }
+// no-ops (POINT always reports "off-screen"). The graphics mode is still tracked
+// so GMODE and the reset semantics are testable off the Pi.
+static int host_gfx_mode = 1;
+void con_mode(int n) { host_gfx_mode = (n == 2) ? 2 : 1; }
+void con_set_gfx_mode(int n) { host_gfx_mode = (n == 2) ? 2 : 1; }
+int  con_gfx_mode(void) { return host_gfx_mode; }
 
 // No real framebuffer on the host, but keep a plausible current resolution so
 // SCREEN / SCREENW / SCREENH behave (and are testable). Mirrors the kernel clamp.
@@ -105,6 +109,9 @@ int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
 const char *con_get_keyboard(void)             { return hid_layout_code(); }
 
 void con_gcol(int action, int colour) { (void)action; (void)colour; }
+void con_line_width(int w) { (void)w; }
+void con_line_join(int j) { (void)j; }
+void con_line_cap(int c) { (void)c; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}
 int  con_point(int x, int y) { (void)x; (void)y; return -1; }
