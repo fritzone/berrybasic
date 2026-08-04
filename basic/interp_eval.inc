@@ -6,6 +6,10 @@
 // unit's static state and is compiled only as part of basic.c. Do not add it
 // to the build system or compile it on its own.
 // ===========================================================================
+// PODCAPS("NAME.POD") is evaluated here but implemented in interp_pod.inc, which
+// is #included later (it needs the storage layer); forward-declare it.
+static value_t eval_podcaps(void);
+
 // Byte-equality of two n-byte spans (used by the string search/replace helpers).
 static int mem_eq(const char *a, const char *b, int n) {
     for (int i = 0; i < n; i++) if (a[i] != b[i]) return 0;
@@ -638,6 +642,7 @@ static value_t prim_base(void) {
             case KW_SCREENW: lex_next(); return v_num(con_screen_w());
             case KW_SCREENH: lex_next(); return v_num(con_screen_h());
             case KW_GMODE:   lex_next(); return v_num(con_gfx_mode());
+            case KW_PODCAPS: return eval_podcaps();
             case KW_FONTHEIGHT: lex_next(); return v_num(ttf_line_height());
             case KW_KEYMOD: lex_next(); return v_num(con_keymods());
             case KW_KEYBOARDS: { lex_next(); const char *c = con_get_keyboard();

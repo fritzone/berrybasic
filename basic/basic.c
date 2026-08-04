@@ -2,6 +2,7 @@
 #include "console.h"
 #include "storage.h"
 #include "seed.h"
+#include "pod.h"
 #include "image.h"
 #include "sound.h"
 #include "gpio.h"
@@ -61,6 +62,7 @@
 #include "interp_files.inc"     // storage commands, modules, CAT, editor
 #include "interp_hw.inc"        // sound, GPIO, I2C statements
 #include "interp_graphics.inc"  // graphics + misc statements
+#include "interp_pod.inc"       // POD executables: loader + RUN/PODLOAD/PODINFO
 #include "interp_control.inc"   // TRY/CATCH, dispatch, run loop
 #include "interp_call.inc"      // PROC / FN call
 

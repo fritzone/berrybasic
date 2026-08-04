@@ -1,6 +1,7 @@
 // Target (AArch64 bare-metal) backend for native seeds: make loaded bytes
 // executable, and transfer control to a seed. See seed/seed.h for the ABI.
 #include "seed.h"
+#include "pod.h"
 
 // Clean the loaded bytes out of the D-cache to the point of unification, then
 // invalidate the matching I-cache lines, so the core fetches the new code rather
@@ -33,5 +34,22 @@ int seed_invoke(seed_entry fn, const SeedServices *svc,
                 const seed_arg *argv, int argc, double *out_ret)
 {
     *out_ret = fn(svc, argv, argc);
+    return 0;
+}
+
+// Enter a POD program at its entry point. Runs synchronously on the current EL1
+// stack and returns normally; a fault is caught by the kernel's vectors.
+int pod_run_main(const void *entry, const PodServices *svc,
+                 int argc, const char *const *argv, int *status)
+{
+    *status = ((pod_main_fn)entry)(svc, argc, argv);
+    return 0;
+}
+
+// Invoke a POD keyword handler (same convention as a seed keyword).
+int pod_run_kw(const void *entry, const PodServices *svc,
+               const pod_arg *argv, int argc, double *out)
+{
+    *out = ((pod_kw_fn)entry)(svc, argv, argc);
     return 0;
 }

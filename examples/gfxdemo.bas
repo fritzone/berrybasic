@@ -1,5 +1,5 @@
 10 REM Graphics library demo: shapes, RGB truecolour, flood fill, sprites
-20 MODE 0
+20 MODE 1
 30 REM --- filled shapes in truecolour (GCOL r,g,b) ---
 40 GCOL 255,0,0
 50 CIRCLE FILL 300,500,120

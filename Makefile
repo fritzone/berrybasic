@@ -106,7 +106,7 @@ sdcard: $(SDIMG)
 
 # Build a bootable Raspberry Pi 4 SD-card image (firmware + kernel + config.txt)
 # that runs BerryBasic on real hardware. See tools/mksdimage.sh and README-realhw.md.
-sdimage: $(KERNEL) seeds
+sdimage: $(KERNEL) seeds pods
 	tools/mksdimage.sh
 
 # Interactively flash berrybasic-sd.img to a removable card (lists devices,
@@ -205,4 +205,64 @@ $(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR
 	$(OBJCOPY) -O binary $(BUILD_DIR)/seeds/$*.elf $@
 	@echo "  built seed $@"
 
-.PHONY: all clean config newseed sdcard sdimage flash run host seeds test coverage
+# --- POD executables -------------------------------------------------------
+# Whole native programs built with the BerryBasiC tcc (third_party/tinycc). The
+# `arm64-tcc -pod` output IS a runnable .POD (flat, checksummed, position-
+# independent), so there is no separate link/wrap step. mksdimage.sh drops the
+# results onto the data card so RUN "NAME.POD" / PODLOAD find them.
+TCC_DIR  = third_party/tinycc
+POD_TCC  = $(TCC_DIR)/arm64-tcc
+POD_SRC  = $(wildcard $(TCC_DIR)/examples/pod_*.c)
+POD_OUT  = $(patsubst $(TCC_DIR)/examples/pod_%.c,$(BUILD_DIR)/pods/%.POD,$(POD_SRC))
+# System command PODs. pods/*.c are self-contained (a bare pod_main); pods/clib/*.c
+# are ordinary C programs linked with the pod-libc (crt0 + stdio/stdlib/...). Both
+# land in /sys and become shell commands.
+SYS_SRC  = $(wildcard pods/*.c)
+SYS_OUT  = $(patsubst pods/%.c,$(BUILD_DIR)/sys/%.POD,$(SYS_SRC))
+CLIB_SRC = $(wildcard pods/clib/*.c)
+CLIB_OUT = $(patsubst pods/clib/%.c,$(BUILD_DIR)/sys/%.POD,$(CLIB_SRC))
+# tcc itself, built as a POD (self-hosting C compiler on the machine).
+TCC_POD  = $(BUILD_DIR)/sys/tcc.POD
+# Seed packets (.PKT): static libraries in /SYS/LIB. pods/lib/*.c form MATH.PKT.
+PKT_LIB_SRC = $(wildcard pods/lib/*.c)
+PKT_LIB_OBJ = $(patsubst pods/lib/%.c,$(BUILD_DIR)/lib/%.o,$(PKT_LIB_SRC))
+MATH_PKT    = $(BUILD_DIR)/lib/MATH.PKT
+
+pods: $(POD_OUT) $(SYS_OUT) $(CLIB_OUT) $(TCC_POD) $(MATH_PKT)
+
+$(BUILD_DIR)/lib/%.o: pods/lib/%.c $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(POD_TCC) -B$(TCC_DIR) -c $< -o $@
+# `tcc -pkt` derives the symbol table and capabilities from the members.
+$(MATH_PKT): $(PKT_LIB_OBJ) $(POD_TCC)
+	$(POD_TCC) -pkt $@ $(PKT_LIB_OBJ)
+
+# pod-libc programs: compiled and linked against the runtime by tools/podcc.sh.
+$(BUILD_DIR)/sys/%.POD: pods/clib/%.c $(POD_TCC) tools/podcc.sh \
+                        $(wildcard podlib/src/*) $(wildcard podlib/include/*) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/sys
+	tools/podcc.sh $< $@
+	@echo "  built /sys program $@"
+
+# The self-hosted compiler: tools/buildtcc.sh compiles tinycc + the pod-libc and
+# links them with `arm64-tcc -pod`. Rebuilt when the pod-libc or the wrapper changes.
+$(TCC_POD): $(POD_TCC) tools/buildtcc.sh $(TCC_DIR)/tcc_pod.c \
+            $(wildcard podlib/src/*) $(wildcard podlib/include/*) $(wildcard podlib/include/sys/*)
+	tools/buildtcc.sh $@
+
+# Build the AArch64 cross tcc once (it is what emits target PODs on this host).
+$(POD_TCC):
+	@cd $(TCC_DIR) && [ -f config.mak ] || ./configure >/dev/null
+	@$(MAKE) --no-print-directory -C $(TCC_DIR) arm64-tcc
+
+$(BUILD_DIR)/pods/%.POD: $(TCC_DIR)/examples/pod_%.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/pods
+	$(POD_TCC) -B$(TCC_DIR) -pod $< -o $@
+	@echo "  built pod $@"
+
+$(BUILD_DIR)/sys/%.POD: pods/%.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/sys
+	$(POD_TCC) -B$(TCC_DIR) -pod $< -o $@
+	@echo "  built /sys command $@"
+
+.PHONY: all clean config newseed sdcard sdimage flash run host seeds pods test coverage

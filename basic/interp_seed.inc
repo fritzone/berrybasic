@@ -30,7 +30,8 @@ static int  g_seed_retstr_len;        // -1 = the last call set no string
 // returns 0 when exhausted. The whole arena is reclaimed at each RUN/NEW, so a
 // seed that forgets to free leaks only within the current run. 16-byte aligned
 // blocks, suitable for doubles and NEON.
-#define SEED_HEAP_SIZE  (2u * 1024u * 1024u)   // adjust here if seeds need more
+#define SEED_HEAP_SIZE  (48u * 1024u * 1024u)  // shared by seeds and POD programs;
+                                                // tcc-as-a-POD needs elbow room to compile
 
 typedef union seed_hdr_u {
     struct { union seed_hdr_u *next; unsigned size; } s;  // size in header units
@@ -639,7 +640,15 @@ static double seed_run_collect(void) {
 // ---------------------------------------------------------------------------
 #define KW_SEED_MAX 16                 // how many keyword seeds can be resident
 
-typedef struct { char name[16]; int kind; int minargs; int maxargs; int slot; } seed_kw_t;
+// A dynamic (runtime-registered) keyword. Both native seeds (from /seed at
+// startup) and POD extensions (PODLOAD) live in this one table, so the lexer and
+// dispatch treat them alike. is_pod picks the backend: a seed runs from
+// kwseed_pool[slot] through g_svc; a POD keyword runs from pod_entry (inside a
+// resident POD image) through its own capability-gated pod_svc.
+typedef struct {
+    char name[16]; int kind; int minargs; int maxargs; int slot;
+    int is_pod; const void *pod_entry; const void *pod_svc;
+} seed_kw_t;
 
 static char       kwseed_pool[KW_SEED_MAX][SEED_SLOT_SIZE] __attribute__((aligned(4096)));
 static seed_entry kwseed_entry[KW_SEED_MAX];
@@ -702,6 +711,9 @@ static int seed_kw_register(const char *blob, int len) {
     seed_kw_tab[slot].minargs = mn;
     seed_kw_tab[slot].maxargs = mx;
     seed_kw_tab[slot].slot    = slot;
+    seed_kw_tab[slot].is_pod  = 0;              // a native seed keyword
+    seed_kw_tab[slot].pod_entry = 0;
+    seed_kw_tab[slot].pod_svc   = 0;
     seed_kw_n++;
     return 1;
 }
@@ -748,10 +760,13 @@ static int seed_kw_invoke(seed_kw_t *k, seed_arg *argv, int argc, double *out) {
     if (argc < k->minargs || argc > k->maxargs) { err("Wrong number of arguments"); return -1; }
     g_seed_retstr_len = -1;
     *out = 0;
-    if (seed_invoke(kwseed_entry[k->slot], &g_svc, argv, argc, out) != 0) {
-        err("Native seeds run on the Pi, not the host build");
-        return -1;
-    }
+    int rc;
+    if (k->is_pod)          // a POD keyword: its own image + capability-gated table
+        rc = pod_run_kw(k->pod_entry, (const PodServices *)k->pod_svc,
+                        (const pod_arg *)argv, argc, out);
+    else                    // a native seed keyword
+        rc = seed_invoke(kwseed_entry[k->slot], &g_svc, argv, argc, out);
+    if (rc != 0) { err("Native code runs on the Pi, not the host build"); return -1; }
     return 0;
 }
 

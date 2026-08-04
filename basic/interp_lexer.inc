@@ -55,6 +55,7 @@ enum {
     KW_MKDIR, KW_CD, KW_RMDIR, KW_PWD,                              // directory statements
     KW_BPUT, KW_CLOSE,                                              // file I/O statements
     KW_SEED,                                                        // load a native seed
+    KW_PODLOAD, KW_PODFREE, KW_PODINFO, KW_PODCAPS,                 // POD executables
     KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
     KW_MOUSE,                                                       // MOUSE x,y,b statement
     KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
@@ -171,6 +172,8 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "TREEMIN", KW_TREEMIN }, { "TREEMAX", KW_TREEMAX }, { "TREEKEY", KW_TREEKEY },
     { "SAVE",  KW_SAVE  }, { "LOAD", KW_LOAD  }, { "CAT",    KW_CAT    },
     { "DIR",   KW_DIR   }, { "DELETE", KW_DELETE }, { "SEED", KW_SEED },
+    { "PODLOAD", KW_PODLOAD }, { "PODFREE", KW_PODFREE },
+    { "PODINFO", KW_PODINFO }, { "PODCAPS", KW_PODCAPS },
     { "MKDIR", KW_MKDIR }, { "CD", KW_CD }, { "RMDIR", KW_RMDIR }, { "PWD", KW_PWD },
     { "AUTO",  KW_AUTO  }, { "RENUMBER", KW_RENUMBER }, { "EDIT", KW_EDIT },
     { "TIME",  KW_TIME  }, { "TRUE", KW_TRUE  }, { "FALSE",  KW_FALSE  },

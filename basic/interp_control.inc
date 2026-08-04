@@ -251,11 +251,24 @@ static void exec_statement(void) {
                 time_base = (long long)(con_micros() / 10000ULL) - (long long)v;
                 return;
             }
-            // RUN clears variables (CLR) then runs from the top. It nests another
-            // exec_text() sharing the global lexer, so force EOL afterwards.
+            // RUN forms:
+            //   RUN word [args]     -> the /sys command POD  (RUN TCC -pod x.c)
+            //   RUN "NAME.POD"[,a$] -> a program POD by path
+            //   RUN                 -> the in-memory BASIC program (clears vars,
+            //                          nests exec_text sharing the lexer, so EOL after).
             case KW_RUN:   lex_next();
+                           if (tok == T_VAR) {
+                               char cmd[NAME_LEN + 1]; s_copy(cmd, tok_var, sizeof cmd);
+                               if (sys_try_command(cmd, lx)) { tok = T_EOL; return; }
+                               if (!g_err) err("No such command in /sys");
+                               return;
+                           }
+                           if (tok != T_EOL && tok != T_COLON) { pod_run_program(); return; }
                            clear_vars();
                            run_program(0, 0); tok = T_EOL; return;
+            case KW_PODLOAD:  stmt_podload();  return;
+            case KW_PODFREE:  stmt_podfree();  return;
+            case KW_PODINFO:  stmt_podinfo();  return;
             case KW_MOUSE:    stmt_mouse();    return;
             case KW_BPUT:     stmt_bput();     return;
             case KW_CLOSE:    stmt_close();    return;
@@ -276,6 +289,7 @@ static void exec_statement(void) {
             case KW_EDIT:     stmt_edit();     return;
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
                            for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;
+                           pod_reset();
                            seed_heap_reset(); coll_reset();
                            con_set_gfx_mode(1);   // back to the default coordinate regime
                            con_line_width(1); con_line_join(CON_JOIN_MITER); con_line_cap(CON_CAP_BUTT);
@@ -283,7 +297,21 @@ static void exec_statement(void) {
             default:       err("That keyword can't be used as a command");  return;
         }
     }
-    if (tok == T_VAR) { stmt_let(0); return; }   // implicit assignment
+    if (tok == T_VAR) {
+        // A statement that starts with a bare word can be a /sys command
+        // (`tcc -pod x.c`), the machine's shell layer. It is a command only when
+        // the word is used command-style: NOT `word = ...` and NOT the name of a
+        // variable or array already in play (those are assignments). This keeps
+        // the file probe off the hot assignment path.
+        const char *tail = lx;                    // raw text after the identifier
+        const char *q = tail; while (*q == ' ' || *q == '\t') q++;
+        if (*q != '=' && !var_lookup(tok_var) && !arr_find(tok_var)) {  // var_lookup: no create
+            char cmd[NAME_LEN + 1]; s_copy(cmd, tok_var, sizeof cmd);
+            if (sys_try_command(cmd, tail)) { tok = T_EOL; return; }
+            if (g_err) return;
+        }
+        stmt_let(0); return;                      // implicit assignment
+    }
     if (tok == T_QUERY || tok == T_PLING || tok == T_DOLLAR) { stmt_poke(); return; }
     if (tok == T_EQ) {                           // =<expr> : return a value from an FN
         lex_next();

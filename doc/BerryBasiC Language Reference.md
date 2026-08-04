@@ -4528,6 +4528,179 @@ dynarr sum 1..100 = 5050
 sorted E: 1 2 5 8 9
 ```
 
+# POD Executables
+
+A **seed** is a fragment of native code you call from a BASIC program. A **POD** is the next step up: a *whole* native program, complete and self-contained, that you can drop on the card and run on its own. The name is the metaphor - a pod in nature is sealed, carries everything its contents need, survives being moved around, and can be opened and inspected. Those are exactly the properties of the format (see *The POD Executable Format* for the full design).
+
+You build a POD from C with the BerryBasiC C compiler, in one step:
+
+```sh
+tcc -pod hello.c -o HELLO.POD
+```
+
+The result is a flat, position-independent image wrapped in a 64-byte header and a run of chunks, every byte protected by a CRC. Crucially, a POD **declares up front which machine capabilities it needs** - console, files, graphics, GPIO, and so on. When the loader runs it, it hands the POD a services table containing *only* the groups it declared; everything else is a refusal stub. A POD that never asked for GPIO has no way to reach a pin, because the function pointer simply is not there. That declaration is not documentation, it is the mechanism.
+
+> Like seeds, PODs are AArch64 code and run only on the Pi (and QEMU). On a host test build the loader and all its integrity checks still work - handy for inspecting a POD - but entering one raises `PODs run on the Pi, not the host build`.
+
+There are two kinds. A **program** POD has an entry point and runs to completion; a bare `CAT` shows it with a size in bytes. An **extension** POD has no entry point - instead it *registers keywords*, adding new words to the language for as long as it stays loaded, exactly like a keyword seed but capability-scoped.
+
+### RUN "NAME.POD"
+
+Loads and runs a program POD. A bare name is resolved on the data card (with `.POD` assumed if you give no extension); an optional string is passed to the program as its argument:
+
+```basic
+RUN "HELLO.POD"
+RUN "PLOT.POD", "sine"
+```
+
+`RUN` with a string is the POD form; `RUN` on its own still runs the BASIC program in memory. When the POD returns, its exit status is available (0 means success).
+
+### PODLOAD "NAME.POD"
+
+Loads an *extension* POD and adds its keywords to the language. After loading, the new words are used directly, with no further ceremony:
+
+```basic
+PODLOAD "HYPOT.POD"
+PRINT PYTHAG(3, 4)        : REM -> 5, from the POD's PYTHAG keyword
+```
+
+A keyword name that is already taken (by a built-in, a seed, or another POD) is refused, so loading a POD can never silently shadow something.
+
+### PODFREE "NAME"
+
+Unloads a resident extension POD by its name (the `name=` from its provenance record), removing its keywords again:
+
+```basic
+PODFREE "hypot"
+```
+
+### PODINFO "NAME.POD"
+
+Prints a POD's provenance, size, declared capabilities and the reason it gives for each - **without running it**. This is the transparency feature made concrete: before running an unfamiliar binary you can see, on the machine itself, who built it, from what, and what it wants to touch.
+
+```basic
+PODINFO "HELLO.POD"
+```
+```text
+name : hello
+vers : 1.0
+auth : fritzone
+date : 2026-08-03T18:36:11Z
+tool : tcc-0.9.28rc-berry
+desc : smallest useful POD: greets the console and exits
+kind : program
+size : 8192 bytes
+caps : CONSOLE
+need : CONSOLE=prints a greeting
+```
+
+### PODCAPS(NAME.POD)
+
+Returns a POD's capability bitmask as a number, for a program that wants to check what a POD will ask for before deciding to run it:
+
+```basic
+IF PODCAPS("PLOT.POD") AND 64 THEN PRINT "This POD drives GPIO pins."
+```
+
+The example program `PODDEMO.BAS` on the card walks through all of these.
+
+### Commands live in /sys
+
+The card has a **`/sys` directory**, and any POD in it is a *command*. Type its name at the prompt (or `RUN` it) and the rest of the line is handed to it as arguments, exactly like a shell:
+
+```basic
+echo hello world          : REM runs /sys/ECHO.POD  -> hello world
+sum 40 2 100              : REM runs /sys/SUM.POD   -> 142
+RUN echo also works
+```
+
+A word is treated as a command only when it is used command-style - not `word = ...` and not the name of a variable or array already in use - so ordinary BASIC is untouched. The command receives a proper `argv`: `echo hello world` arrives as `{ "echo", "hello", "world" }`, and a `"quoted argument"` stays a single element. The two examples above (`echo`, `sum`) ship in `/sys`; drop your own POD in there and it becomes a command with no further ceremony. This is how the machine grows: the shell is just PODs.
+
+### The compiler on the machine
+
+The most important command in `/sys` is **`tcc`**: the Tiny C Compiler, itself a POD. The machine is self-hosting - you can write C on it and compile it into a POD, on the machine, with no other computer involved:
+
+```basic
+tcc -pod GEN.C -o GEN.POD       : REM compile a C source into a POD
+RUN "GEN.POD"                    : REM and run what you just built
+```
+
+A source that uses only the services table needs just `#include <pod.h>`, which the compiler finds in `/sys/include` on its own:
+
+```c
+#include <pod.h>
+POD_NAME("gen")
+POD_NEEDS(CAP_CONSOLE, "CONSOLE=greets")
+int pod_main(const PodServices *s, int argc, const char *const *argv)
+{
+    s->puts("hello from a POD compiled on the Pi!\n", 37);
+    return 0;
+}
+```
+
+`tcc` also compiles to ordinary objects (`tcc -c FILE.C -o FILE.O`) and understands its usual options (`tcc -v`, `tcc -hh`). Because the card is an uppercase 8.3 filesystem, `FILE.C` is recognised as C source without needing `-x c`.
+
+### Seed packets: static libraries
+
+Reusable C code shared between PODs lives in a **seed packet**, a `.PKT` file - a collection of compiled objects with an index of the symbols each defines. A packet is a build-time convenience only; it never appears at run time, and nothing in a finished POD can tell it was built with one.
+
+Create a packet from objects:
+
+```basic
+tcc -c TRIG.C -o TRIG.O
+tcc -c FIXED.C -o FIXED.O
+tcc -pkt MATH.PKT TRIG.O FIXED.O      : REM build the packet
+tcc -pkt list MATH.PKT                 : REM inspect it
+```
+
+Link a POD against one with `-l` (packets are searched in `/SYS/LIB`):
+
+```basic
+tcc -pod MANDEL.C -l MATH -o MANDEL.POD
+```
+
+The linker pulls in only the members a POD actually uses - reference one function from a member and the whole member comes in, so keep each source file small and single-purpose. Two properties are worth knowing:
+
+- **Capabilities compose automatically.** Each member records the capabilities its code needs, and linking a member *unions* those into the resulting POD's declared capabilities. So if you link against a packet whose routines touch the SD card, `CAP_FILES` appears in your POD's header on its own, `PODINFO` shows it, and the user's policy still gets to refuse it. A library cannot smuggle a capability past the header.
+- **A POD that links at all, runs.** Everything is resolved at build time and baked in; there are no run-time dependencies, no versions to match, no library that can be missing on someone else's card.
+
+### grow: the build system
+
+Compiling and packing by hand gets tedious once a project has more than one source file. **`grow`** is the build system, and it runs on the machine too. You describe *what exists* in a plain-text file named `GROW` - never *how to build it* - and `grow` works out the rest:
+
+```
+# a packet and a pod that uses it
+
+project demo
+    out    build
+
+packet mlib
+    source MATHLIB.C
+
+pod app
+    source APP.C
+    use    mlib
+    needs  CONSOLE
+```
+
+Then:
+
+```basic
+grow                        : REM build everything, in dependency order
+grow list                   : REM show the targets
+grow clean                  : REM delete the outputs
+```
+
+`grow` compiles each source with `tcc`, packs a `packet` block into a `.PKT`, links a `pod` block into a `.POD` pulling in the packets it lists under `use`, and works out that the packet must be built before the pod that consumes it. It is declarative: there are no rules, recipes or shell commands, because there is no shell - the build algorithm is fixed and lives in the tool.
+
+The payoff is the capability check. `grow` reads back the capabilities of what it actually linked and, if a `pod` lists `needs`, asserts that everything derived is declared:
+
+```text
+gapp: uses CAP_GPIO but 'needs' does not list it
+```
+
+So a library that quietly reaches for GPIO cannot slip that capability into your POD without the build telling you. The same audit `PODINFO` shows a user at load time, `grow` gives you at build time. Blocks are `project` (globals), `packet` (a library) and `pod` (an executable); the full property tables are in the doc *"GROW - the BerryBasiC Build System"*.
+
 # Building BerryBasiC from Source
 
 BerryBasiC is a bare-metal operating environment for the Raspberry Pi 4: there is no Linux, no libraries, no runtime underneath it - the kernel *is* the computer. You build it on a Linux PC with a cross-compiler, then either run it in the **QEMU** emulator or flash it to an SD card and boot a real Pi 4. This chapter covers the toolchain, the dependencies, and every build command.
@@ -4780,7 +4953,7 @@ Both paths feed raw 8-byte HID reports into `usb_hid.c`, the shared decoder that
 - **`drivers/sound.c`** drives a square-wave voice on the 3.5 mm jack through the **PWM** hardware - real-hardware only, since QEMU doesn't model PWM.
 - **`drivers/gpio.c`** and **`drivers/i2c.c`** expose the 40-pin header: direct pin control (BCM numbering) and an I2C master on BSC1. These back the `PIN`/`PINMODE` and `I2C...` words, and the seed GPIO/graphics services.
 
-## The Platform Starts- how BASIC Stays Hardware-agnostic
+## The Platform Starts: how BASIC Stays Hardware-agnostic
 
 Everything above is reached through the headers in `include/`. `console.h` is the largest: `con_putc`, `con_getline_ed`, `con_cls`, the whole graphics family (`con_line`, `con_circle`, `con_gtext`, ...), `con_mouse`, and so on. `storage.h`, `gpio.h`, `i2c.h`, `ttf.h`, `gfx.h`, `sound.h` and `image.h` cover the rest. `basic.c` includes only these - never a register address, never a driver header. On the Pi, `kernel.c` and the drivers implement them (converting BASIC's logical 1280×1024 bottom-left coordinates into physical pixels, for instance); on Linux, `host/*.c` implement them against stdio and stubs. This is the seam that lets one interpreter be both a Pi kernel and a testable Linux binary - and it is the same seam the native **seeds** reach back through, via the services table in `seed.h`.
 

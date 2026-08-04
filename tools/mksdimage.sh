@@ -83,6 +83,57 @@ if compgen -G "$ROOT/build/seeds/*.sed" >/dev/null; then
         mcopy -i "$DATAPART" "$sed" "::SEED/$(basename "$sed" | tr '[:lower:]' '[:upper:]')"
     done
 fi
+# POD executables (built by 'make pods' with the BerryBasiC tcc). Example PODs go
+# in the data-partition root, where RUN "NAME.POD" / PODLOAD / PODINFO resolve a
+# bare name, and also in /POD (the spec's home for extension PODs).
+if compgen -G "$ROOT/build/pods/*.POD" >/dev/null; then
+    mmd -i "$DATAPART" ::POD || true
+    for pod in "$ROOT"/build/pods/*.POD; do
+        [ -e "$pod" ] || break
+        base="$(basename "$pod" | tr '[:lower:]' '[:upper:]')"
+        mcopy -i "$DATAPART" "$pod" "::$base"
+        mcopy -i "$DATAPART" "$pod" "::POD/$base"
+    done
+fi
+
+# System command PODs go in /sys. A bare word typed at the prompt (or RUN word)
+# whose name matches /sys/WORD.POD runs it with the rest of the line as its
+# arguments: this is how the machine becomes command-driven ('echo', 'sum',
+# 'tcc', ...). tcc.POD is the self-hosted C compiler.
+if compgen -G "$ROOT/build/sys/*.POD" >/dev/null; then
+    mmd -i "$DATAPART" ::SYS || true
+    for pod in "$ROOT"/build/sys/*.POD; do
+        [ -e "$pod" ] || break
+        mcopy -i "$DATAPART" "$pod" "::SYS/$(basename "$pod" | tr '[:lower:]' '[:upper:]')"
+    done
+fi
+
+# Headers for the on-machine compiler: /sys/include is tcc's default include
+# path, so `tcc -pod prog.c` finds <pod.h> (and the pod-libc headers) with no
+# flags. This is what makes the machine self-hosting.
+mmd -i "$DATAPART" ::SYS 2>/dev/null || true
+mmd -i "$DATAPART" ::SYS/INCLUDE 2>/dev/null || true
+mmd -i "$DATAPART" ::SYS/INCLUDE/SYS 2>/dev/null || true
+mcopy -i "$DATAPART" "$ROOT/third_party/tinycc/include/pod.h" ::SYS/INCLUDE/POD.H
+for h in "$ROOT"/podlib/include/*.h; do
+    [ -e "$h" ] || break
+    mcopy -i "$DATAPART" "$h" "::SYS/INCLUDE/$(basename "$h" | tr '[:lower:]' '[:upper:]')"
+done
+for h in "$ROOT"/podlib/include/sys/*.h; do
+    [ -e "$h" ] || break
+    mcopy -i "$DATAPART" "$h" "::SYS/INCLUDE/SYS/$(basename "$h" | tr '[:lower:]' '[:upper:]')"
+done
+
+# Seed packets (.PKT static libraries) go in /SYS/LIB, tcc's default library
+# path, so `tcc -pod prog.c -l MATH` finds MATH.PKT with no flags.
+if compgen -G "$ROOT/build/lib/*.PKT" >/dev/null; then
+    mmd -i "$DATAPART" ::SYS/LIB 2>/dev/null || true
+    for pkt in "$ROOT"/build/lib/*.PKT; do
+        [ -e "$pkt" ] || break
+        mcopy -i "$DATAPART" "$pkt" "::SYS/LIB/$(basename "$pkt" | tr '[:lower:]' '[:upper:]')"
+    done
+fi
+
 # Image files for LOADSPRITE (PNG/JPEG/BMP). Names are upper-cased to match the
 # 8.3 filesystem; keep basenames to 8 chars so e.g. images/ball.png -> BALL.PNG.
 for img in "$ROOT"/images/*.png "$ROOT"/images/*.jpg "$ROOT"/images/*.bmp; do

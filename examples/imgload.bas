@@ -1,6 +1,6 @@
 10 REM Load an image file (PNG/JPEG/BMP) from the SD card as a sprite.
 20 REM Put an image called PIC.PNG on the data partition first.
-30 MODE 0
+30 MODE 1
 40 PIC% = LOADSPRITE("PIC.PNG")
 50 IF PIC% = 0 THEN PRINT "Could not load PIC.PNG" : END
 60 W = SPRW(PIC%) : H = SPRH(PIC%)
