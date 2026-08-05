@@ -212,6 +212,12 @@ $(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR
 # results onto the data card so RUN "NAME.POD" / PODLOAD find them.
 TCC_DIR  = third_party/tinycc
 POD_TCC  = $(TCC_DIR)/arm64-tcc
+# The unified services table (seed/berry_services.h) is the single source of
+# truth for both the seed and POD ABI. The compiler ships its own include tree,
+# so mirror the header there; it is a generated copy (see .gitignore). Every POD
+# rule depends on $(POD_TCC), which order-only-depends on this, so the copy is
+# refreshed before any POD is compiled.
+TCC_SVC_HDR = $(TCC_DIR)/include/berry_services.h
 POD_SRC  = $(wildcard $(TCC_DIR)/examples/pod_*.c)
 POD_OUT  = $(patsubst $(TCC_DIR)/examples/pod_%.c,$(BUILD_DIR)/pods/%.POD,$(POD_SRC))
 # System command PODs. pods/*.c are self-contained (a bare pod_main); pods/clib/*.c
@@ -223,12 +229,50 @@ CLIB_SRC = $(wildcard pods/clib/*.c)
 CLIB_OUT = $(patsubst pods/clib/%.c,$(BUILD_DIR)/sys/%.POD,$(CLIB_SRC))
 # tcc itself, built as a POD (self-hosting C compiler on the machine).
 TCC_POD  = $(BUILD_DIR)/sys/tcc.POD
-# Seed packets (.PKT): static libraries in /SYS/LIB. pods/lib/*.c form MATH.PKT.
+# Seed packets (.PKT): static libraries in /SYS/LIB. pods/lib/*.c form MATH.PKT;
+# GFX.PKT is the BGI-style <graphics.h> library over the graphics services.
 PKT_LIB_SRC = $(wildcard pods/lib/*.c)
 PKT_LIB_OBJ = $(patsubst pods/lib/%.c,$(BUILD_DIR)/lib/%.o,$(PKT_LIB_SRC))
 MATH_PKT    = $(BUILD_DIR)/lib/MATH.PKT
+GFX_PKT     = $(BUILD_DIR)/lib/GFX.PKT
+# CORE.PKT is the pod-libc (stdio/stdlib/string/math128...) as a packet; crt0.o
+# is the entry shim, shipped standalone so a main()-based POD can force it in.
+# lib-arm64 (128-bit soft-float) is NOT a CORE.PKT member: the on-machine packet
+# linker loops on its symbol table. It ships as SOFTFP.O, a plain object grow
+# force-links for any pod that uses CORE (printf/double math reach it).
+CORE_OBJ    = $(addprefix $(BUILD_DIR)/lib/pl_,stdio.o stdlib.o string.o misc.o extra.o setjmp.o)
+CORE_PKT    = $(BUILD_DIR)/lib/CORE.PKT
+CRT0_OBJ    = $(BUILD_DIR)/lib/crt0.o
+SOFTFP_OBJ  = $(BUILD_DIR)/lib/pl_lib-arm64.o
+PODLIB_CC   = $(POD_TCC) -B$(TCC_DIR) -nostdinc -Ipodlib/include -I$(TCC_DIR)/include
 
-pods: $(POD_OUT) $(SYS_OUT) $(CLIB_OUT) $(TCC_POD) $(MATH_PKT)
+# The text editor (programs/edit/) is a pod-libc program; it ships to /SYS as the
+# `ed` command (EDIT is a reserved BASIC keyword). Depends on the ABI header so
+# an ABI change rebuilds it.
+EDIT_POD = $(BUILD_DIR)/sys/ED.POD
+
+pods: $(POD_OUT) $(SYS_OUT) $(CLIB_OUT) $(TCC_POD) $(MATH_PKT) $(GFX_PKT) $(CORE_PKT) $(CRT0_OBJ) $(SOFTFP_OBJ) $(EDIT_POD)
+
+$(EDIT_POD): programs/edit/edit.c $(TCC_SVC_HDR) $(POD_TCC) tools/podcc.sh \
+             $(wildcard podlib/src/*) $(wildcard podlib/include/*) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/sys
+	tools/podcc.sh $< $@
+	@echo "  built /sys editor $@"
+
+$(BUILD_DIR)/lib/pl_%.o: podlib/src/%.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(PODLIB_CC) -c $< -o $@
+$(BUILD_DIR)/lib/pl_setjmp.o: podlib/src/setjmp.S $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(PODLIB_CC) -c $< -o $@
+$(BUILD_DIR)/lib/pl_lib-arm64.o: $(TCC_DIR)/lib/lib-arm64.c $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(PODLIB_CC) -c $< -o $@
+$(CRT0_OBJ): podlib/src/crt0.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(PODLIB_CC) -c $< -o $@
+$(CORE_PKT): $(CORE_OBJ) $(POD_TCC)
+	$(POD_TCC) -pkt $@ $(CORE_OBJ)
 
 $(BUILD_DIR)/lib/%.o: pods/lib/%.c $(POD_TCC) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/lib
@@ -236,6 +280,14 @@ $(BUILD_DIR)/lib/%.o: pods/lib/%.c $(POD_TCC) | $(BUILD_DIR)
 # `tcc -pkt` derives the symbol table and capabilities from the members.
 $(MATH_PKT): $(PKT_LIB_OBJ) $(POD_TCC)
 	$(POD_TCC) -pkt $@ $(PKT_LIB_OBJ)
+
+# The graphics library: one member (graphics.o), compiled against the pod-libc
+# headers, packed into GFX.PKT. Its .pod.desc declares CAP_GRAPHICS | CAP_TIME,
+# so a POD that links it composes those capabilities automatically.
+$(GFX_PKT): podlib/src/graphics.c podlib/include/graphics.h $(TCC_DIR)/include/pod.h $(POD_TCC)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(POD_TCC) -B$(TCC_DIR) -nostdinc -Ipodlib/include -I$(TCC_DIR)/include -c $< -o $(BUILD_DIR)/lib/graphics.o
+	$(POD_TCC) -pkt $@ $(BUILD_DIR)/lib/graphics.o
 
 # pod-libc programs: compiled and linked against the runtime by tools/podcc.sh.
 $(BUILD_DIR)/sys/%.POD: pods/clib/%.c $(POD_TCC) tools/podcc.sh \
@@ -250,8 +302,12 @@ $(TCC_POD): $(POD_TCC) tools/buildtcc.sh $(TCC_DIR)/tcc_pod.c \
             $(wildcard podlib/src/*) $(wildcard podlib/include/*) $(wildcard podlib/include/sys/*)
 	tools/buildtcc.sh $@
 
+# Mirror the single-source services header into the compiler's include tree.
+$(TCC_SVC_HDR): seed/berry_services.h
+	cp $< $@
+
 # Build the AArch64 cross tcc once (it is what emits target PODs on this host).
-$(POD_TCC):
+$(POD_TCC): | $(TCC_SVC_HDR)
 	@cd $(TCC_DIR) && [ -f config.mak ] || ./configure >/dev/null
 	@$(MAKE) --no-print-directory -C $(TCC_DIR) arm64-tcc
 

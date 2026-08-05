@@ -27,7 +27,7 @@ typedef struct {
     uint64_t caps;
     uint32_t image_size, split_off, init_size, entry_off, flags;
     char     name[16];    // MARK name=, for PODFREE
-    PodServices svc;      // this POD's capability-gated services table
+    BerryServices svc;      // this POD's capability-gated services table
 } pod_slot_t;
 static pod_slot_t pod_slots[POD_MAX];
 
@@ -84,16 +84,36 @@ static uint32_t pod_dn_timecs(void)                            { return 0; }
 static void    *pod_dn_alloc(unsigned a)                       { (void)a; return 0; }
 static void     pod_dn_free(void *a)                           { (void)a; }
 static void    *pod_dn_realloc(void *a, unsigned b)            { (void)a; (void)b; return 0; }
+static void    *pod_dn_alloca(unsigned a, unsigned b)          { (void)a; (void)b; return 0; }
 static int      pod_dn_remove(const char *a)                   { (void)a; return -1; }
 static int      pod_dn_spawn(const char *a, int b, const char *const *c) { (void)a; (void)b; (void)c; return -1; }
 static int      pod_dn_mkdir(const char *a)                    { (void)a; return -1; }
 static int      svc_pod_spawn(const char *path, int argc, const char *const *argv);
 static int      svc_pod_mkdir(const char *path) { return stg_mkdir(path); }
+// --- refusal stubs for the ABI v4 surface (ungranted -> no-op / harmless) ---
+static double  *pod_dn_numarr(const char *a, int *b)           { (void)a; if (b) *b = 0; return 0; }
+static double  *pod_dn_recarr(const char *a, int *b, int *c)   { (void)a; if (b) *b = 0; if (c) *c = 0; return 0; }
+static int      pod_dn_recfield(const char *a, const char *b)  { (void)a; (void)b; return -1; }
+static int      pod_dn_recget(const char *a, int b, const char *c, char *d, int e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
+static void     pod_dn_recset(const char *a, int b, const char *c, const char *d, int e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
+static long     pod_dn_longi(int a)                            { (void)a; return -1; }
+static int      pod_dn_ii(int a, int b)                        { (void)a; (void)b; return -1; }
+static void     pod_dn_mouse(int *a, int *b, int *c)           { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
+static void     pod_dn_scrsz(int *a, int *b)                   { if (a) *a = 0; if (b) *b = 0; }
+static uint32_t pod_dn_getpix(int a, int b)                    { (void)a; (void)b; return 0; }
+static void     pod_dn_circ(int a, int b, int c, uint32_t d)   { (void)a; (void)b; (void)c; (void)d; }
+static void     pod_dn_fpoly(const int *a, int b, uint32_t c)  { (void)a; (void)b; (void)c; }
+static void     pod_dn_clip4(int a, int b, int c, int d)       { (void)a; (void)b; (void)c; (void)d; }
+static void     pod_dn_void(void)                              { }
+static void     pod_dn_iii(int a, int b, int c)               { (void)a; (void)b; (void)c; }
+static void     pod_dn_pline(const int *a, int b, int c, uint32_t d) { (void)a; (void)b; (void)c; (void)d; }
+static int      pod_dn_fontload(const char *a)                 { (void)a; return 0; }
+static void     pod_dn_gtext(int a, int b, const char *c, int d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
 
 // Fill a services table: every slot a refusal stub, then the granted groups
 // overwritten with the real service callbacks (defined in interp_seed.inc).
-static void pod_build_svc(PodServices *s, uint64_t caps) {
-    s->abi_version = POD_ABI_VERSION;
+static void pod_build_svc(BerryServices *s, uint64_t caps) {
+    s->abi_version = BERRY_ABI_VERSION;
     s->puts = pod_dn_puts; s->putc = pod_dn_putc; s->getkey = pod_dn_geti; s->inkey = pod_dn_int_i;
     s->get_num = pod_dn_getnum; s->set_num = pod_dn_setnum;
     s->get_str = pod_dn_getstr; s->set_str = pod_dn_setstr;
@@ -104,32 +124,75 @@ static void pod_build_svc(PodServices *s, uint64_t caps) {
     s->gpio_mode = pod_dn_gmode; s->gpio_write = pod_dn_gwrite; s->gpio_read = pod_dn_int_i;
     s->time_cs = pod_dn_timecs;
     s->alloc = pod_dn_alloc; s->free = pod_dn_free;
-    s->realloc = pod_dn_realloc; s->file_remove = pod_dn_remove;
+    s->realloc = pod_dn_realloc; s->alloc_aligned = pod_dn_alloca;
+    s->file_remove = pod_dn_remove;
     s->spawn = pod_dn_spawn; s->mkdir = pod_dn_mkdir;
+    // v4 defaults (all refusals; overwritten below by the granted groups)
+    s->num_array = pod_dn_numarr; s->rec_array = pod_dn_recarr; s->rec_field = pod_dn_recfield;
+    s->rec_get_str = pod_dn_recget; s->rec_set_str = pod_dn_recset;
+    s->file_size = pod_dn_longi; s->file_eof = pod_dn_int_i;
+    s->gpio_avail = pod_dn_geti; s->gpio_pull = pod_dn_ii; s->gpio_set = pod_dn_clear;
+    s->gpio_clr = pod_dn_clear; s->gpio_level = pod_dn_timecs; s->gpio_wait = pod_dn_gmode;
+    s->mouse = pod_dn_mouse; s->keymods = pod_dn_geti;
+    s->gfx_avail = pod_dn_geti; s->gfx_getpixel = pod_dn_getpix;
+    s->gfx_circle = pod_dn_circ; s->gfx_fillcircle = pod_dn_circ;
+    s->gfx_ellipse = pod_dn_rect; s->gfx_fillellipse = pod_dn_rect;
+    s->gfx_fillpoly = pod_dn_fpoly; s->gfx_flood = pod_dn_pixel;
+    s->gfx_clip = pod_dn_clip4; s->gfx_noclip = pod_dn_void;
+    s->gfx_line_style = pod_dn_iii; s->gfx_polyline = pod_dn_pline;
+    s->gfx_mode = pod_dn_geti; s->gfx_backbuffer = pod_dn_int_i;
+    s->gfx_flip = pod_dn_void; s->gfx_buffered = pod_dn_geti;
+    s->font_load = pod_dn_fontload; s->font_select = pod_dn_int_i;
+    s->font_size = pod_dn_putc; s->font_style = pod_dn_iii;
+    s->gfx_text = pod_dn_gtext; s->text_width = pod_dn_fopen; s->text_height = pod_dn_geti;
+    s->fmt_num = svc_fmt_num;                       // pure formatter: always available
+    s->set_return_str = pod_dn_puts;
+    s->vdu = pod_dn_putc;                           // (int)->void, harmless refusal
+    s->screen_size = pod_dn_scrsz;
 
     if (caps & POD_CAP_CONSOLE) {
         s->puts = svc_puts; s->putc = svc_putc; s->getkey = svc_getkey; s->inkey = svc_inkey;
+        s->mouse = svc_mouse; s->keymods = svc_keymods; s->vdu = svc_vdu;
+        s->screen_size = svc_screen_size;
     }
     if (caps & POD_CAP_VARS) {
         s->get_num = svc_get_num; s->set_num = svc_set_num;
         s->get_str = svc_get_str; s->set_str = svc_set_str;
+        s->num_array = svc_num_array;
+        s->rec_array = svc_rec_array; s->rec_field = svc_rec_field;
+        s->rec_get_str = svc_rec_get_str; s->rec_set_str = svc_rec_set_str;
     }
     if (caps & POD_CAP_FILES) {
         s->file_open = svc_file_open; s->file_close = svc_file_close;
         s->file_read = svc_file_read; s->file_write = svc_file_write; s->file_seek = svc_file_seek;
-        s->file_remove = svc_file_remove;
+        s->file_remove = svc_file_remove; s->file_size = svc_file_size; s->file_eof = svc_file_eof;
     }
     if (caps & POD_CAP_GRAPHICS) {
         s->gfx_width = svc_gfx_width; s->gfx_height = svc_gfx_height; s->gfx_clear = svc_gfx_clear;
         s->gfx_putpixel = svc_gfx_putpixel; s->gfx_line = svc_gfx_line; s->gfx_fillrect = svc_gfx_fillrect;
+        s->gfx_avail = svc_gfx_avail; s->gfx_getpixel = svc_gfx_getpixel;
+        s->gfx_circle = svc_gfx_circle; s->gfx_fillcircle = svc_gfx_fillcircle;
+        s->gfx_ellipse = svc_gfx_ellipse; s->gfx_fillellipse = svc_gfx_fillellipse;
+        s->gfx_fillpoly = svc_gfx_fillpoly; s->gfx_flood = svc_gfx_flood;
+        s->gfx_clip = svc_gfx_clip; s->gfx_noclip = svc_gfx_noclip;
+        s->gfx_line_style = svc_gfx_line_style; s->gfx_polyline = svc_gfx_polyline;
+        s->gfx_mode = svc_gfx_mode; s->gfx_backbuffer = svc_gfx_backbuffer;
+        s->gfx_flip = svc_gfx_flip; s->gfx_buffered = svc_gfx_buffered;
+        s->font_load = svc_font_load; s->font_select = svc_font_select;
+        s->font_size = svc_font_size; s->font_style = svc_font_style;
+        s->gfx_text = svc_gfx_text; s->text_width = svc_text_width; s->text_height = svc_text_height;
     }
     if (caps & POD_CAP_GPIO) {
         s->gpio_mode = svc_gpio_mode; s->gpio_write = svc_gpio_write; s->gpio_read = svc_gpio_read;
+        s->gpio_avail = svc_gpio_avail; s->gpio_pull = svc_gpio_pull;
+        s->gpio_set = svc_gpio_set; s->gpio_clr = svc_gpio_clr;
+        s->gpio_level = svc_gpio_level; s->gpio_wait = svc_gpio_wait;
     }
     if (caps & POD_CAP_TIME) s->time_cs = svc_time_cs;
-    if (caps & POD_CAP_HEAP) { s->alloc = svc_alloc; s->free = svc_free; s->realloc = svc_realloc; }
+    if (caps & POD_CAP_HEAP) { s->alloc = svc_alloc; s->free = svc_free; s->realloc = svc_realloc; s->alloc_aligned = svc_alloc_aligned; }
     if (caps & POD_CAP_SPAWN) s->spawn = svc_pod_spawn;
     if (caps & POD_CAP_DIRS)  s->mkdir = svc_pod_mkdir;
+    if (caps & POD_CAP_KEYWORD) s->set_return_str = svc_set_return_str;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +231,7 @@ static int pod_open(const char *path, pod_image_t *im, int silent_missing) {
         err("Not a POD file"); return 0;
     }
     if (pod_crc32c(d, 60) != pod_rd32(d + 60)) { err("POD header is damaged"); return 0; }
-    if (pod_rd16(d + 8) > POD_FORMAT_VERSION || pod_rd16(d + 10) > POD_ABI_VERSION) {
+    if (pod_rd16(d + 8) > POD_FORMAT_VERSION || pod_rd16(d + 10) > BERRY_ABI_VERSION) {
         err("POD needs a newer system"); return 0;
     }
     if ((int)pod_rd32(d + 16) != len) { err("POD is truncated"); return 0; }
@@ -291,16 +354,26 @@ static int pod_mark_get(const pod_image_t *im, const char *key, char *out, int o
 // Resolve a POD file name argument (a string expression) into a path, defaulting
 // the extension to .POD. Returns 1 on success with the path in `path`.
 // ---------------------------------------------------------------------------
+// PODLOAD/PODINFO/RUN "NAME.POD": a quoted or bare path, defaulting to .POD. These
+// are typed as commands, so a bare name (PODINFO HELLO) is the norm. The keyword
+// is already consumed and the path is the current token, so rewind the cursor to
+// its start and read it raw.
 static int pod_arg_path(char *path, int pathsz) {
+    lx = tok_start;
+    return read_path(path, pathsz, ".POD");
+}
+
+// Same .POD default, but from a string *expression* - for PODCAPS(...), which is
+// a value function used inside expressions where a variable (PODCAPS(f$)) or a
+// built path must still evaluate rather than be taken literally.
+static int pod_expr_path(char *path, int pathsz) {
     value_t v = eval_expr();
     if (g_err) return 0;
     if (!v.is_str) { err("Expected a file name"); return 0; }
     int p = 0, has_dot = 0;
-    for (int i = 0; i < v.len && p < pathsz - 5; i++) { path[p++] = v.str[i]; if (v.str[i]=='.') has_dot = 1; }
+    for (int i = 0; i < v.len && p < pathsz - 5; i++) { path[p++] = v.str[i]; if (v.str[i] == '.') has_dot = 1; }
     path[p] = 0;
-    if (!has_dot && p + 4 < pathsz) {
-        path[p++]='.'; path[p++]='P'; path[p++]='O'; path[p++]='D'; path[p]=0;
-    }
+    if (!has_dot && p + 4 < pathsz) { path[p++]='.'; path[p++]='P'; path[p++]='O'; path[p++]='D'; path[p]=0; }
     return 1;
 }
 
@@ -600,7 +673,7 @@ static value_t eval_podcaps(void) {
     lex_next();                                         // consume PODCAPS
     if (!expect(T_LP)) return v_num(0);
     char path[96];
-    if (!pod_arg_path(path, sizeof path)) return v_num(0);
+    if (!pod_expr_path(path, sizeof path)) return v_num(0);
     if (!expect(T_RP)) return v_num(0);
     pod_image_t im;
     if (!pod_open(path, &im, 0)) return v_num(0);

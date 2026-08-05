@@ -38,6 +38,7 @@ int  con_inkey(int centiseconds);      // wait up to n centiseconds for a key; -
 int  con_pos(void);                    // text cursor column (POS)
 int  con_vpos(void);                   // text cursor row (VPOS)
 int  con_rows(void);                   // text rows on screen, or 0 if unpaged (host/tests)
+int  con_cols(void);                   // text columns on screen, or 0 (host/tests)
 // Show the boot logo + banner if appropriate (target QEMU only). Returns 1 if it
 // printed `banner` itself (beside the logo); 0 if the caller should print it.
 int  con_splash(const char *banner);

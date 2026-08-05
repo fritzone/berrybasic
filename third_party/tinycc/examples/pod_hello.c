@@ -13,7 +13,7 @@ POD_AUTHOR("fritzone")
 POD_DESCRIPTION("smallest useful POD: greets the console and exits")
 POD_NEEDS(CAP_CONSOLE, "CONSOLE=prints a greeting")
 
-int pod_main(const PodServices *svc, int argc, const char *const *argv)
+int pod_main(const BerryServices *svc, int argc, const char *const *argv)
 {
     static const char msg[] = "hello from a pod\n";
     svc->puts(msg, sizeof msg - 1);

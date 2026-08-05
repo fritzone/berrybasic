@@ -30,8 +30,8 @@ void icache_sync(const void *addr, unsigned long size)
 
 // Call the seed. It runs synchronously on the current EL1 stack and returns
 // normally; a faulting seed is caught by the kernel's exception vectors.
-int seed_invoke(seed_entry fn, const SeedServices *svc,
-                const seed_arg *argv, int argc, double *out_ret)
+int seed_invoke(seed_entry fn, const BerryServices *svc,
+                const berry_arg *argv, int argc, double *out_ret)
 {
     *out_ret = fn(svc, argv, argc);
     return 0;
@@ -39,7 +39,7 @@ int seed_invoke(seed_entry fn, const SeedServices *svc,
 
 // Enter a POD program at its entry point. Runs synchronously on the current EL1
 // stack and returns normally; a fault is caught by the kernel's vectors.
-int pod_run_main(const void *entry, const PodServices *svc,
+int pod_run_main(const void *entry, const BerryServices *svc,
                  int argc, const char *const *argv, int *status)
 {
     *status = ((pod_main_fn)entry)(svc, argc, argv);
@@ -47,8 +47,8 @@ int pod_run_main(const void *entry, const PodServices *svc,
 }
 
 // Invoke a POD keyword handler (same convention as a seed keyword).
-int pod_run_kw(const void *entry, const PodServices *svc,
-               const pod_arg *argv, int argc, double *out)
+int pod_run_kw(const void *entry, const BerryServices *svc,
+               const berry_arg *argv, int argc, double *out)
 {
     *out = ((pod_kw_fn)entry)(svc, argv, argc);
     return 0;

@@ -23,7 +23,7 @@ POD_NEEDS(CAP_CONSOLE | CAP_FILES | CAP_HEAP | CAP_DIRS | CAP_SPAWN,
           "CONSOLE=progress; FILES=sources and outputs; HEAP=working memory; "
           "DIRS=the output directory; SPAWN=runs tcc for each step")
 
-extern const PodServices *pod_svc;   /* stashed by the pod-libc crt0 */
+extern const BerryServices *pod_svc;   /* stashed by the pod-libc crt0 */
 
 #define TCC_PATH   "/sys/TCC.POD"
 #define MAX_TARGET 32
@@ -417,9 +417,19 @@ static int build_pod(Target *t) {
         if (nobj < 31) nobj++;
     }
 
+    /* A pod that uses CORE is a main()-based pod-libc program: the entry lives
+       in crt0.o, which the closure would not pull on its own, so link it first.
+       SOFTFP.O is the 128-bit soft-float runtime; it is shipped as a plain object
+       (not a CORE.PKT member) because the on-machine packet linker loops on its
+       symbol table, and printf/double math reach it, so force it in too. */
+    int uses_core = 0;
+    for (const char *u = t->use; *u; u++)
+        if ((u[0]=='C'||u[0]=='c') && (u[1]=='O'||u[1]=='o') && (u[2]=='R'||u[2]=='r') && (u[3]=='E'||u[3]=='e')) { uses_core = 1; break; }
+
     /* link the POD */
     char pod[64]; out_path(t, "POD", pod, sizeof pod);
     arg_reset(); arg1("tcc"); arg1("-pod");
+    if (uses_core) { arg1("/sys/lib/CRT0.O"); arg1("/sys/lib/SOFTFP.O"); }
     for (int i = 0; i < nobj; i++) arg1(objs[i]);
     for (int i = 0; i < nused; i++) {
         if (used[i][0] == 1) arg2("-l", used[i] + 1);      /* system packet */

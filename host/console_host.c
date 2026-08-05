@@ -78,6 +78,7 @@ int con_inkey(int centiseconds) { (void)centiseconds; return -1; }   // no raw s
 int con_pos(void)  { return 0; }
 int con_vpos(void) { return 0; }
 int con_rows(void) { return 0; }        // no paging on the host CLI
+int con_cols(void) { return 0; }        // unknown on the host CLI
 int con_splash(const char *banner) { (void)banner; return 0; }   // no logo on host; caller prints banner
 
 // Graphics are framebuffer-only; the host backend has no display, so these are

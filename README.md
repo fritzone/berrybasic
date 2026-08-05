@@ -139,7 +139,7 @@ SEED_EXPORT(seed) {
 }
 ```
 
-There are several **BASIC examples** in [`examples/`](https://claude.ai/chat/examples/) — graphics demos, Mandelbrot, fractals, sound, GPIO, I²C scanning, file I/O, events, collections — and some **seed examples** in [`seed/examples/`](https://claude.ai/chat/seed/examples/).
+There are several **BASIC examples** in [`examples/`](https://claude.ai/chat/examples/), grouped by what they show — `graphics/` (Mandelbrot, fractals, sprites, TrueType text), `language/` (functions, records, collections, strings), `files/`, `hardware/` (GPIO, I²C, sound, mouse, keyboard, events), `modules/`, `seeds/` and `pods/`. Each group is self-contained (an example that loads an asset carries its own copy), and on the SD card they ship under `/EXAMPLES/<GROUP>/`, so `CD "/EXAMPLES/GRAPHICS"` then `CAT` shows the lot. There are also **seed examples** in [`seed/examples/`](https://claude.ai/chat/seed/examples/).
 
 ---
 

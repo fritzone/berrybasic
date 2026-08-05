@@ -23,7 +23,7 @@ declares its manifest with the `POD_*` macros:
 #include <pod.h>
 POD_NAME("hello")
 POD_NEEDS(CAP_CONSOLE, "CONSOLE=prints a greeting")
-int pod_main(const PodServices *svc, int argc, const char *const *argv) {
+int pod_main(const BerryServices *svc, int argc, const char *const *argv) {
     static const char m[] = "hi\n"; svc->puts(m, sizeof m - 1); return 0;
 }
 ```
@@ -36,7 +36,7 @@ testing on the build host.
 
 | File | Change |
 |------|--------|
-| `include/pod.h`   | Author header: `PodServices`, `CAP_*`, `pod_main`, and the manifest macros (`POD_NAME`/`POD_NEEDS`/`POD_KEYWORD`/...) that emit records into a `.pod.desc` section. |
+| `include/pod.h`   | Author header: `BerryServices`, `CAP_*`, `pod_main`, and the manifest macros (`POD_NAME`/`POD_NEEDS`/`POD_KEYWORD`/...) that emit records into a `.pod.desc` section. |
 | `tccpod.c`        | The writer: flattens the laid-out image, computes `split_off`/`init_size`/`image_size`/`entry_off`, reads the manifest, emits the chunks and every CRC-32C, and harvests absolute relocations for `RLOC`. |
 | `tccelf.c`        | Dispatches to `tcc_output_pod` from `tcc_write_elf_file`; calls `pod_collect_relocs` after the GOT is filled (before `.rela` is reordered away). |
 | `arm64-gen.c`     | For POD output, addresses local symbols with a PC-relative `ADRP+ADD` pair instead of the GOT, so POD code is genuinely position independent. |

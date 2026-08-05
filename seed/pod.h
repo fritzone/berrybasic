@@ -10,15 +10,17 @@
 // seed.h) into a whole capability-scoped program or vocabulary.
 //
 // This header is the loader's view of the format: the header layout, the chunk
-// tags, the capability bits, and the PodServices table the loader hands a POD at
+// tags, the capability bits, and the BerryServices table the loader hands a POD at
 // entry.  It is the companion of the compiler-side header shipped with the
-// BerryBasiC tcc (third_party/tinycc/include/pod.h) — the PodServices layout,
-// the CAP_* values and POD_ABI_VERSION below MUST stay identical to it.
+// BerryBasiC tcc (third_party/tinycc/include/pod.h) — the BerryServices layout,
+// the CAP_* values MUST stay identical to it; the services table itself now
+// lives once in berry_services.h, which both headers include.
 //
 // PODs are produced by `tcc -pod`; see doc "The POD Executable Format".
 // ===========================================================================
 #include <stdint.h>
 #include <stddef.h>
+#include "berry_services.h"   // BerryServices, berry_arg, BERRY_ABI_VERSION
 
 // First eight header bytes: "POD!\r\n\x1A\n".  Legible in a hex dump, and the
 // \r\n\x1A\n tail trips any transfer that mangled line endings or truncated it.
@@ -28,9 +30,8 @@
 #define POD_MAGIC3 0x21u   // '!'
 
 #define POD_FORMAT_VERSION 1u    // the format this loader understands
-#define POD_ABI_VERSION    3u    // the PodServices ABI this loader provides
-                                 // v2 appended realloc (HEAP) + file_remove (FILES)
-                                 // v3 appended spawn (SPAWN)
+// The services ABI this loader provides is BERRY_ABI_VERSION (berry_services.h),
+// the one table shared by seeds and PODs.
 
 // Header flags (offset 14).  Bit 0 tells a program POD from an extension.
 #define POD_KIND_PROGRAM   0u
@@ -49,7 +50,7 @@
 #define POD_KW_STRFN     2
 
 // ---------------------------------------------------------------------------
-// Capability bits (header `caps`, offset 44).  The loader builds a PodServices
+// Capability bits (header `caps`, offset 44).  The loader builds a BerryServices
 // table containing only the groups the POD declared; every other slot is a
 // refusal stub, so enforcement is structural rather than a per-call check.
 // ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@
 typedef struct pod_header {
     uint8_t  magic[8];      // 0  : "POD!\r\n\x1A\n"
     uint16_t format_ver;    // 8  : POD_FORMAT_VERSION
-    uint16_t abi_ver;       // 10 : minimum PodServices ABI required
+    uint16_t abi_ver;       // 10 : minimum BerryServices ABI required
     uint16_t chunk_count;   // 12 : number of chunks after the header
     uint16_t flags;         // 14 : POD_KIND_* / POD_FLAG_*
     uint32_t file_size;     // 16 : total file length (cross-check vs directory)
@@ -91,84 +92,20 @@ typedef struct pod_header {
     uint32_t header_crc;    // 60 : CRC-32C over [0 .. 60)
 } pod_header;               // = 64 bytes
 
-// One keyword-handler argument: a BASIC number or a snapshot of a BASIC string.
-// Layout-identical to seed_arg, so the two share the argument-gathering path.
-typedef struct pod_arg {
-    int          is_str;
-    double       num;
-    const char  *str;
-    int          len;
-} pod_arg;
+// Keyword-handler arguments arrive as berry_arg[] (see berry_services.h), shared
+// with the seed argument-gathering path.
 
-// ---------------------------------------------------------------------------
-// PodServices — the table handed to a POD at entry.  Grouped by capability;
-// `abi_version` is always first.  APPEND-ONLY across ABI versions.  This layout
-// MUST match third_party/tinycc/include/pod.h exactly.
-// ---------------------------------------------------------------------------
-typedef struct PodServices {
-    uint32_t abi_version;
-
-    // --- POD_CAP_CONSOLE ---
-    void (*puts)(const char *s, int len);
-    void (*putc)(int c);
-    int  (*getkey)(void);
-    int  (*inkey)(int centiseconds);
-
-    // --- POD_CAP_VARS ---
-    int  (*get_num)(const char *name, double *out);
-    void (*set_num)(const char *name, double val);
-    int  (*get_str)(const char *name, char *buf, int buflen);
-    void (*set_str)(const char *name, const char *buf, int len);
-
-    // --- POD_CAP_FILES ---
-    int  (*file_open)(const char *name, int mode);
-    int  (*file_close)(int fh);
-    int  (*file_read)(int fh, void *buf, int n);
-    int  (*file_write)(int fh, const void *buf, int n);
-    long (*file_seek)(int fh, long off, int whence);
-
-    // --- POD_CAP_GRAPHICS ---
-    int  (*gfx_width)(void);
-    int  (*gfx_height)(void);
-    void (*gfx_clear)(uint32_t rgb);
-    void (*gfx_putpixel)(int x, int y, uint32_t rgb);
-    void (*gfx_line)(int x1, int y1, int x2, int y2, uint32_t rgb);
-    void (*gfx_fillrect)(int x1, int y1, int x2, int y2, uint32_t rgb);
-
-    // --- POD_CAP_GPIO ---
-    int  (*gpio_mode)(int pin, int mode, int alt);
-    void (*gpio_write)(int pin, int level);
-    int  (*gpio_read)(int pin);
-
-    // --- POD_CAP_TIME ---
-    uint32_t (*time_cs)(void);
-
-    // --- POD_CAP_HEAP ---
-    void *(*alloc)(unsigned nbytes);
-    void  (*free)(void *ptr);
-
-    // --- ABI v2 additions (appended, so v1 field offsets are unchanged) ---
-    void *(*realloc)(void *ptr, unsigned nbytes);     // POD_CAP_HEAP
-    int   (*file_remove)(const char *name);           // POD_CAP_FILES
-
-    // --- ABI v3 (POD_CAP_SPAWN) ---
-    // Load and run another program POD, blocking until it returns. `path` is a
-    // card path (e.g. "/sys/tcc.POD"); argv[0..argc-1] are its arguments. The
-    // return value is the spawned POD's exit status, or negative if it could not
-    // be loaded/run. This is how a build tool (grow) drives the compiler.
-    int   (*spawn)(const char *path, int argc, const char *const *argv);
-
-    // --- ABI v3 (POD_CAP_DIRS) --- create a directory (0 ok, <0 error).
-    int   (*mkdir)(const char *path);
-} PodServices;
+// The table handed to a POD at entry is BerryServices, defined once in
+// berry_services.h and shared with seeds. The loader fills only the groups
+// the POD's capabilities grant; every other slot is a refusal stub.
 
 // A program POD's entry point.  Returns the exit status (0 = success).
-typedef int (*pod_main_fn)(const PodServices *svc,
+typedef int (*pod_main_fn)(const BerryServices *svc,
                            int argc, const char *const *argv);
 // A keyword handler.  Numeric/string handlers return the value; a statement
 // handler's return is ignored.  String results are staged via the interpreter.
-typedef double (*pod_kw_fn)(const PodServices *svc,
-                            const pod_arg *argv, int argc);
+typedef double (*pod_kw_fn)(const BerryServices *svc,
+                            const berry_arg *argv, int argc);
 
 // ---------------------------------------------------------------------------
 // Platform hooks (implemented in seed_target.c on the Pi, seed_host.c on the
@@ -178,12 +115,12 @@ typedef double (*pod_kw_fn)(const PodServices *svc,
 
 // Enter a program POD.  Returns 0 and stores the exit status in *status, or -1
 // if native code cannot run on this build (the host).
-int pod_run_main(const void *entry, const PodServices *svc,
+int pod_run_main(const void *entry, const BerryServices *svc,
                  int argc, const char *const *argv, int *status);
 
 // Invoke a POD keyword handler.  Returns 0 and stores the numeric result in
 // *out, or -1 on the host build.
-int pod_run_kw(const void *entry, const PodServices *svc,
-               const pod_arg *argv, int argc, double *out);
+int pod_run_kw(const void *entry, const BerryServices *svc,
+               const berry_arg *argv, int argc, double *out);
 
 #endif // POD_H

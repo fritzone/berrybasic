@@ -7,7 +7,7 @@
 
 SEED_KEYWORD("SHOUT", SEED_KW_STATEMENT, 1, 1) {
     (void)argc;
-    const seed_arg *a = &argv[0];
+    const berry_arg *a = &argv[0];
     if (a->is_str)
         for (int i = 0; i < a->len; i++)
             svc->putc(toupper((unsigned char)a->str[i]));

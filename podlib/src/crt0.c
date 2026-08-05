@@ -8,7 +8,7 @@
 #include <pod.h>
 #include <setjmp.h>
 
-const PodServices *pod_svc = 0;      /* the whole pod-libc reads services here */
+const BerryServices *pod_svc = 0;      /* the whole pod-libc reads services here */
 int errno = 0;
 char **environ = 0;             /* no environment on-device */
 
@@ -18,7 +18,7 @@ extern void    __pod_exit_arm(void);
 
 extern int main(int argc, char **argv);
 
-int pod_main(const PodServices *svc, int argc, const char *const *argv)
+int pod_main(const BerryServices *svc, int argc, const char *const *argv)
 {
     pod_svc = svc;
     if (setjmp(__pod_exit_jmp)) return __pod_exit_code;   /* exit() lands here */

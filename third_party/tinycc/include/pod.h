@@ -13,14 +13,14 @@
  *     tcc -pod hello.c -o HELLO.POD
  *
  * This header is what a POD's source #includes.  It provides:
- *   - the PodServices table the loader hands the program at entry,
+ *   - the BerryServices table the loader hands the program at entry,
  *   - the capability bits, and
  *   - the manifest macros (POD_NAME/POD_NEEDS/...) that record, in a dedicated
  *     ".pod.desc" section, what the wrapper should stamp into the file.
  *
  * The compiler never links a POD against anything: everything the program needs
- * from the interpreter is reached through the services table, exactly as a seed
- * reaches through SeedServices.  A capability the POD did not declare is a
+ * from the interpreter is reached through the services table (BerryServices,
+ * the same table a seed gets).  A capability the POD did not declare is a
  * refusal stub in that table, so there is nothing to bypass.
  * ========================================================================== */
 
@@ -29,9 +29,9 @@ typedef unsigned short     pod_u16;
 typedef unsigned int       pod_u32;
 typedef unsigned long long pod_u64;
 
-/* The PodServices ABI this header describes.  A POD records the minimum ABI it
- * needs; the loader refuses a POD that asks for a newer one than it provides. */
-#define POD_ABI_VERSION 3u   /* v2 appended realloc+file_remove; v3 appended spawn */
+/* The services table (BerryServices), argument struct (berry_arg) and ABI version
+ * (BERRY_ABI_VERSION) live once in berry_services.h, shared by seeds and PODs. */
+#include "berry_services.h"
 
 /* -------------------------------------------------------------------------- *
  * Capability bits (the header's `caps` mask, and the argument to POD_NEEDS).
@@ -60,82 +60,19 @@ typedef unsigned long long pod_u64;
 #define POD_KIND_PROGRAM   0   /* has pod_main                                 */
 #define POD_KIND_EXTENSION 1   /* registers keywords, stays resident           */
 
-/* One keyword-handler argument: a BASIC number or a snapshot of a BASIC
- * string.  String bytes are valid only for the duration of the call. */
-typedef struct pod_arg {
-    int          is_str;   /* 0 = number (.num), 1 = string (.str/.len)        */
-    double       num;
-    const char  *str;      /* not NUL-terminated; .len is authoritative        */
-    int          len;
-} pod_arg;
-
-/* -------------------------------------------------------------------------- *
- * PodServices — the table the loader hands a POD at entry.  Grouped by
- * capability; `abi_version` is always first so a POD can check compatibility
- * before touching anything else.  Groups the POD did not request are filled
- * with refusal stubs.  APPEND-ONLY across ABI versions.
- * -------------------------------------------------------------------------- */
-typedef struct PodServices {
-    pod_u32 abi_version;
-
-    /* --- CAP_CONSOLE ---------------------------------------------------- */
-    void (*puts)(const char *s, int len);
-    void (*putc)(int c);
-    int  (*getkey)(void);
-    int  (*inkey)(int centiseconds);
-
-    /* --- CAP_VARS ------------------------------------------------------- */
-    int  (*get_num)(const char *name, double *out);
-    void (*set_num)(const char *name, double val);
-    int  (*get_str)(const char *name, char *buf, int buflen);
-    void (*set_str)(const char *name, const char *buf, int len);
-
-    /* --- CAP_FILES ------------------------------------------------------ */
-    int  (*file_open)(const char *name, int mode);
-    int  (*file_close)(int fh);
-    int  (*file_read)(int fh, void *buf, int n);
-    int  (*file_write)(int fh, const void *buf, int n);
-    long (*file_seek)(int fh, long off, int whence);
-
-    /* --- CAP_GRAPHICS --------------------------------------------------- */
-    int  (*gfx_width)(void);
-    int  (*gfx_height)(void);
-    void (*gfx_clear)(pod_u32 rgb);
-    void (*gfx_putpixel)(int x, int y, pod_u32 rgb);
-    void (*gfx_line)(int x1, int y1, int x2, int y2, pod_u32 rgb);
-    void (*gfx_fillrect)(int x1, int y1, int x2, int y2, pod_u32 rgb);
-
-    /* --- CAP_GPIO ------------------------------------------------------- */
-    int  (*gpio_mode)(int pin, int mode, int alt);
-    void (*gpio_write)(int pin, int level);
-    int  (*gpio_read)(int pin);
-
-    /* --- CAP_TIME ------------------------------------------------------- */
-    pod_u32 (*time_cs)(void);
-
-    /* --- CAP_HEAP ------------------------------------------------------- */
-    void *(*alloc)(unsigned nbytes);
-    void  (*free)(void *ptr);
-
-    /* --- ABI v2 additions (appended; v1 offsets unchanged) -------------- */
-    void *(*realloc)(void *ptr, unsigned nbytes);     /* CAP_HEAP  */
-    int   (*file_remove)(const char *name);           /* CAP_FILES */
-
-    /* --- ABI v3 (CAP_SPAWN): load and run another program POD ----------- */
-    int   (*spawn)(const char *path, int argc, const char *const *argv);
-    /* --- ABI v3 (CAP_DIRS): create a directory -------------------------- */
-    int   (*mkdir)(const char *path);
-} PodServices;
+/* The services table the loader hands a POD at entry is BerryServices,
+ * defined once in berry_services.h (included above) and shared with seeds.
+ * Groups the POD did not request via POD_NEEDS are refusal stubs. */
 
 /* A program POD's entry point.  Returns the exit status: 0 = success. */
-typedef int (*pod_main_fn)(const PodServices *svc,
+typedef int (*pod_main_fn)(const BerryServices *svc,
                            int argc, const char *const *argv);
 
 /* An extension POD's keyword handlers (registered via KEYW). */
-typedef double (*pod_kw_num_fn)(const PodServices *svc,
-                                const pod_arg *argv, int argc);
-typedef void   (*pod_kw_stmt_fn)(const PodServices *svc,
-                                 const pod_arg *argv, int argc);
+typedef double (*pod_kw_num_fn)(const BerryServices *svc,
+                                const berry_arg *argv, int argc);
+typedef void   (*pod_kw_stmt_fn)(const BerryServices *svc,
+                                 const berry_arg *argv, int argc);
 
 /* Keyword kinds, for POD_KEYWORD. */
 #define POD_KW_STATEMENT 0   /* NAME arg,arg            (return ignored)       */
@@ -158,7 +95,7 @@ typedef void   (*pod_kw_stmt_fn)(const PodServices *svc,
 #define POD__T_CAPS  6   /* u64:  capability bits to OR into the mask          */
 #define POD__T_NEED  7   /* text: one "CAP=reason" rationale line             */
 #define POD__T_FLAGS 8   /* u16:  header flags to OR in (kind, self-mod, ...) */
-#define POD__T_ABI   9   /* u16:  minimum PodServices ABI required            */
+#define POD__T_ABI   9   /* u16:  minimum BerryServices ABI required            */
 #define POD__T_KEYW 10   /* keyword registration (extension PODs)             */
 
 #define POD__CAT(a, b)  a##b

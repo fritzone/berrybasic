@@ -6,7 +6,7 @@
 
 SEED_KEYWORD("REVERSE$", SEED_KW_STRFN, 1, 1) {
     (void)argc;
-    const seed_arg *a = &argv[0];
+    const berry_arg *a = &argv[0];
     char buf[256];
     int n = a->len; if (n > (int)sizeof(buf)) n = (int)sizeof(buf);
     for (int i = 0; i < n; i++) buf[i] = a->str[n - 1 - i];

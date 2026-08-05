@@ -556,6 +556,7 @@ int con_inkey(int centiseconds) {
 int con_pos(void)  { return cursor_col; }
 int con_vpos(void) { return cursor_row; }
 int con_rows(void) { return g_term_rows; }
+int con_cols(void) { return g_term_cols; }
 
 // Poll whichever USB backend enumerated a mouse and fold the relative movement
 // into the absolute pointer position. Raw framebuffer pixels, origin top-left:

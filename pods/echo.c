@@ -12,7 +12,7 @@ POD_NEEDS(CAP_CONSOLE, "CONSOLE=writes its arguments to the screen")
 
 static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
 
-int pod_main(const PodServices *svc, int argc, const char *const *argv)
+int pod_main(const BerryServices *svc, int argc, const char *const *argv)
 {
     for (int i = 1; i < argc; i++) {
         if (i > 1) svc->putc(' ');

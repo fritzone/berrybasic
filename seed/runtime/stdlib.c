@@ -9,7 +9,7 @@
 
 // Set by the SEED_EXPORT entry trampoline before the seed body runs, so the
 // allocation functions below are always valid inside a seed call.
-const SeedServices *seed_svc;
+const BerryServices *seed_svc;
 
 // --- dynamic memory --------------------------------------------------------
 void *malloc(size_t size) { return seed_svc->alloc((unsigned)size); }

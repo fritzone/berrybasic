@@ -10,7 +10,7 @@
 // Native seeds: small chunks of position-independent AArch64 machine code that
 // a program loads (SEED) and calls (CALL / CALL$). The blob is copied into a
 // page-aligned, executable RAM slot; seeds reach the interpreter only through
-// the SeedServices vtable below, which is what keeps them self-contained. See
+// the BerryServices vtable below, which is what keeps them self-contained. See
 // seed/seed.h for the ABI.
 // ---------------------------------------------------------------------------
 #define SEED_MAX        8
@@ -363,6 +363,8 @@ static int bas_inkey(int cs);                     //   a seed reads the same key
 
 static void svc_putc(int c)                       { con_putc((char)c); }
 static void svc_puts(const char *s, int len)      { con_putsn(s, len); }
+static void svc_vdu(int b)                         { con_vdu(b); }   // VDU control stream
+static void svc_screen_size(int *c, int *r)        { if (c) *c = con_cols(); if (r) *r = con_rows(); }
 static int  svc_getkey(void)                      { return bas_getkey(); }
 static int  svc_inkey(int cs)                     { return bas_inkey(cs); }
 // The call is the poll: nothing services the mouse while a seed runs, so a seed
@@ -566,8 +568,8 @@ static void svc_gfx_text(int x, int y, const char *s, int len, uint32_t rgb) { s
 static int  svc_text_width(const char *s, int len) { return ttf_text_width(s, len); }
 static int  svc_text_height(void) { return ttf_line_height(); }
 
-static const SeedServices g_svc = {
-    SEED_ABI_VERSION,
+static const BerryServices g_svc = {
+    BERRY_ABI_VERSION,
     svc_putc, svc_puts, svc_getkey, svc_inkey,
     svc_get_num, svc_set_num, svc_get_str, svc_set_str,
     svc_num_array, svc_set_return_str, svc_time_cs,
@@ -602,7 +604,7 @@ static double seed_run_collect(void) {
     int slot = (int)h - 1;
     if (slot < 0 || slot >= SEED_MAX || !seed_loaded[slot]) { err("No such seed"); return 0; }
 
-    seed_arg argv[SEED_MAX_ARGS];
+    berry_arg argv[SEED_MAX_ARGS];
     int argc = 0;
     while (tok == T_COMMA) {
         lex_next();
@@ -678,7 +680,7 @@ static int seed_kw_register(const char *blob, int len) {
     struct seed_header hdr;                         // copy bytewise (-mstrict-align)
     for (int i = 0; i < (int)sizeof(hdr); i++) ((char *)&hdr)[i] = blob[i];
     if (hdr.magic != SEED_MAGIC)             return 0;
-    if (hdr.version > SEED_ABI_VERSION)      return 0;
+    if (hdr.version > BERRY_ABI_VERSION)      return 0;
     if (!(hdr.flags & SEED_HDR_KEYWORD))     return 0;   // a plain seed: not a keyword
     if (hdr.entry_off >= (uint32_t)len)      return 0;
     if (len > SEED_SLOT_SIZE)                return 0;   // too big for a resident slot
@@ -718,9 +720,9 @@ static int seed_kw_register(const char *blob, int len) {
     return 1;
 }
 
-// Snapshot one evaluated value into a seed_arg (strings copied to GC-stable
+// Snapshot one evaluated value into a berry_arg (strings copied to GC-stable
 // scratch, valid for the duration of the call).
-static int seed_fill_arg(seed_arg *a, value_t v) {
+static int seed_fill_arg(berry_arg *a, value_t v) {
     if (v.is_str) {
         value_t snap = str_in_scratch(v.str, v.len);
         if (g_err) return 0;
@@ -734,7 +736,7 @@ static int seed_fill_arg(seed_arg *a, value_t v) {
 // Gather the argument list for a seed keyword. paren=1 reads NAME(a, b, ...);
 // paren=0 reads the bare statement form NAME a, b, ... up to end of statement.
 // Returns the count, or -1 on error (with g_err set).
-static int seed_gather_args(seed_arg *argv, int max, int paren) {
+static int seed_gather_args(berry_arg *argv, int max, int paren) {
     int argc = 0;
     if (paren) {
         if (!expect(T_LP)) return -1;
@@ -756,14 +758,14 @@ static int seed_gather_args(seed_arg *argv, int max, int paren) {
 
 // Invoke a registered keyword's seed with the gathered args. Returns its numeric
 // result in *out (string results are staged in g_seed_retstr). 0 ok, -1 on error.
-static int seed_kw_invoke(seed_kw_t *k, seed_arg *argv, int argc, double *out) {
+static int seed_kw_invoke(seed_kw_t *k, berry_arg *argv, int argc, double *out) {
     if (argc < k->minargs || argc > k->maxargs) { err("Wrong number of arguments"); return -1; }
     g_seed_retstr_len = -1;
     *out = 0;
     int rc;
     if (k->is_pod)          // a POD keyword: its own image + capability-gated table
-        rc = pod_run_kw(k->pod_entry, (const PodServices *)k->pod_svc,
-                        (const pod_arg *)argv, argc, out);
+        rc = pod_run_kw(k->pod_entry, (const BerryServices *)k->pod_svc,
+                        (const berry_arg *)argv, argc, out);
     else                    // a native seed keyword
         rc = seed_invoke(kwseed_entry[k->slot], &g_svc, argv, argc, out);
     if (rc != 0) { err("Native code runs on the Pi, not the host build"); return -1; }
@@ -774,7 +776,7 @@ static int seed_kw_invoke(seed_kw_t *k, seed_arg *argv, int argc, double *out) {
 static value_t eval_seed_keyword(int id) {
     seed_kw_t *k = &seed_kw_tab[id - KW_SEED_DYN];
     lex_next();                                            // consume the keyword
-    seed_arg argv[SEED_MAX_ARGS];
+    berry_arg argv[SEED_MAX_ARGS];
     int argc = seed_gather_args(argv, SEED_MAX_ARGS, 1);
     if (argc < 0) return v_num(0);
     double ret;
@@ -789,7 +791,7 @@ static value_t eval_seed_keyword(int id) {
 static void exec_seed_keyword(int id) {
     seed_kw_t *k = &seed_kw_tab[id - KW_SEED_DYN];
     lex_next();                                            // consume the keyword
-    seed_arg argv[SEED_MAX_ARGS];
+    berry_arg argv[SEED_MAX_ARGS];
     int argc = seed_gather_args(argv, SEED_MAX_ARGS, 0);
     if (argc < 0) return;
     double ret;

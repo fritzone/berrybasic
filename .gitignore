@@ -1,3 +1,5 @@
 build/*
 berrybasic-sd.img
 sd.img
+# generated: mirror of seed/berry_services.h for the POD compiler (see Makefile)
+third_party/tinycc/include/berry_services.h

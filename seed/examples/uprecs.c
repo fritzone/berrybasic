@@ -13,7 +13,7 @@
 // still how a seed learns how many elements there are.
 #include "seed.h"
 
-static void copy_arg(const seed_arg *a, char *out, int outsz) {
+static void copy_arg(const berry_arg *a, char *out, int outsz) {
     int n = a->len;
     if (n > outsz - 1) n = outsz - 1;
     for (int i = 0; i < n; i++) out[i] = a->str[i];

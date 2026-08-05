@@ -1480,10 +1480,10 @@ Lists a directory - the current one by default, or a directory you name. `CAT` a
 CAT
 ```
 
-Give a quoted **path** to peek into a subdirectory without `CD`-ing into it - for example, to see the native seeds that live in `/seed`:
+Give a **path** to peek into a subdirectory without `CD`-ing into it - for example, to see the native seeds that live in `/seed`. The path may be typed with or without quotes (quotes only for names with spaces):
 
 ```basic
-CAT "SEED"
+CAT seed
 ```
 
 ```text
@@ -1492,7 +1492,7 @@ CAT "SEED"
 2 files, 0 dirs, 240 total
 ```
 
-The path may be relative to the current directory (`CAT "SPRITES"`) or absolute (`CAT "/seed"`). A path that does not exist raises `File not found`.
+The path may be relative to the current directory (`CAT sprites`) or absolute (`CAT /seed`). A path that does not exist raises `File not found`.
 
 ```text
 [DIR] EXAMPLES               -  2026-07-15 10:30
@@ -1982,7 +1982,7 @@ MOUSE X%, Y%, B%
 PRINT "pointer at "; X%; ","; Y%; "  buttons="; B%
 ```
 
-Reading the mouse (via either form) also polls the hardware, so call it in your main loop to keep the pointer up to date. See `examples/mouse.bas` for a small drawing demo.
+Reading the mouse (via either form) also polls the hardware, so call it in your main loop to keep the pointer up to date. See `examples/hardware/mouse.bas` for a small drawing demo.
 
 ## Cursor Functions
 
@@ -3569,12 +3569,12 @@ Behind the scenes each long name also gets a classic `NAME~1.EXT` short alias, s
 
 The card can hold **subdirectories**, and every file command accepts a **path**. Components are separated by `/`. A path starting with `/` is absolute (from the top of the card); otherwise it is relative to the **current directory**.
 
-| Command        | Meaning                                                               |
-| -------------- | --------------------------------------------------------------------- |
-| `MKDIR "name"` | create a directory                                                    |
-| `CD "name"`    | change the current directory (`CD ".."` goes up, `CD "/"` to the top) |
-| `RMDIR "name"` | remove a directory (it must be empty)                                 |
-| `PWD`          | print the current directory                                           |
+| Command      | Meaning                                                             |
+| ------------ | ------------------------------------------------------------------- |
+| `MKDIR name` | create a directory                                                  |
+| `CD name`    | change the current directory (`CD ..` goes up, `CD /` to the top)   |
+| `RMDIR name` | remove a directory (it must be empty)                               |
+| `PWD`        | print the current directory                                         |
 
 Because file commands take paths, you can read and write anywhere on the card:
 
@@ -3585,7 +3585,7 @@ SAVE "LEVELS/LEVEL1"          : REM -> LEVELS/LEVEL1.BAS
 OPENIN("/DATA/SCORES.DAT")    : REM absolute path
 ```
 
-`MKDIR`, `CD` and `RMDIR` take the name as given (no automatic `.BAS`), so quote them: `CD "GAMES"`. They accept long names too: `MKDIR "My Projects"` then `CD "My Projects"` (see *Long file names* above).
+The path may be typed **with or without quotes**: `CD examples`, `CD ..` and `CD /SYS/LIB` all work bare, and so do `CAT`, `LOAD`, `SAVE`, `DELETE`, `PODINFO` and friends (`LOAD welcome` finds `WELCOME.BAS`). Quotes are only needed when a name contains a **space**: `MKDIR "My Projects"` then `CD "My Projects"` (see *Long file names* above). The path is a **literal** either way (quoted or not) rather than an expression, so it is taken exactly as typed; `MKDIR`, `CD` and `RMDIR` add no automatic `.BAS`.
 
 ### Reading a directory in a program
 
@@ -3677,7 +3677,7 @@ The variables in `INPUT#` may be simple variables or array elements, and their t
 
 On disk each record is a tag byte followed by its data - a number is `&40` plus eight bytes (an IEEE-754 double, little-endian); a string is `&00`, a one-byte length, then the characters. You can freely mix `BPUT#`/`BGET#` and `PRINT#`/`INPUT#` on the same file if you keep track of the layout yourself.
 
-See `examples/fileio.bas` (byte level) and `examples/records.bas` (typed records) for complete demos.
+See `examples/files/fileio.bas` (byte level) and `examples/language/records.bas` (typed records) for complete demos.
 
 # Basically Extending the Programs
 
@@ -4528,316 +4528,9 @@ dynarr sum 1..100 = 5050
 sorted E: 1 2 5 8 9
 ```
 
-# POD Executables
+## Beyond seeds: whole native programs
 
-A **seed** is a fragment of native code you call from a BASIC program. A **POD** is the next step up: a *whole* native program, complete and self-contained, that you can drop on the card and run on its own. The name is the metaphor - a pod in nature is sealed, carries everything its contents need, survives being moved around, and can be opened and inspected. Those are exactly the properties of the format (see *The POD Executable Format* for the full design).
-
-You build a POD from C with the BerryBasiC C compiler, in one step:
-
-```sh
-tcc -pod hello.c -o HELLO.POD
-```
-
-The result is a flat, position-independent image wrapped in a 64-byte header and a run of chunks, every byte protected by a CRC. Crucially, a POD **declares up front which machine capabilities it needs** - console, files, graphics, GPIO, and so on. When the loader runs it, it hands the POD a services table containing *only* the groups it declared; everything else is a refusal stub. A POD that never asked for GPIO has no way to reach a pin, because the function pointer simply is not there. That declaration is not documentation, it is the mechanism.
-
-> Like seeds, PODs are AArch64 code and run only on the Pi (and QEMU). On a host test build the loader and all its integrity checks still work - handy for inspecting a POD - but entering one raises `PODs run on the Pi, not the host build`.
-
-There are two kinds. A **program** POD has an entry point and runs to completion; a bare `CAT` shows it with a size in bytes. An **extension** POD has no entry point - instead it *registers keywords*, adding new words to the language for as long as it stays loaded, exactly like a keyword seed but capability-scoped.
-
-### RUN "NAME.POD"
-
-Loads and runs a program POD. A bare name is resolved on the data card (with `.POD` assumed if you give no extension); an optional string is passed to the program as its argument:
-
-```basic
-RUN "HELLO.POD"
-RUN "PLOT.POD", "sine"
-```
-
-`RUN` with a string is the POD form; `RUN` on its own still runs the BASIC program in memory. When the POD returns, its exit status is available (0 means success).
-
-### PODLOAD "NAME.POD"
-
-Loads an *extension* POD and adds its keywords to the language. After loading, the new words are used directly, with no further ceremony:
-
-```basic
-PODLOAD "HYPOT.POD"
-PRINT PYTHAG(3, 4)        : REM -> 5, from the POD's PYTHAG keyword
-```
-
-A keyword name that is already taken (by a built-in, a seed, or another POD) is refused, so loading a POD can never silently shadow something.
-
-### PODFREE "NAME"
-
-Unloads a resident extension POD by its name (the `name=` from its provenance record), removing its keywords again:
-
-```basic
-PODFREE "hypot"
-```
-
-### PODINFO "NAME.POD"
-
-Prints a POD's provenance, size, declared capabilities and the reason it gives for each - **without running it**. This is the transparency feature made concrete: before running an unfamiliar binary you can see, on the machine itself, who built it, from what, and what it wants to touch.
-
-```basic
-PODINFO "HELLO.POD"
-```
-```text
-name : hello
-vers : 1.0
-auth : fritzone
-date : 2026-08-03T18:36:11Z
-tool : tcc-0.9.28rc-berry
-desc : smallest useful POD: greets the console and exits
-kind : program
-size : 8192 bytes
-caps : CONSOLE
-need : CONSOLE=prints a greeting
-```
-
-### PODCAPS(NAME.POD)
-
-Returns a POD's capability bitmask as a number, for a program that wants to check what a POD will ask for before deciding to run it:
-
-```basic
-IF PODCAPS("PLOT.POD") AND 64 THEN PRINT "This POD drives GPIO pins."
-```
-
-The example program `PODDEMO.BAS` on the card walks through all of these.
-
-### Commands live in /sys
-
-The card has a **`/sys` directory**, and any POD in it is a *command*. Type its name at the prompt (or `RUN` it) and the rest of the line is handed to it as arguments, exactly like a shell:
-
-```basic
-echo hello world          : REM runs /sys/ECHO.POD  -> hello world
-sum 40 2 100              : REM runs /sys/SUM.POD   -> 142
-RUN echo also works
-```
-
-A word is treated as a command only when it is used command-style - not `word = ...` and not the name of a variable or array already in use - so ordinary BASIC is untouched. The command receives a proper `argv`: `echo hello world` arrives as `{ "echo", "hello", "world" }`, and a `"quoted argument"` stays a single element. The two examples above (`echo`, `sum`) ship in `/sys`; drop your own POD in there and it becomes a command with no further ceremony. This is how the machine grows: the shell is just PODs.
-
-### The compiler on the machine
-
-The most important command in `/sys` is **`tcc`**: the Tiny C Compiler, itself a POD. The machine is self-hosting - you can write C on it and compile it into a POD, on the machine, with no other computer involved:
-
-```basic
-tcc -pod GEN.C -o GEN.POD       : REM compile a C source into a POD
-RUN "GEN.POD"                    : REM and run what you just built
-```
-
-A source that uses only the services table needs just `#include <pod.h>`, which the compiler finds in `/sys/include` on its own:
-
-```c
-#include <pod.h>
-POD_NAME("gen")
-POD_NEEDS(CAP_CONSOLE, "CONSOLE=greets")
-int pod_main(const PodServices *s, int argc, const char *const *argv)
-{
-    s->puts("hello from a POD compiled on the Pi!\n", 37);
-    return 0;
-}
-```
-
-`tcc` also compiles to ordinary objects (`tcc -c FILE.C -o FILE.O`) and understands its usual options (`tcc -v`, `tcc -hh`). Because the card is an uppercase 8.3 filesystem, `FILE.C` is recognised as C source without needing `-x c`.
-
-### Seed packets: static libraries
-
-Reusable C code shared between PODs lives in a **seed packet**, a `.PKT` file - a collection of compiled objects with an index of the symbols each defines. A packet is a build-time convenience only; it never appears at run time, and nothing in a finished POD can tell it was built with one.
-
-Create a packet from objects:
-
-```basic
-tcc -c TRIG.C -o TRIG.O
-tcc -c FIXED.C -o FIXED.O
-tcc -pkt MATH.PKT TRIG.O FIXED.O      : REM build the packet
-tcc -pkt list MATH.PKT                 : REM inspect it
-```
-
-Link a POD against one with `-l` (packets are searched in `/SYS/LIB`):
-
-```basic
-tcc -pod MANDEL.C -l MATH -o MANDEL.POD
-```
-
-The linker pulls in only the members a POD actually uses - reference one function from a member and the whole member comes in, so keep each source file small and single-purpose. Two properties are worth knowing:
-
-- **Capabilities compose automatically.** Each member records the capabilities its code needs, and linking a member *unions* those into the resulting POD's declared capabilities. So if you link against a packet whose routines touch the SD card, `CAP_FILES` appears in your POD's header on its own, `PODINFO` shows it, and the user's policy still gets to refuse it. A library cannot smuggle a capability past the header.
-- **A POD that links at all, runs.** Everything is resolved at build time and baked in; there are no run-time dependencies, no versions to match, no library that can be missing on someone else's card.
-
-### grow: the build system
-
-Compiling and packing by hand gets tedious once a project has more than one source file. **`grow`** is the build system, and it runs on the machine too. You describe *what exists* in a plain-text file named `GROW` - never *how to build it* - and `grow` works out the rest:
-
-```
-# a packet and a pod that uses it
-
-project demo
-    out    build
-
-packet mlib
-    source MATHLIB.C
-
-pod app
-    source APP.C
-    use    mlib
-    needs  CONSOLE
-```
-
-Then:
-
-```basic
-grow                        : REM build everything, in dependency order
-grow list                   : REM show the targets
-grow clean                  : REM delete the outputs
-```
-
-`grow` compiles each source with `tcc`, packs a `packet` block into a `.PKT`, links a `pod` block into a `.POD` pulling in the packets it lists under `use`, and works out that the packet must be built before the pod that consumes it. It is declarative: there are no rules, recipes or shell commands, because there is no shell - the build algorithm is fixed and lives in the tool.
-
-The payoff is the capability check. `grow` reads back the capabilities of what it actually linked and, if a `pod` lists `needs`, asserts that everything derived is declared:
-
-```text
-gapp: uses CAP_GPIO but 'needs' does not list it
-```
-
-So a library that quietly reaches for GPIO cannot slip that capability into your POD without the build telling you. The same audit `PODINFO` shows a user at load time, `grow` gives you at build time. Blocks are `project` (globals), `packet` (a library) and `pod` (an executable); the full property tables are in the doc *"GROW - the BerryBasiC Build System"*.
-
-# Building BerryBasiC from Source
-
-BerryBasiC is a bare-metal operating environment for the Raspberry Pi 4: there is no Linux, no libraries, no runtime underneath it - the kernel *is* the computer. You build it on a Linux PC with a cross-compiler, then either run it in the **QEMU** emulator or flash it to an SD card and boot a real Pi 4. This chapter covers the toolchain, the dependencies, and every build command.
-
-Everything is driven by a single `Makefile` at the top of the source tree; the common commands are `make` (build the kernel), `make run` (emulate), `make sdimage`/`make flash` (real hardware), `make host` and `make test` (develop on the PC). All paths below are relative to the repository root.
-
-## What you need
-
-The project targets a Linux host (a Debian/Ubuntu machine, WSL, or any distro with the packages below). The essential tools:
-
-| Tool                                                                                | Why it is needed                                                               | Debian/Ubuntu package   |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ----------------------- |
-| **AArch64 cross-compiler** - `aarch64-linux-gnu-gcc`, `-ld`, `-objcopy`, `-readelf` | compile the kernel, drivers, interpreter and seeds for the Pi's 64-bit ARM CPU | `gcc-aarch64-linux-gnu` |
-| **GNU make**                                                                        | drives the whole build                                                         | `make`                  |
-| **QEMU (AArch64 system)** - `qemu-system-aarch64`                                   | emulate a Pi 4 (`-M raspi4b`) so you can run without hardware                  | `qemu-system-arm`       |
-| **mtools** - `mcopy`, `mdir`                                                        | put files into the FAT partitions of the SD image without root/loopback        | `mtools`                |
-| **dosfstools** - `mkfs.fat`                                                         | format the FAT partitions                                                      | `dosfstools`            |
-| **util-linux / gdisk** - `sfdisk`, `sgdisk`, `wipefs`                               | write the MBR of the SD image and clean cards before flashing                  | `util-linux`, `gdisk`   |
-| **curl**                                                                            | fetch the Pi 4 GPU firmware the first time you build an SD image               | `curl`                  |
-
-On a fresh Debian or Ubuntu system, one line installs the lot:
-
-```sh
-sudo apt install gcc-aarch64-linux-gnu make qemu-system-arm mtools \
-                 dosfstools util-linux gdisk curl
-```
-
-Optional, only for the extras noted later:
-
-| Tool                                   | For                                                             |
-| -------------------------------------- | --------------------------------------------------------------- |
-| a native **`cc`** (host gcc/clang)     | `make host` - build the interpreter as a normal Linux program   |
-| **CMake** (≥ 3.14) + **git** + network | `make test` - the unit-test suite (fetches Catch2 on first run) |
-| **lcov** / **gcov**                    | `make coverage` - an HTML coverage report                       |
-
-You do **not** need a Raspberry Pi, any firmware, or an SD card to build and run under QEMU. Firmware is downloaded automatically only when you first build a *bootable* image.
-
-Also, please note: these package names are valid as per 2026, make sure the packages are there in your repository and verify the valid names.
-
-## Get the code and build
-
-```sh
-git clone https://github.com/fritzone/berrybasic berrybasic
-cd berrybasic
-make
-```
-
-`make` cross-compiles the kernel, the drivers, the BASIC interpreter and the seed backend, links them with `kernel/linker.ld`, and writes the flat kernel image to **`build/kernel8.img`** (that single file *is* BerryBasiC). Objects land in `build/`; `make clean` removes the whole `build/` directory.
-
-The compile flags (in the `Makefile`) are worth knowing if you extend the kernel: `-ffreestanding -nostdlib -nostartfiles` (no host libc/runtime), `-mcpu=cortex-a72` (the Pi 4's core), and **`-mstrict-align`** - the MMU is off early in boot, so memory is Device-typed and unaligned 16/32-bit accesses fault; strict-align stops the compiler from synthesising them.
-
-## Configure the machine - `make config`
-
-Screen resolution, console font and keyboard layout are chosen at build time. Run:
-
-```sh
-make config
-```
-
-This interactive helper (`tools/configure.sh`) asks for:
-
-- **Resolution** - a preset (640×480 ... 1920×1080) or a custom `WIDTHxHEIGHT`.
-- **Font** - one of the bitmap console fonts in `fonts/` (the glyph height is read from the file size).
-- **Font scale** - an integer magnification (1-3) for a chunkier look.
-- **Keyboard layout** - the power-on default: `US` `UK` `NO` `DK` `SE` `DE` (a program can switch later with `KEYBOARD`).
-
-It regenerates `kernel/buildconfig.h` (the resolution, glyph size and default layout), `drivers/font_data.c` (the glyph table, from your chosen font), and the HDMI block in `boot/config.txt`, then wipes `build/` so the next `make` is a clean rebuild. You can also script it: `tools/configure.sh 1024x768 fonts/ISO.F16 2 NO`. If you never run `make config`, the committed defaults are used.
-
-## Run it in QEMU - `make run`
-
-```sh
-make run
-```
-
-launches the emulator on the freshly built kernel:
-
-```sh
-qemu-system-aarch64 -M raspi4b -m 2G -kernel build/kernel8.img \
-    -serial stdio -display gtk -device usb-kbd -device usb-mouse \
-    -drive file=berrybasic-sd.img,if=sd,format=raw
-```
-
-A window opens with the framebuffer console, an emulated USB keyboard and mouse; the serial console is mirrored to your terminal. QEMU boots `build/kernel8.img` directly, so you do **not** need a bootable SD image just to emulate - but the `-drive` gives BASIC a disk for `LOAD`/`SAVE`/`CAT` (`make sdcard` makes a blank one, `make sdimage` a full one). QEMU models the framebuffer, GPIO levels, USB HID and the SD card; it does **not** model PWM audio, GPIO edge interrupts, the I2C/BSC controller, or the PCIe/xHCI USB-A path, so those features are guarded to no-op or need real hardware (see *Differences from QEMU* in `README-realhw.md`).
-
-## Build the native seeds - `make seeds`
-
-```sh
-make seeds
-```
-
-cross-compiles every `seed/examples/*.c` into a flat, position-independent `.SED` blob under `build/seeds/`, linking each with the seed runtime (`seed/runtime/*.c`) and `seed/seed.ld`. The build **fails on purpose** if a seed is not self-contained: reaching for a libc symbol stops the link outright, and a seed that bakes an **absolute address** into its data (see *Splitting a seed across several files*) is rejected by the relocation gate, because that address would still point at the link-time location once the blob is loaded somewhere else. See *Native Seeds* for writing your own; `make sdimage` copies the built `.SED` files into the card's `/seed` directory, where `SEED` looks for them.
-
-## Put it on a real Raspberry Pi 4 - `make sdimage` / `make flash`
-
-```sh
-make sdimage      # build berrybasic-sd.img (fetches Pi 4 firmware on first run)
-make flash        # interactively flash it to a removable card (safe device picker)
-```
-
-`make sdimage` (via `tools/mksdimage.sh`) downloads the Pi 4 GPU firmware (`start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, cached in `firmware/`) and assembles **`berrybasic-sd.img`**: a two-partition MBR disk - a bootable FAT32 **boot** partition (firmware + `config.txt` + `kernel8.img`) and a FAT32 **data** partition holding the example `.BAS` programs, the built seeds (in a `/seed` subdirectory), the bundled images and the TrueType fonts. The data partition is what BASIC's `SAVE`/`LOAD`/`CAT` use, so the card is also your disk.
-
-`make flash` runs `tools/flashsd.sh`, an interactive helper that lists only removable devices (excluding your system disk), makes you re-type the target to confirm, and then writes the image. A full walk-through - manual `dd`, reading the card back, and boot troubleshooting - is in **`README-realhw.md`**.
-
-## Develop on the PC - `make host` and `make test`
-
-The interpreter (`basic/basic.c`) is shared between the Pi and the PC: only the platform backends differ (`host/*.c` provide Linux versions of the console, storage, graphics, fonts, and so on). That makes two fast development loops possible without any emulator:
-
-```sh
-make host                     # build build/basic_host, a normal Linux program
-./build/basic_host            # a BerryBasiC REPL in your terminal
-```
-
-The host build runs the language, files, collections, string/format functions and TrueType *metrics* natively (graphics, sound and GPIO are no-ops or report "needs the Pi", since there is no framebuffer or hardware). It is the quickest way to try language changes. *(Note: the host binary has loose dependencies, so re-run `make host` after editing `basic.c` to avoid running a stale build.)*
-
-```sh
-make test                     # build + run the Catch2 unit-test suite
-make coverage                 # the same, instrumented, with an HTML report
-```
-
-`make test` configures a CMake build under `build/tests`, compiles the interpreter against the host backends plus the Catch2 test runner, and runs every test with `ctest`. Catch2 is fetched automatically on the first configure (this needs **git** and a network connection). `make coverage` additionally instruments `basic.c` and writes an lcov/gcov report to `build/tests-cov/coverage/index.html`.
-
-## The build targets at a glance
-
-| Command               | What it does                                         |
-| --------------------- | ---------------------------------------------------- |
-| `make`                | build the kernel to `build/kernel8.img`              |
-| `make config`         | choose resolution / font / keyboard, then clean      |
-| `make run`            | boot the kernel in QEMU                              |
-| `make seeds`          | build the native `.SED` extensions                   |
-| `make sdcard`         | make a blank FAT16 `sd.img` disk for QEMU            |
-| `make sdimage`        | build a bootable `berrybasic-sd.img` for a real Pi 4 |
-| `make flash`          | flash that image to an SD card (safe picker)         |
-| `make host`           | build the interpreter as a native Linux program      |
-| `make test`           | build and run the unit-test suite                    |
-| `make coverage`       | unit tests + an HTML coverage report                 |
-| `make newseed NAME=x` | scaffold a new seed project                          |
-| `make clean`          | remove the `build/` directory                        |
+A seed is a *fragment* of native code you call from BASIC. A whole native *program* is a **POD**, and around it sits a small toolchain that runs on the machine itself: the **tcc** C compiler, static-library **packets** (`.PKT`), and the **grow** build system. Those, the `RUN`/`PODLOAD`/`PODINFO` commands that drive them, the POD and PKT file formats, and how to build BerryBasiC itself from source, are all covered in the companion document ***BerryBasiC Native Code and Toolchain*** (`doc/BerryBasiC Native Code and Toolchain.md`). This reference stays with the BASIC language.
 
 # Under the Hood - Kernel, Drivers and Boot
 

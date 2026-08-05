@@ -16,7 +16,7 @@ static long parse_long(const char *s) {
     return neg ? -v : v;
 }
 
-static void put_long(const PodServices *svc, long v) {
+static void put_long(const BerryServices *svc, long v) {
     char tmp[24]; int m = 0, neg = 0;
     unsigned long x;
     if (v < 0) { neg = 1; x = (unsigned long)(-v); } else x = (unsigned long)v;
@@ -28,7 +28,7 @@ static void put_long(const PodServices *svc, long v) {
     svc->puts(out, n);
 }
 
-int pod_main(const PodServices *svc, int argc, const char *const *argv)
+int pod_main(const BerryServices *svc, int argc, const char *const *argv)
 {
     long total = 0;
     for (int i = 1; i < argc; i++) total += parse_long(argv[i]);

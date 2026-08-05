@@ -286,6 +286,45 @@ static void copy_fname(value_t s, char *out, int outsz) {
     out[n] = 0;
 }
 
+// Read a file/directory path starting at the lexer cursor `lx`, accepting either
+// a quoted string ("my dir") or a bare word typed without quotes (examples, ..,
+// build/PLOT.POD). Reading straight from the raw source is what lets a path's
+// '.', '..' and '/' through: the expression tokeniser rejects a lone '.', so a
+// bare relative path must never be lexed as an operand. `defext` (e.g. ".BAS")
+// is appended when the name carries no '.', or pass 0 to keep the name exactly as
+// typed (directories). A path is a literal here, not an expression, so use quotes
+// only when the name contains spaces. Callers must position `lx` just after the
+// keyword with the argument NOT yet lexed (do not lex_next first); a caller whose
+// argument is already the current token rewinds with `lx = tok_start;` first.
+static int read_path(char *out, int outsz, const char *defext) {
+    while (is_space(*lx)) lx++;
+    int n = 0;
+    if (*lx == '"') {                            // quoted: literal between the quotes
+        lx++;
+        while (*lx && *lx != '"') { if (n < outsz - 1) out[n++] = *lx; lx++; }
+        if (*lx == '"') lx++;
+    } else {                                     // bare: raw run of path characters
+        while (*lx && (is_alnum(*lx) || *lx == '.' || *lx == '/' ||
+                       *lx == '_' || *lx == '-' || *lx == '~')) {
+            if (n < outsz - 1) out[n++] = *lx;
+            lx++;
+        }
+    }
+    out[n] = 0;
+    if (n == 0) { err("Expected a file name"); return 0; }
+    if (defext) {                                // default the extension if none given
+        int has_dot = 0;
+        for (int i = 0; i < n; i++) if (out[i] == '.') has_dot = 1;
+        int el = 0; while (defext[el]) el++;
+        if (!has_dot && n + el < outsz) {
+            for (int i = 0; i < el; i++) out[n++] = defext[i];
+            out[n] = 0;
+        }
+    }
+    lex_next();                                  // re-lex whatever follows the path
+    return 1;
+}
+
 // Directory-scan cursor state, shared by DIROPEN / DIRNEXT and the field words
 // DIRNAME$ / DIRSIZE / DIRTYPE / DIRDATE$ / DIRTIME$. Only one scan runs at a
 // time; g_dir_valid says whether g_dirent holds a live entry.

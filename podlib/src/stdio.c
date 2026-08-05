@@ -307,12 +307,15 @@ int vfprintf(FILE *fp, const char *fmt, va_list ap) {
     int n = core_format(&measure, fmt, ap2);
     va_end(ap2);
     if (n < 0) return -1;
-    char *buf = malloc((size_t)n + 1);
+    // Format into a stack buffer for the common (short) case, so printf works
+    // even in a POD that did not declare CAP_HEAP; only spill to malloc when big.
+    char stackbuf[512];
+    char *buf = ((size_t)n + 1 <= sizeof stackbuf) ? stackbuf : malloc((size_t)n + 1);
     if (!buf) return -1;
     sbuf build = { buf, (size_t)n + 1, 0 };
     core_format(&build, fmt, ap);
     int w = (int)fwrite(buf, 1, (size_t)n, fp);
-    free(buf);
+    if (buf != stackbuf) free(buf);
     return w;
 }
 int fprintf(FILE *fp, const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = vfprintf(fp, fmt, ap); va_end(ap); return r; }

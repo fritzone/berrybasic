@@ -16,7 +16,7 @@ POD_VERSION("1.0")
 POD_DESCRIPTION("adds a HYPOT(a,b) function to BASIC")
 POD_NEEDS(CAP_KEYWORD, "KEYWORD=registers the HYPOT function")
 
-double kw_hypot(const PodServices *svc, const pod_arg *argv, int argc)
+double kw_hypot(const BerryServices *svc, const berry_arg *argv, int argc)
 {
     double a = argv[0].num, b = argv[1].num;
     double s = a * a + b * b, x = s;

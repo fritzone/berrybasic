@@ -83,6 +83,7 @@ int  con_inkey(int cs) { (void)cs; return -1; }
 int  con_pos(void) { return 0; }
 int  con_vpos(void) { return 0; }
 int  con_rows(void) { return 0; }       // never page in tests
+int  con_cols(void) { return 0; }       // unknown in tests
 int  con_splash(const char *b) { (void)b; return 0; }
 
 // Track the graphics mode so GMODE and the RUN/NEW reset are unit-testable.

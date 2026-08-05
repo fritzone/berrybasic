@@ -56,7 +56,7 @@ sed -e "s|@NAME@|$name|g" -e "s|@UPPER@|$UPPER|g" > "$DIR/$name.c" <<'EOF'
 // A seed must stay self-contained: work through argv, your own helpers, the
 // seed C library (<stdlib.h>/<string.h>/<ctype.h> - the OS-independent subset)
 // and the svc services. Anything else (printf, file I/O, ...) fails to link.
-// See the SeedServices vtable in seed.h for the full service API.
+// See the BerryServices vtable in seed.h for the full service API.
 //
 // Split it up freely: every .c in this directory is compiled and linked into
 // the one blob, so helper functions can live in their own files (with a header

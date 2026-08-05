@@ -68,11 +68,30 @@ mcopy -i "$BOOTPART" "$KERNEL"                       ::kernel8.img
 # --- Build the data (BASIC programs) partition ------------------------------
 dd if=/dev/zero of="$DATAPART" bs=1M count="$DATA_MB" status=none
 mkfs.fat -F 32 -n BERRYDATA "$DATAPART" >/dev/null
-# Seed the user's example programs here (this is what CAT will list).
-for bas in "$ROOT"/examples/*.bas; do
-    [ -e "$bas" ] || break
-    mcopy -i "$DATAPART" "$bas" "::$(basename "$bas" | tr '[:lower:]' '[:upper:]')"
-done
+# Example programs live under /EXAMPLES, grouped by what they show (graphics,
+# files, hardware, language, modules, seeds, pods). Each group directory is
+# self-contained: an example that loads an asset carries its own copy, so you
+# can CD into a group and run anything in it. This keeps the card root tidy.
+if compgen -G "$ROOT/examples/*/" >/dev/null; then
+    mmd -i "$DATAPART" ::EXAMPLES
+    for dir in "$ROOT"/examples/*/; do
+        [ -d "$dir" ] || continue
+        group="$(basename "$dir" | tr '[:lower:]' '[:upper:]')"
+        mmd -i "$DATAPART" "::EXAMPLES/$group"
+        for file in "$dir"*; do
+            [ -e "$file" ] || continue
+            mcopy -i "$DATAPART" "$file" "::EXAMPLES/$group/$(basename "$file" | tr '[:lower:]' '[:upper:]')"
+        done
+    done
+    # poddemo drives HELLO.POD / HYPOT.POD (built by 'make pods'); ship them
+    # alongside it so the example is self-contained.
+    if [ -d "$ROOT/examples/pods" ]; then
+        for p in hello hypot; do
+            [ -e "$ROOT/build/pods/$p.POD" ] && \
+                mcopy -i "$DATAPART" "$ROOT/build/pods/$p.POD" "::EXAMPLES/PODS/$(echo $p | tr '[:lower:]' '[:upper:]').POD"
+        done
+    fi
+fi
 # Native seeds (built by 'make seeds') go in their own /seed directory: SEED/CALL
 # resolve a bare "NAME.SED" to /seed/NAME.SED, and keeping them out of the root
 # leaves CAT's default listing uncluttered with user programs.
@@ -114,7 +133,13 @@ fi
 mmd -i "$DATAPART" ::SYS 2>/dev/null || true
 mmd -i "$DATAPART" ::SYS/INCLUDE 2>/dev/null || true
 mmd -i "$DATAPART" ::SYS/INCLUDE/SYS 2>/dev/null || true
-mcopy -i "$DATAPART" "$ROOT/third_party/tinycc/include/pod.h" ::SYS/INCLUDE/POD.H
+# tcc's own freestanding headers (stddef.h, stdarg.h, float.h, pod.h, ...): the
+# pod-libc headers pull these in for size_t/va_list, so the on-machine compiler
+# needs them present or every compile fails at "#include <stddef.h>".
+for h in "$ROOT"/third_party/tinycc/include/*.h; do
+    [ -e "$h" ] || break
+    mcopy -i "$DATAPART" "$h" "::SYS/INCLUDE/$(basename "$h" | tr '[:lower:]' '[:upper:]')"
+done
 for h in "$ROOT"/podlib/include/*.h; do
     [ -e "$h" ] || break
     mcopy -i "$DATAPART" "$h" "::SYS/INCLUDE/$(basename "$h" | tr '[:lower:]' '[:upper:]')"
@@ -132,6 +157,11 @@ if compgen -G "$ROOT/build/lib/*.PKT" >/dev/null; then
         [ -e "$pkt" ] || break
         mcopy -i "$DATAPART" "$pkt" "::SYS/LIB/$(basename "$pkt" | tr '[:lower:]' '[:upper:]')"
     done
+    # the entry object for main()-based (pod-libc) programs, linked explicitly
+    [ -e "$ROOT/build/lib/crt0.o" ] && mcopy -i "$DATAPART" "$ROOT/build/lib/crt0.o" ::SYS/LIB/CRT0.O
+    # 128-bit soft-float runtime: shipped as a plain object (the on-machine packet
+    # linker loops on its symbol table), grow force-links it for CORE users.
+    [ -e "$ROOT/build/lib/pl_lib-arm64.o" ] && mcopy -i "$DATAPART" "$ROOT/build/lib/pl_lib-arm64.o" ::SYS/LIB/SOFTFP.O
 fi
 
 # Image files for LOADSPRITE (PNG/JPEG/BMP). Names are upper-cased to match the

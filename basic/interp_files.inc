@@ -23,40 +23,11 @@ static void stg_err(int code) {
     }
 }
 
-// Read the next filename operand into a NUL-terminated buffer. Accepts either a
-// quoted string ("name.bas") or a bare filename typed without quotes (name.bas
-// or just name). Reads straight from the raw source so characters like '.' don't
-// trip the expression tokeniser, then resyncs the tokeniser. If no extension is
-// given, ".BAS" is appended, so "LOAD WELCOME" finds WELCOME.BAS. The FAT layer
-// is case-insensitive, so the name is kept as typed. Callers must NOT lex past
-// the keyword first - lx still points just after LOAD/SAVE/DELETE.
+// LOAD/SAVE/DELETE filename: quoted or bare (LOAD WELCOME finds WELCOME.BAS via
+// the .BAS default). Thin wrapper over read_path; callers must not lex past the
+// keyword first, so lx still points just after LOAD/SAVE/DELETE.
 static int read_filename(char *out, int outsz) {
-    while (is_space(*lx)) lx++;
-    int n = 0;
-    if (*lx == '"') {                          // quoted form: "name"
-        lx++;
-        while (*lx && *lx != '"') { if (n < outsz - 1) out[n++] = *lx; lx++; }
-        if (*lx == '"') lx++;
-    } else {                                   // bare form: letters digits . / _ -
-        while (*lx && (is_alnum(*lx) || *lx == '.' || *lx == '/' ||
-                       *lx == '_' || *lx == '-')) {
-            if (n < outsz - 1) out[n++] = *lx;
-            lx++;
-        }
-    }
-    out[n] = 0;
-    if (n == 0) { err("Expected a file name"); return 0; }
-
-    // Default the extension to .BAS when the name has none.
-    int has_dot = 0;
-    for (int i = 0; i < n; i++) if (out[i] == '.') has_dot = 1;
-    if (!has_dot && n + 4 < outsz) {
-        out[n++] = '.'; out[n++] = 'B'; out[n++] = 'A'; out[n++] = 'S';
-        out[n] = 0;
-    }
-
-    lex_next();                                // resync the tokeniser for what follows
-    return 1;
+    return read_path(out, outsz, ".BAS");      // quoted-or-bare, .BAS default
 }
 
 static int uint_to_str(char *p, int v) {        // unsigned decimal -> p, returns length
@@ -366,16 +337,24 @@ static void cat_simple(const char *path) {
 // prints just the names. An optional path lets you peek into a subdirectory
 // (e.g. CAT "SEED") without CD-ing into it.
 static void stmt_cat(void) {
-    lex_next();                                       // consume CAT / DIR
+    // lx sits just after CAT/DIR. Read the optional SIMPLE flag and optional path
+    // straight from the source (not via the tokeniser) so a bare or leading-dot
+    // path (CAT .., CAT sub) needs no quotes, just as CD does.
+    while (is_space(*lx)) lx++;
     int simple = 0;
-    if (word_is("SIMPLE")) { simple = 1; lex_next(); }
+    if (up(lx[0]) == 'S' && up(lx[1]) == 'I' && up(lx[2]) == 'M' && up(lx[3]) == 'P' &&
+        up(lx[4]) == 'L' && up(lx[5]) == 'E' && !is_alnum(lx[6]) && lx[6] != '.') {
+        lx += 6; simple = 1;
+        while (is_space(*lx)) lx++;
+    }
 
     char pathbuf[80];
     const char *path = ".";
-    if (tok != T_EOL && tok != T_COLON) {             // optional directory to list
-        value_t s = need_str(); if (g_err) return;
-        copy_fname(s, pathbuf, sizeof pathbuf);
+    if (*lx && *lx != ':') {                          // optional directory to list
+        if (!read_path(pathbuf, sizeof pathbuf, 0)) return;
         path = pathbuf;
+    } else {
+        lex_next();                                   // no path: resync to EOL/COLON
     }
 
     if (simple) {
@@ -450,22 +429,19 @@ static void stmt_cat(void) {
 
 // Directory commands take a quoted path (no ".BAS" default): MKDIR/CD/RMDIR
 // "name", and PWD prints the current directory.
+// lx sits just after the keyword here; read_path reads the path raw from there,
+// so a bare "cd ..", "cd /sys" or "cd examples" needs no quotes. Do NOT lex_next
+// first: a leading '.' (as in "..") is not a valid expression token.
 static void stmt_mkdir(void) {
-    lex_next();
-    value_t s = need_str(); if (g_err) return;
-    char nm[64]; copy_fname(s, nm, sizeof nm);
+    char nm[64]; if (!read_path(nm, sizeof nm, 0)) return;
     int r = stg_mkdir(nm); if (r) stg_err(r);
 }
 static void stmt_rmdir(void) {
-    lex_next();
-    value_t s = need_str(); if (g_err) return;
-    char nm[64]; copy_fname(s, nm, sizeof nm);
+    char nm[64]; if (!read_path(nm, sizeof nm, 0)) return;
     int r = stg_rmdir(nm); if (r) stg_err(r);
 }
 static void stmt_cd(void) {
-    lex_next();
-    value_t s = need_str(); if (g_err) return;
-    char nm[64]; copy_fname(s, nm, sizeof nm);
+    char nm[64]; if (!read_path(nm, sizeof nm, 0)) return;
     int r = stg_chdir(nm); if (r) stg_err(r);
 }
 static void stmt_pwd(void) {
@@ -565,7 +541,7 @@ static void stmt_seed(void) {
     struct seed_header hdr;                       // copy bytewise (-mstrict-align safe)
     for (int i = 0; i < (int)sizeof(hdr); i++) ((char *)&hdr)[i] = stg_buf[i];
     if (hdr.magic != SEED_MAGIC)            { err("Not a valid seed file"); return; }
-    if (hdr.version > SEED_ABI_VERSION)     { err("Seed needs a newer interpreter"); return; }
+    if (hdr.version > BERRY_ABI_VERSION)    { err("Seed needs a newer interpreter"); return; }
     if (len > SEED_SLOT_SIZE)               { err("Seed is too big"); return; }
     if (hdr.entry_off >= (uint32_t)len)     { err("Not a valid seed file"); return; }
 
