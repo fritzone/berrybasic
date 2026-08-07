@@ -29,6 +29,7 @@
 #include "tccasm.c"
 #include "tccelf.c"
 #include "tccpod.c"
+#include "tccseed.c"
 #include "tccrun.c"
 #ifdef TCC_TARGET_I386
 #include "i386-gen.c"
@@ -979,6 +980,29 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type)
         if (!s->section_align)
             s->section_align = 0x1000;
     }
+    if (s->seed) {
+        /* A seed is shaped like a POD -- static, freestanding, base 0, fully
+           position independent (tccseed.c) -- but it lives in a small resident
+           slot with no MMU split, so it packs sections tightly (16-byte gaps)
+           rather than paying a page per section as an ELF exe would.
+
+           text_addr is 48, not 0: the seed_header (16 bytes) and an optional
+           seed_keyword descriptor (32 bytes) occupy the front of the blob, and
+           the interpreter copies it into a 4 KiB-aligned slot.  Linking the code
+           to start at 48 -- rather than linking at 0 and prepending the header --
+           keeps every byte's blob offset equal to its link address, so the low
+           12 bits an ADRP+ADD pair bakes in stay correct at load (a non-page
+           prepend would corrupt them).  tccseed.c writes the header into that
+           reserved [0,48) gap. */
+        output_type = TCC_OUTPUT_EXE;
+        s->output_format = TCC_OUTPUT_FORMAT_SEED;
+        s->static_link = 1;
+        s->nostdlib = 1;
+        s->has_text_addr = 1;
+        s->text_addr = 48;
+        if (!s->section_align)
+            s->section_align = 16;
+    }
 #ifdef CONFIG_TCC_PIE
     if (output_type == TCC_OUTPUT_EXE && !s->pod)
         output_type |= TCC_OUTPUT_DYN;
@@ -1602,6 +1626,7 @@ enum {
     TCC_OPTION_nostdinc,
     TCC_OPTION_nostdlib,
     TCC_OPTION_pod,
+    TCC_OPTION_seed,
     TCC_OPTION_print_search_dirs,
     TCC_OPTION_rdynamic,
     TCC_OPTION_pthread,
@@ -1691,6 +1716,7 @@ static const TCCOption tcc_options[] = {
     { "nostdinc", TCC_OPTION_nostdinc, 0 },
     { "nostdlib", TCC_OPTION_nostdlib, 0 },
     { "pod", TCC_OPTION_pod, 0 },
+    { "seed", TCC_OPTION_seed, 0 },
     { "print-search-dirs", TCC_OPTION_print_search_dirs, 0 },
     { "w", TCC_OPTION_w, 0 },
     { "E", TCC_OPTION_E, 0},
@@ -2053,6 +2079,12 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
                tcc_set_output_type once the output type is known. */
             s->pod = 1;
             s->output_format = TCC_OUTPUT_FORMAT_POD;
+            break;
+        case TCC_OPTION_seed:
+            /* Emit a BerryBasiC seed.  Same base-0 PIC link shaping as a POD
+               (pinned in tcc_set_output_type); the wrapper is tccseed.c. */
+            s->seed = 1;
+            s->output_format = TCC_OUTPUT_FORMAT_SEED;
             break;
         case TCC_OPTION_run:
 #ifdef TCC_IS_NATIVE

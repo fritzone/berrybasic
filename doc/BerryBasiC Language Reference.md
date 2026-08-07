@@ -4530,7 +4530,7 @@ sorted E: 1 2 5 8 9
 
 ## Beyond seeds: whole native programs
 
-A seed is a *fragment* of native code you call from BASIC. A whole native *program* is a **POD**, and around it sits a small toolchain that runs on the machine itself: the **tcc** C compiler, static-library **packets** (`.PKT`), and the **grow** build system. Those, the `RUN`/`PODLOAD`/`PODINFO` commands that drive them, the POD and PKT file formats, and how to build BerryBasiC itself from source, are all covered in the companion document ***BerryBasiC Native Code and Toolchain*** (`doc/BerryBasiC Native Code and Toolchain.md`). This reference stays with the BASIC language.
+A seed is a *fragment* of native code you call from BASIC. A whole native *program* is a **POD**, and around it sits a small toolchain that runs on the machine itself: the **tcc** C compiler, static-library **packets** (`.PKT`), and the **grow** build system. Those, the `RUN`/`PODLOAD`/`PODINFO` commands that drive them, the POD and PKT file formats, and how to build BerryBasiC itself from source, are all covered in the book **BerryBasiC Manual**, found at https://leanpub.com/berrybasicmanual. This reference stays with the BASIC language.
 
 # Under the Hood - Kernel, Drivers and Boot
 

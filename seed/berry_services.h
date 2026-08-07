@@ -17,8 +17,10 @@
 
 // One unified table replaces the old SeedServices (ABI 13) and PodServices
 // (ABI 4). v14 was the first unified version; v15 appended `vdu`; v16 appended
-// `screen_size`.
-#define BERRY_ABI_VERSION 16u
+// `screen_size`; v17 appended `con_font`/`con_glyph`; v18 appended the directory
+// browsing set (dir_open/dir_read/getcwd/chdir); v19 appended the clipboard
+// (clip_set/clip_get/clip_len).
+#define BERRY_ABI_VERSION 19u
 
 // Modes for the file_open service.
 #define BERRY_FOPEN_READ   0
@@ -203,6 +205,33 @@ typedef struct BerryServices {
     // live resolution (BASIC's SCREEN changes it). Either pointer may be 0. A
     // full-screen program reads this instead of assuming 80x25.
     void (*screen_size)(int *cols, int *rows);
+
+    // --- console font, drawn in graphics mode (CAP_GRAPHICS) ---------------
+    // The console's own bitmap font, for a POD that wants to render text exactly
+    // the way the system does (a full-screen editor, say) while drawing through
+    // the graphics surface, so it composes with the back buffer and never flickers.
+    // con_font reports the character cell size in pixels; con_glyph fills one cell
+    // at pixel (px,py) with `bg` and draws glyph `ch` (0..255) in `fg`. 0xRRGGBB.
+    void (*con_font)(int *w, int *h);
+    void (*con_glyph)(int px, int py, int ch, unsigned fg, unsigned bg);
+
+    // --- directory browsing (CAP_DIRS) -------------------------------------
+    // Enumerate and navigate directories, so a POD (a file dialog, say) can
+    // browse the card. One scan is active at a time: dir_open starts it, then
+    // dir_read yields each entry until it returns 0. getcwd/chdir report and set
+    // the current directory. These back the pod-libc <dirent.h> and getcwd/chdir.
+    int (*dir_open)(const char *path);                    // 1 ok, 0 could not open
+    int (*dir_read)(char *name, int namesz, int *is_dir, long *size);  // 1 entry, 0 end
+    int (*getcwd)(char *buf, int sz);                     // -> length, or <0 on error
+    int (*chdir)(const char *path);                       // 0 ok, <0 error
+
+    // --- system clipboard (CAP_CONSOLE) ------------------------------------
+    // One shared buffer in the machine (not the POD), so text copied here can be
+    // pasted at the BASIC prompt or in the next program that runs. clip_get fills
+    // buf and returns the FULL length (so the caller can tell it was truncated).
+    void (*clip_set)(const char *data, int len);
+    int  (*clip_get)(char *buf, int max);
+    int  (*clip_len)(void);
 } BerryServices;
 
 #endif // BERRY_SERVICES_H

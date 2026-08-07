@@ -1,12 +1,12 @@
 # BerryBasiC
 
-**A bare-metal BASIC for the Raspberry Pi 4.** No operating system, no shell, no runtime: the Pi boots straight into a `>` prompt in about a second, and the whole machine is yours.
-
-***BerryBasiC*** is a modern, BBC-flavoured BASIC that runs as the *only* program on the hardware. It brings back the directness the 8-bit home computers had (type a statement, watch it happen, poke a pin, light a pixel) on hardware that can actually keep up. It is not nostalgia for old syntax. It is nostalgia for **transparency**: a machine small enough that one person can understand it from the first instruction to the last pixel.
+**A bare-metal BASIC for the Raspberry Pi 4.** No operating system below, no shell, no explicit runtime: the Pi boots straight into a Basic `>` prompt in an instant, and the whole machine is yours. You can start coding.
 
 ***BerryBasiC*** is a modern, BBC-flavoured BASIC that runs as the *only* program on the hardware. It brings back the directness the 8-bit home computers had — type a statement, watch it happen, poke a pin, light a pixel — on hardware that can actually keep up. It is not nostalgia for old syntax. It is nostalgia for **transparency**: a machine small enough that one person can understand it from the first instruction to the last pixel.
 
 ## Features
+
+While mainly it is still a BASIC interpreter and executor, the ***BerryBasiC*** ecosystem provides a few noteworthy features.
 
 **A structured language, not a museum piece**
 
@@ -32,16 +32,13 @@
 - A freestanding seed libc (`malloc`, `qsort`, `string.h`, `ctype.h`) over a private heap
 - Seeds can register **new language keywords** and are autoloaded at boot
 
-```basic
-10 MODE 1
-20 FOR RD = 400 TO 1 STEP -1
-30   A = (400 - RD) / 400 * 2 * PI
-40   GCOL 128 + 127*SIN(A), 128 + 127*SIN(A+2.0944), 128 + 127*SIN(A+4.1888)
-50   CIRCLE FILL 640, 512, RD
-60 NEXT
-```
+**Native Apps**
+
+If you are dissatisfied with an interpreted language there is a ported **tinycc** (Tiny C Complier) that creates native applications and even a rudimentary build system to make those build up. The limit for what you can create with those is bounded only by your imagination. 
 
 ## Quick start
+
+This is the place to start if you want to go straight away into coding.
 
 ### Build
 
@@ -82,7 +79,7 @@ make sdimage    # builds berrybasic-sd.img (firmware + kernel + seeds)
 make flash      # interactively flash it to a removable card
 ```
 
-Then put the card in a Pi 4, connect HDMI and a USB keyboard, and power on. See [`doc/README-realhw.md`](https://claude.ai/chat/doc/README-realhw.md) for wiring and troubleshooting.
+Then put the card in a Pi 4, connect HDMI and a USB keyboard, and power on. 
 
 ### Configure
 
@@ -139,18 +136,20 @@ SEED_EXPORT(seed) {
 }
 ```
 
-There are several **BASIC examples** in [`examples/`](https://claude.ai/chat/examples/), grouped by what they show — `graphics/` (Mandelbrot, fractals, sprites, TrueType text), `language/` (functions, records, collections, strings), `files/`, `hardware/` (GPIO, I²C, sound, mouse, keyboard, events), `modules/`, `seeds/` and `pods/`. Each group is self-contained (an example that loads an asset carries its own copy), and on the SD card they ship under `/EXAMPLES/<GROUP>/`, so `CD "/EXAMPLES/GRAPHICS"` then `CAT` shows the lot. There are also **seed examples** in [`seed/examples/`](https://claude.ai/chat/seed/examples/).
+There are several **BASIC examples** in `examples/`, grouped by what they show — `graphics/` (Mandelbrot, fractals, sprites, TrueType text), `language/` (functions, records, collections, strings), `files/`, `hardware/` (GPIO, I²C, sound, mouse, keyboard, events), `modules/`, `seeds/` and `pods/`. Each group is self-contained (an example that loads an asset carries its own copy), and on the SD card they ship under `/EXAMPLES/<GROUP>/`, so `CD "/EXAMPLES/GRAPHICS"` then `CAT` shows the lot. There are also **seed examples** in `seed/examples/`.
 
 ---
 
-## ## Status and contributing
+## Status and contributing
 
-BerryBasiC is an actively developed hobby project. Issues, ideas and pull requests are welcome — especially example programs, seeds, and hardware support.
+***BerryBasiC*** is an actively developed hobby project. Issues, ideas and pull requests are welcome — especially example programs, seeds, and hardware support.
 
 If you're hacking on the interpreter, `make host` plus `make test` gives a fast edit-build-test loop with no emulator in the way.
 
 ## License
 
-GPL-3.0. See [LICENSE](https://claude.ai/chat/LICENSE).
+GPL-3.0. See [LICENSE](https://opensource.org/license/GPL-3.0).
 
 Vendored third-party code (`stb_image`, `stb_truetype`) lives in `third_party/` under its own terms.
+
+**tinycc** (tiny c compiler) also lives there, under its own terms.

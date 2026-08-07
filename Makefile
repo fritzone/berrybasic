@@ -218,21 +218,23 @@ POD_TCC  = $(TCC_DIR)/arm64-tcc
 # rule depends on $(POD_TCC), which order-only-depends on this, so the copy is
 # refreshed before any POD is compiled.
 TCC_SVC_HDR = $(TCC_DIR)/include/berry_services.h
+# seed.h rides along in the compiler include tree too, so `tcc -seed prog.c`
+# finds <seed.h> on the machine (it pulls in berry_services.h + stdint.h, which
+# already ship to /SYS/INCLUDE). Also a generated copy (see .gitignore).
+TCC_SEED_HDR = $(TCC_DIR)/include/seed.h
 POD_SRC  = $(wildcard $(TCC_DIR)/examples/pod_*.c)
 POD_OUT  = $(patsubst $(TCC_DIR)/examples/pod_%.c,$(BUILD_DIR)/pods/%.POD,$(POD_SRC))
-# System command PODs. pods/*.c are self-contained (a bare pod_main); pods/clib/*.c
-# are ordinary C programs linked with the pod-libc (crt0 + stdio/stdlib/...). Both
-# land in /sys and become shell commands.
-SYS_SRC  = $(wildcard pods/*.c)
-SYS_OUT  = $(patsubst pods/%.c,$(BUILD_DIR)/sys/%.POD,$(SYS_SRC))
-CLIB_SRC = $(wildcard pods/clib/*.c)
-CLIB_OUT = $(patsubst pods/clib/%.c,$(BUILD_DIR)/sys/%.POD,$(CLIB_SRC))
+# The applications installed to /sys live under programs/ (see APP_LIST below).
+# The `sum` demo command and the MATH.PKT demo packet are example sources under
+# examples/pods/ (they ship to /EXAMPLES/PODS too), but are still built and
+# installed so `sum` works and on-device PODs can `-l MATH`.
+SUM_POD  = $(BUILD_DIR)/sys/SUM.POD
 # tcc itself, built as a POD (self-hosting C compiler on the machine).
 TCC_POD  = $(BUILD_DIR)/sys/tcc.POD
-# Seed packets (.PKT): static libraries in /SYS/LIB. pods/lib/*.c form MATH.PKT;
-# GFX.PKT is the BGI-style <graphics.h> library over the graphics services.
-PKT_LIB_SRC = $(wildcard pods/lib/*.c)
-PKT_LIB_OBJ = $(patsubst pods/lib/%.c,$(BUILD_DIR)/lib/%.o,$(PKT_LIB_SRC))
+# Seed packets (.PKT): static libraries in /SYS/LIB. examples/pods/imath.c forms
+# MATH.PKT; GFX.PKT is the BGI-style <graphics.h> library over the gfx services.
+MATH_SRC    = examples/pods/imath.c
+MATH_OBJ    = $(BUILD_DIR)/lib/imath.o
 MATH_PKT    = $(BUILD_DIR)/lib/MATH.PKT
 GFX_PKT     = $(BUILD_DIR)/lib/GFX.PKT
 # CORE.PKT is the pod-libc (stdio/stdlib/string/math128...) as a packet; crt0.o
@@ -246,18 +248,35 @@ CRT0_OBJ    = $(BUILD_DIR)/lib/crt0.o
 SOFTFP_OBJ  = $(BUILD_DIR)/lib/pl_lib-arm64.o
 PODLIB_CC   = $(POD_TCC) -B$(TCC_DIR) -nostdinc -Ipodlib/include -I$(TCC_DIR)/include
 
-# The text editor (programs/edit/) is a pod-libc program; it ships to /SYS as the
-# `ed` command (EDIT is a reserved BASIC keyword). Depends on the ABI header so
-# an ABI change rebuilds it.
-EDIT_POD = $(BUILD_DIR)/sys/ED.POD
+# Native applications: each is a program in programs/<dir>/<dir>.c that installs
+# to /SYS as <POD>.POD. An entry is "<dir>:<POD>[:bare]" - the optional ":bare"
+# marks a self-contained pod_main POD (built with `tcc -pod`); otherwise it is a
+# pod-libc program (linked with the runtime by podcc.sh). To add one, drop
+# programs/<name>/<name>.c and add it here. `edit` -> ED.POD (EDIT is a keyword).
+APP_LIST = edit:ED grow:GROW show:SHOW echo:ECHO:bare
+app_dir  = $(word 1,$(subst :, ,$(1)))
+app_pod  = $(word 2,$(subst :, ,$(1)))
+app_bare = $(word 3,$(subst :, ,$(1)))
+APP_OUT  = $(foreach a,$(APP_LIST),$(BUILD_DIR)/sys/$(call app_pod,$(a)).POD)
 
-pods: $(POD_OUT) $(SYS_OUT) $(CLIB_OUT) $(TCC_POD) $(MATH_PKT) $(GFX_PKT) $(CORE_PKT) $(CRT0_OBJ) $(SOFTFP_OBJ) $(EDIT_POD)
+pods: $(POD_OUT) $(SUM_POD) $(APP_OUT) $(TCC_POD) $(MATH_PKT) $(GFX_PKT) $(CORE_PKT) $(CRT0_OBJ) $(SOFTFP_OBJ)
 
-$(EDIT_POD): programs/edit/edit.c $(TCC_SVC_HDR) $(POD_TCC) tools/podcc.sh \
-             $(wildcard podlib/src/*) $(wildcard podlib/include/*) | $(BUILD_DIR)
+# The `sum` example command (a bare pod_main) installs to /SYS.
+$(SUM_POD): examples/pods/sum.c $(TCC_SVC_HDR) $(POD_TCC) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/sys
-	tools/podcc.sh $< $@
-	@echo "  built /sys editor $@"
+	$(POD_TCC) -B$(TCC_DIR) -pod $< -o $@
+	@echo "  built /sys command $@"
+
+# One rule per application (source programs/<dir>/<dir>.c). Depends on the ABI
+# header so an ABI change rebuilds it; pod-libc apps also depend on the runtime.
+define APP_RULE
+$(BUILD_DIR)/sys/$(call app_pod,$(1)).POD: programs/$(call app_dir,$(1))/$(call app_dir,$(1)).c \
+        $(TCC_SVC_HDR) $(POD_TCC) $(if $(call app_bare,$(1)),,tools/podcc.sh $(wildcard podlib/src/*) $(wildcard podlib/include/*)) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/sys
+	$(if $(call app_bare,$(1)),$(POD_TCC) -B$(TCC_DIR) -pod $$< -o $$@,tools/podcc.sh $$< $$@)
+	@echo "  built /sys program $$@"
+endef
+$(foreach a,$(APP_LIST),$(eval $(call APP_RULE,$(a))))
 
 $(BUILD_DIR)/lib/pl_%.o: podlib/src/%.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/lib
@@ -274,12 +293,13 @@ $(CRT0_OBJ): podlib/src/crt0.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR
 $(CORE_PKT): $(CORE_OBJ) $(POD_TCC)
 	$(POD_TCC) -pkt $@ $(CORE_OBJ)
 
-$(BUILD_DIR)/lib/%.o: pods/lib/%.c $(POD_TCC) | $(BUILD_DIR)
+# MATH.PKT: the imath demo packet (source under examples/pods/). `tcc -pkt`
+# derives the symbol table and capabilities from the member.
+$(MATH_OBJ): $(MATH_SRC) $(POD_TCC) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/lib
 	$(POD_TCC) -B$(TCC_DIR) -c $< -o $@
-# `tcc -pkt` derives the symbol table and capabilities from the members.
-$(MATH_PKT): $(PKT_LIB_OBJ) $(POD_TCC)
-	$(POD_TCC) -pkt $@ $(PKT_LIB_OBJ)
+$(MATH_PKT): $(MATH_OBJ) $(POD_TCC)
+	$(POD_TCC) -pkt $@ $(MATH_OBJ)
 
 # The graphics library: one member (graphics.o), compiled against the pod-libc
 # headers, packed into GFX.PKT. Its .pod.desc declares CAP_GRAPHICS | CAP_TIME,
@@ -288,13 +308,6 @@ $(GFX_PKT): podlib/src/graphics.c podlib/include/graphics.h $(TCC_DIR)/include/p
 	@mkdir -p $(BUILD_DIR)/lib
 	$(POD_TCC) -B$(TCC_DIR) -nostdinc -Ipodlib/include -I$(TCC_DIR)/include -c $< -o $(BUILD_DIR)/lib/graphics.o
 	$(POD_TCC) -pkt $@ $(BUILD_DIR)/lib/graphics.o
-
-# pod-libc programs: compiled and linked against the runtime by tools/podcc.sh.
-$(BUILD_DIR)/sys/%.POD: pods/clib/%.c $(POD_TCC) tools/podcc.sh \
-                        $(wildcard podlib/src/*) $(wildcard podlib/include/*) | $(BUILD_DIR)
-	@mkdir -p $(BUILD_DIR)/sys
-	tools/podcc.sh $< $@
-	@echo "  built /sys program $@"
 
 # The self-hosted compiler: tools/buildtcc.sh compiles tinycc + the pod-libc and
 # links them with `arm64-tcc -pod`. Rebuilt when the pod-libc or the wrapper changes.
@@ -306,8 +319,11 @@ $(TCC_POD): $(POD_TCC) tools/buildtcc.sh $(TCC_DIR)/tcc_pod.c \
 $(TCC_SVC_HDR): seed/berry_services.h
 	cp $< $@
 
+$(TCC_SEED_HDR): seed/seed.h
+	cp $< $@
+
 # Build the AArch64 cross tcc once (it is what emits target PODs on this host).
-$(POD_TCC): | $(TCC_SVC_HDR)
+$(POD_TCC): | $(TCC_SVC_HDR) $(TCC_SEED_HDR)
 	@cd $(TCC_DIR) && [ -f config.mak ] || ./configure >/dev/null
 	@$(MAKE) --no-print-directory -C $(TCC_DIR) arm64-tcc
 
@@ -315,10 +331,5 @@ $(BUILD_DIR)/pods/%.POD: $(TCC_DIR)/examples/pod_%.c $(TCC_DIR)/include/pod.h $(
 	@mkdir -p $(BUILD_DIR)/pods
 	$(POD_TCC) -B$(TCC_DIR) -pod $< -o $@
 	@echo "  built pod $@"
-
-$(BUILD_DIR)/sys/%.POD: pods/%.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
-	@mkdir -p $(BUILD_DIR)/sys
-	$(POD_TCC) -B$(TCC_DIR) -pod $< -o $@
-	@echo "  built /sys command $@"
 
 .PHONY: all clean config newseed sdcard sdimage flash run host seeds pods test coverage

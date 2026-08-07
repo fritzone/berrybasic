@@ -365,6 +365,29 @@ static void svc_putc(int c)                       { con_putc((char)c); }
 static void svc_puts(const char *s, int len)      { con_putsn(s, len); }
 static void svc_vdu(int b)                         { con_vdu(b); }   // VDU control stream
 static void svc_screen_size(int *c, int *r)        { if (c) *c = con_cols(); if (r) *r = con_rows(); }
+static void svc_con_font(int *w, int *h)           { sgfx_font(w, h); }
+static void svc_con_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg) { sgfx_glyph(px, py, ch, fg, bg); }
+static int  svc_dir_open(const char *path)         { return stg_diropen(path) == 0 ? 1 : 0; }
+static int  svc_dir_read(char *name, int namesz, int *is_dir, long *size) {
+    stg_dirent e;
+    int r = stg_dirnext(&e);
+    if (r != 1) return 0;                                 // 0 = end (or error)
+    if (name && namesz > 0) { int i = 0; for (; e.name[i] && i < namesz - 1; i++) name[i] = e.name[i]; name[i] = 0; }
+    if (is_dir) *is_dir = e.is_dir;
+    if (size)   *size   = e.size;
+    return 1;
+}
+static int  svc_getcwd(char *buf, int sz) {
+    const char *c = stg_cwd(); int i = 0;
+    if (!buf || sz <= 0) return -1;
+    for (; c && c[i] && i < sz - 1; i++) buf[i] = c[i];
+    buf[i] = 0;
+    return i;
+}
+static int  svc_chdir(const char *path)            { return stg_chdir(path); }
+static void svc_clip_set(const char *d, int n)     { con_clip_set(d, n); }
+static int  svc_clip_get(char *b, int max)         { return con_clip_get(b, max); }
+static int  svc_clip_len(void)                     { return con_clip_len(); }
 static int  svc_getkey(void)                      { return bas_getkey(); }
 static int  svc_inkey(int cs)                     { return bas_inkey(cs); }
 // The call is the poll: nothing services the mouse while a seed runs, so a seed

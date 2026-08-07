@@ -84,6 +84,9 @@ int  con_pos(void) { return 0; }
 int  con_vpos(void) { return 0; }
 int  con_rows(void) { return 0; }       // never page in tests
 int  con_cols(void) { return 0; }       // unknown in tests
+void con_clip_set(const char *d, int n) { (void)d; (void)n; }
+int  con_clip_len(void) { return 0; }
+int  con_clip_get(char *b, int max) { (void)b; (void)max; return 0; }
 int  con_splash(const char *b) { (void)b; return 0; }
 
 // Track the graphics mode so GMODE and the RUN/NEW reset are unit-testable.

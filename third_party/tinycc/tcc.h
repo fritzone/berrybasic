@@ -837,6 +837,9 @@ struct TCCState {
     /* emit a BerryBasiC POD executable (-pod): a flat, capability-declaring,
        checksummed native image.  Implies a static, freestanding link at base 0. */
     int pod;
+    /* emit a BerryBasiC seed (-seed): like a POD but a flat blob with no chunks
+       and no RLOC, so it must be fully position independent (see tccseed.c). */
+    int seed;
     /* absolute relocations harvested for the POD's RLOC chunk, gathered while
        the .rela sections and filled GOT are still around (see pod_collect_relocs).
        Each entry is the 8 bytes the RLOC chunk stores: u32 offset, u8 kind, 3 pad. */
@@ -1558,6 +1561,7 @@ ST_FUNC Sym *gfunc_set_param(Sym *s, int c, int byref);
 #define TCC_OUTPUT_FORMAT_BINARY 1 /* binary image output */
 #define TCC_OUTPUT_FORMAT_COFF   2 /* COFF */
 #define TCC_OUTPUT_FORMAT_POD    3 /* BerryBasiC POD executable */
+#define TCC_OUTPUT_FORMAT_SEED   4 /* BerryBasiC seed blob (.SED) */
 #define TCC_OUTPUT_DYN           TCC_OUTPUT_DLL
 
 #define ARMAG  "!<arch>\n"    /* For COFF and a.out archives */
@@ -1606,6 +1610,7 @@ ST_FUNC addr_t get_sym_addr(TCCState *s, const char *name, int err, int forc);
 
 /* ------------ tccpod.c ------------ */
 ST_FUNC int tcc_output_pod(TCCState *s1, FILE *f, const char *filename);
+ST_FUNC int tcc_output_seed(TCCState *s1, FILE *f, const char *filename);
 ST_FUNC void pod_collect_relocs(TCCState *s1);
 ST_FUNC int tcc_load_packet(TCCState *s1, int fd);
 ST_FUNC void list_elf_symbols(TCCState *s, void *ctx,

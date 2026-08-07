@@ -88,6 +88,9 @@ static void    *pod_dn_alloca(unsigned a, unsigned b)          { (void)a; (void)
 static int      pod_dn_remove(const char *a)                   { (void)a; return -1; }
 static int      pod_dn_spawn(const char *a, int b, const char *const *c) { (void)a; (void)b; (void)c; return -1; }
 static int      pod_dn_mkdir(const char *a)                    { (void)a; return -1; }
+static int      pod_dn_diropen(const char *a)                  { (void)a; return 0; }   // 0 = failed
+static int      pod_dn_dirread(char *a, int b, int *c, long *d){ (void)a; (void)b; if (c) *c = 0; if (d) *d = 0; return 0; }
+static int      pod_dn_getcwd(char *a, int b)                  { if (a && b > 0) a[0] = 0; return -1; }
 static int      svc_pod_spawn(const char *path, int argc, const char *const *argv);
 static int      svc_pod_mkdir(const char *path) { return stg_mkdir(path); }
 // --- refusal stubs for the ABI v4 surface (ungranted -> no-op / harmless) ---
@@ -100,6 +103,7 @@ static long     pod_dn_longi(int a)                            { (void)a; return
 static int      pod_dn_ii(int a, int b)                        { (void)a; (void)b; return -1; }
 static void     pod_dn_mouse(int *a, int *b, int *c)           { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
 static void     pod_dn_scrsz(int *a, int *b)                   { if (a) *a = 0; if (b) *b = 0; }
+static void     pod_dn_glyph(int a, int b, int c, uint32_t d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
 static uint32_t pod_dn_getpix(int a, int b)                    { (void)a; (void)b; return 0; }
 static void     pod_dn_circ(int a, int b, int c, uint32_t d)   { (void)a; (void)b; (void)c; (void)d; }
 static void     pod_dn_fpoly(const int *a, int b, uint32_t c)  { (void)a; (void)b; (void)c; }
@@ -127,6 +131,8 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->realloc = pod_dn_realloc; s->alloc_aligned = pod_dn_alloca;
     s->file_remove = pod_dn_remove;
     s->spawn = pod_dn_spawn; s->mkdir = pod_dn_mkdir;
+    s->dir_open = pod_dn_diropen; s->dir_read = pod_dn_dirread;
+    s->getcwd = pod_dn_getcwd; s->chdir = pod_dn_mkdir;   // chdir refusal: -1
     // v4 defaults (all refusals; overwritten below by the granted groups)
     s->num_array = pod_dn_numarr; s->rec_array = pod_dn_recarr; s->rec_field = pod_dn_recfield;
     s->rec_get_str = pod_dn_recget; s->rec_set_str = pod_dn_recset;
@@ -149,11 +155,14 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->set_return_str = pod_dn_puts;
     s->vdu = pod_dn_putc;                           // (int)->void, harmless refusal
     s->screen_size = pod_dn_scrsz;
+    s->con_font = pod_dn_scrsz; s->con_glyph = pod_dn_glyph;
+    s->clip_set = pod_dn_puts; s->clip_get = pod_dn_getcwd; s->clip_len = pod_dn_geti;
 
     if (caps & POD_CAP_CONSOLE) {
         s->puts = svc_puts; s->putc = svc_putc; s->getkey = svc_getkey; s->inkey = svc_inkey;
         s->mouse = svc_mouse; s->keymods = svc_keymods; s->vdu = svc_vdu;
         s->screen_size = svc_screen_size;
+        s->clip_set = svc_clip_set; s->clip_get = svc_clip_get; s->clip_len = svc_clip_len;
     }
     if (caps & POD_CAP_VARS) {
         s->get_num = svc_get_num; s->set_num = svc_set_num;
@@ -181,6 +190,7 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
         s->font_load = svc_font_load; s->font_select = svc_font_select;
         s->font_size = svc_font_size; s->font_style = svc_font_style;
         s->gfx_text = svc_gfx_text; s->text_width = svc_text_width; s->text_height = svc_text_height;
+        s->con_font = svc_con_font; s->con_glyph = svc_con_glyph;
     }
     if (caps & POD_CAP_GPIO) {
         s->gpio_mode = svc_gpio_mode; s->gpio_write = svc_gpio_write; s->gpio_read = svc_gpio_read;
@@ -191,7 +201,11 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     if (caps & POD_CAP_TIME) s->time_cs = svc_time_cs;
     if (caps & POD_CAP_HEAP) { s->alloc = svc_alloc; s->free = svc_free; s->realloc = svc_realloc; s->alloc_aligned = svc_alloc_aligned; }
     if (caps & POD_CAP_SPAWN) s->spawn = svc_pod_spawn;
-    if (caps & POD_CAP_DIRS)  s->mkdir = svc_pod_mkdir;
+    if (caps & POD_CAP_DIRS) {
+        s->mkdir = svc_pod_mkdir;
+        s->dir_open = svc_dir_open; s->dir_read = svc_dir_read;
+        s->getcwd = svc_getcwd; s->chdir = svc_chdir;
+    }
     if (caps & POD_CAP_KEYWORD) s->set_return_str = svc_set_return_str;
 }
 

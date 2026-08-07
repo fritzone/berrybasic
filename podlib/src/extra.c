@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "pod_rt.h"
 
 // --- string searches -------------------------------------------------------
@@ -69,5 +70,29 @@ int mkdir(const char *path, int mode) {       /* routes to the CAP_DIRS service 
     (void)mode;
     return (pod_svc && pod_svc->mkdir) ? pod_svc->mkdir(path) : -1;
 }
+
+// --- <dirent.h> over the CAP_DIRS dir_open/dir_read services ---------------
+// The interpreter keeps a single directory-scan cursor, so there is one DIR.
+struct DIR { int open; struct dirent ent; };
+static struct DIR g_dir;
+
+DIR *opendir(const char *path) {
+    if (!pod_svc || !pod_svc->dir_open) return 0;
+    if (!pod_svc->dir_open(path)) return 0;
+    g_dir.open = 1;
+    return &g_dir;
+}
+struct dirent *readdir(DIR *d) {
+    int is_dir = 0; long size = 0;
+    if (!d || !d->open || !pod_svc || !pod_svc->dir_read) return 0;
+    if (!pod_svc->dir_read(d->ent.d_name, (int)sizeof d->ent.d_name, &is_dir, &size)) {
+        d->open = 0;
+        return 0;
+    }
+    d->ent.d_type = is_dir ? DT_DIR : DT_REG;
+    d->ent.d_size = size;
+    return &d->ent;
+}
+int closedir(DIR *d) { if (d) d->open = 0; return 0; }
 int isatty(int fd)                    { return fd <= 2; }
 long clock(void) { return pod_svc && pod_svc->time_cs ? (long)pod_svc->time_cs() : 0; }

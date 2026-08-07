@@ -39,6 +39,11 @@ int  con_pos(void);                    // text cursor column (POS)
 int  con_vpos(void);                   // text cursor row (VPOS)
 int  con_rows(void);                   // text rows on screen, or 0 if unpaged (host/tests)
 int  con_cols(void);                   // text columns on screen, or 0 (host/tests)
+
+// System clipboard (one kernel-side buffer, shared by the REPL and every POD).
+void con_clip_set(const char *data, int len);
+int  con_clip_len(void);
+int  con_clip_get(char *buf, int max);   // fills buf, returns the FULL stored length
 // Show the boot logo + banner if appropriate (target QEMU only). Returns 1 if it
 // printed `banner` itself (beside the logo); 0 if the caller should print it.
 int  con_splash(const char *banner);

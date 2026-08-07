@@ -492,12 +492,13 @@ static void arm64_sym(int r, Sym *sym, addr_t addend)
     greloca(cur_text_section, sym, ind, R_AARCH64_ADD_ABS_LO12_NC, 0);
     o(ARM64_ADD_IMM | ARM64_SF(1) | ARM64_RN(r) | r); // add xr, xr, #sym
 #else
-    if (tcc_state->pod) {
-        /* A POD is one contiguous image loaded on a page boundary, so an
-           ADRP+ADD pair addresses any symbol within it PC-relatively and stays
-           valid wherever the loader places it.  Taking this direct path instead
-           of the GOT is what keeps POD code position independent (no GOT slot to
-           relocate); only genuine data pointers then need an RLOC entry. */
+    if (tcc_state->pod || tcc_state->seed) {
+        /* A POD (and a seed) is one contiguous image, so an ADRP+ADD pair
+           addresses any symbol within it PC-relatively and stays valid wherever
+           the loader places it.  Taking this direct path instead of the GOT is
+           what keeps the code position independent (no GOT slot to relocate); a
+           POD then needs an RLOC only for genuine data pointers, while a seed --
+           which has no RLOC -- must avoid those entirely. */
         greloca(cur_text_section, sym, ind, R_AARCH64_ADR_PREL_PG_HI21, 0);
         o(ARM64_ADRP | r);        // adrp xr, #sym
         greloca(cur_text_section, sym, ind, R_AARCH64_ADD_ABS_LO12_NC, 0);

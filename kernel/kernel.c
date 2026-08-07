@@ -399,6 +399,48 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
         }
         pointer_hide();                          // a key arrived; hide before redrawing
 
+        // --- system clipboard: paste, copy line, cut line -------------------
+        // USB delivers the plain key + a modifier bit (hid_modifiers); a serial
+        // terminal sends the raw control code. Support both spellings.
+        {
+            int mods = hid_modifiers();
+            int is_paste = (c == 0x16) ||                                  // Ctrl+V
+                           ((mods & KMOD_CTRL)  && (c == 'v' || c == 'V')) ||
+                           ((mods & KMOD_SHIFT) && c == KEY_INS);          // Shift+Insert
+            int is_copy  = (c == 0x03) ||                                  // Ctrl+C
+                           ((mods & KMOD_CTRL)  && (c == 'c' || c == 'C')) ||
+                           ((mods & KMOD_CTRL)  && c == KEY_INS);          // Ctrl+Insert
+            int is_cut   = (c == 0x18) ||                                  // Ctrl+X
+                           ((mods & KMOD_CTRL)  && (c == 'x' || c == 'X')) ||
+                           ((mods & KMOD_SHIFT) && c == KEY_DEL);          // Shift+Delete
+            if (is_paste) {
+                char cb[512];
+                int cl = con_clip_get(cb, (int)sizeof cb);
+                int room = (maxlen - 1) - len, take = cl;
+                if (take > (int)sizeof cb) take = (int)sizeof cb;
+                if (take > room) take = room;
+                if (take > 0) {
+                    for (int i = len; i >= pos; i--) buf[i + take] = buf[i];
+                    for (int i = 0; i < take; i++) {
+                        char ch = cb[i];
+                        if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';  // one line
+                        buf[pos + i] = ch;
+                    }
+                    len += take; pos += take; buf[len] = 0;
+                }
+                edit_render(sc, sr, prompt, buf, len, pos, prev_len); prev_len = len;
+                last_blink = TIMER_CLO; continue;
+            }
+            if (is_copy) { con_clip_set(buf, len); continue; }
+            if (is_cut) {
+                con_clip_set(buf, len); len = 0; pos = 0; buf[0] = 0;
+                edit_render(sc, sr, prompt, buf, len, pos, prev_len); prev_len = len;
+                last_blink = TIMER_CLO; continue;
+            }
+            if ((mods & KMOD_CTRL) &&                                      // swallow other
+                ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) continue;   // Ctrl+letters
+        }
+
         if (c == '\r' || c == '\n') {
             if (fb_ready) { if (cursor_visible) cursor_set(0); edit_cursor_at(sc, sr, len); term_putchar('\n'); }
             uart_puts("\r\n");
@@ -557,6 +599,27 @@ int con_pos(void)  { return cursor_col; }
 int con_vpos(void) { return cursor_row; }
 int con_rows(void) { return g_term_rows; }
 int con_cols(void) { return g_term_cols; }
+
+// --- system clipboard -------------------------------------------------------
+// One buffer, in the kernel, so it outlives any POD (copy in the editor, paste
+// at the BASIC prompt or in the next program). con_clip_get returns the FULL
+// stored length so the caller can tell when its buffer was too small.
+#define CLIP_MAX (64 * 1024)
+static char g_clip[CLIP_MAX];
+static int  g_clip_len = 0;
+void con_clip_set(const char *data, int len) {
+    if (len < 0) len = 0;
+    if (len > CLIP_MAX) len = CLIP_MAX;
+    for (int i = 0; i < len; i++) g_clip[i] = data[i];
+    g_clip_len = len;
+}
+int con_clip_len(void) { return g_clip_len; }
+int con_clip_get(char *buf, int max) {
+    int n = g_clip_len;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) buf[i] = g_clip[i];
+    return g_clip_len;
+}
 
 // Poll whichever USB backend enumerated a mouse and fold the relative movement
 // into the absolute pointer position. Raw framebuffer pixels, origin top-left:
@@ -1267,6 +1330,15 @@ void sgfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) {
 }
 void sgfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) {
     if (fb_ready) fill_rect(x1, y1, x2, y2, rgb_to_fb(rgb));
+}
+// The console font, the same glyph table and blit the text terminal uses
+// (term_glyph): fill the cell in `bg`, then draw the glyph in `fg`. Writes
+// through the active surface, so it works into the back buffer too.
+void sgfx_font(int *w, int *h) { if (w) *w = CHAR_W; if (h) *h = CHAR_H; }
+void sgfx_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg) {
+    if (!fb_ready) return;
+    bar(px, py, px + CHAR_W - 1, py + CHAR_H - 1, rgb_to_fb(bg));
+    draw_char((char)(ch & 0xFF), px, py, rgb_to_fb(fg));
 }
 void sgfx_circle(int cx, int cy, int r, uint32_t rgb) {
     if (!fb_ready) return;

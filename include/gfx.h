@@ -37,4 +37,12 @@ void     sgfx_clip(int x1, int y1, int x2, int y2);               // restrict to
 void     sgfx_noclip(void);                                       // remove the clip
 void     sgfx_text(int x, int y, const char *s, int len, uint32_t rgb);  // TTF, baseline (x,y)
 
+// The console bitmap font (the one the text terminal uses), for a POD that wants
+// to draw text the exact way the system does. sgfx_font reports the character
+// cell size in pixels; sgfx_glyph fills one cell at pixel (px,py) with `bg` and
+// draws glyph `ch` (0..255) in `fg` on top, honouring the active draw surface
+// (so it composes with the back buffer). Colours are 0xRRGGBB.
+void     sgfx_font(int *w, int *h);
+void     sgfx_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg);
+
 #endif

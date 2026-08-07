@@ -137,8 +137,14 @@ int close(int fd) {
 int unlink(const char *path) { return pod_svc->file_remove(path) < 0 ? -1 : 0; }
 int __pod_remove(const char *path) { return unlink(path); }
 
-char *getcwd(char *buf, unsigned long size) { if (buf && size) { buf[0] = '.'; buf[1] = 0; return buf; } return 0; }
-int   chdir(const char *path) { (void)path; return -1; }
+char *getcwd(char *buf, unsigned long size) {   /* routes to the CAP_DIRS service */
+    if (!buf || size == 0) return 0;
+    if (pod_svc && pod_svc->getcwd && pod_svc->getcwd(buf, (int)size) >= 0) return buf;
+    buf[0] = '.'; buf[1] = 0; return buf;       /* fallback: current directory */
+}
+int   chdir(const char *path) {                 /* routes to the CAP_DIRS service */
+    return (pod_svc && pod_svc->chdir) ? pod_svc->chdir(path) : -1;
+}
 
 // mmap/mprotect exist only so tccrun.c (the -run JIT, unused in a POD) links;
 // they always fail, so an attempted -run reports an error instead of running.

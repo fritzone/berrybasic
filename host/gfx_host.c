@@ -24,3 +24,5 @@ void     sgfx_flood(int x, int y, uint32_t rgb) { (void)x; (void)y; (void)rgb; }
 void     sgfx_clip(int x1, int y1, int x2, int y2) { (void)x1; (void)y1; (void)x2; (void)y2; }
 void     sgfx_noclip(void) { }
 void     sgfx_text(int x, int y, const char *s, int len, uint32_t rgb) { (void)x; (void)y; (void)s; (void)len; (void)rgb; }
+void     sgfx_font(int *w, int *h) { if (w) *w = 0; if (h) *h = 0; }
+void     sgfx_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg) { (void)px; (void)py; (void)ch; (void)fg; (void)bg; }

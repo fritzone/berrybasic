@@ -57,6 +57,7 @@ static const char help[] =
     "  -llib        link with dynamic or static library 'lib'\n"
     "  -nostdlib    do not link with standard crt and libraries\n"
     "  -pod         emit a BerryBasiC POD executable (flat, sealed, PIC)\n"
+    "  -seed        emit a BerryBasiC seed blob (.SED, flat, fully PIC)\n"
     "  -r           generate (relocatable) object file\n"
     "  -rdynamic    export all global symbols to dynamic linker\n"
     "  -shared      generate a shared library/dll\n"

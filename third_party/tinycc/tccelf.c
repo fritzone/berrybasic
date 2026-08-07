@@ -2882,6 +2882,9 @@ static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
     if (s1->output_format == TCC_OUTPUT_FORMAT_POD)
         ret = tcc_output_pod(s1, f, filename);
     else
+    if (s1->output_format == TCC_OUTPUT_FORMAT_SEED)
+        ret = tcc_output_seed(s1, f, filename);
+    else
     if (s1->output_format == TCC_OUTPUT_FORMAT_ELF)
         ret = tcc_output_elf(s1, f, phnum, phdr);
     else
@@ -3217,7 +3220,8 @@ static int elf_output_file(TCCState *s1, const char *filename)
     /* POD: harvest absolute relocations now, while the .rela sections and the
        just-filled GOT are still present (reorder_sections is about to drop the
        .rela's, and nothing carries them into the flat image otherwise). */
-    if (s1->output_format == TCC_OUTPUT_FORMAT_POD)
+    if (s1->output_format == TCC_OUTPUT_FORMAT_POD
+        || s1->output_format == TCC_OUTPUT_FORMAT_SEED)
         pod_collect_relocs(s1);
 
     reorder_sections(s1, sec_order);

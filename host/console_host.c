@@ -79,6 +79,11 @@ int con_pos(void)  { return 0; }
 int con_vpos(void) { return 0; }
 int con_rows(void) { return 0; }        // no paging on the host CLI
 int con_cols(void) { return 0; }        // unknown on the host CLI
+
+static char host_clip[65536]; static int host_clip_len = 0;
+void con_clip_set(const char *d, int n) { if (n < 0) n = 0; if (n > (int)sizeof host_clip) n = sizeof host_clip; for (int i = 0; i < n; i++) host_clip[i] = d[i]; host_clip_len = n; }
+int  con_clip_len(void) { return host_clip_len; }
+int  con_clip_get(char *b, int max) { int n = host_clip_len; if (n > max) n = max; for (int i = 0; i < n; i++) b[i] = host_clip[i]; return host_clip_len; }
 int con_splash(const char *banner) { (void)banner; return 0; }   // no logo on host; caller prints banner
 
 // Graphics are framebuffer-only; the host backend has no display, so these are

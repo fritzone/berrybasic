@@ -154,6 +154,37 @@ int  seed_invoke(seed_entry fn, const BerryServices *svc,
 extern const BerryServices *seed_svc;   // set on entry; used by the seed libc
 
 // ---------------------------------------------------------------------------
+// Two toolchains, one macro. Under the bare-metal cross gcc, SEED_EXPORT /
+// SEED_KEYWORD put the header, keyword and entry in dedicated sections that
+// seed/seed.ld orders (header at offset 0, entry right after, so entry_off is
+// fixed). Under tcc's `-seed` backend -- which groups sections by flags and so
+// cannot pin the header to offset 0 -- the same macros instead export the fixed
+// `seed_main` entry and leave a small ".seed.desc" manifest; tccseed.c reads it
+// and builds the header itself, computing entry_off from &seed_main. Both paths
+// emit the same .SED on disk, so a seed source compiles unchanged either way.
+// ---------------------------------------------------------------------------
+#ifdef __TINYC__
+// The manifest tccseed.c reads (28 bytes): ABI, header flags, and -- for a
+// keyword seed -- its descriptor. All-byte fields so it is endian-stable and
+// never padded; a NAMED struct so tcc keeps the `section` attribute (see the
+// note beside .pod.desc in tinycc's pod.h).
+struct seed__desc {
+    unsigned char abi[2], flags[2], kind[2], mn[2], mx[2], rsv[2];
+    char name[16];
+};
+#define SEED__EMIT_DESC(fl, kwkind, kwmin, kwmax, nm)                          \
+    static const struct seed__desc                                            \
+        __attribute__((used, section(".seed.desc"), aligned(1))) seed_desc_ = {\
+            { (unsigned char)BERRY_ABI_VERSION,                               \
+              (unsigned char)(BERRY_ABI_VERSION >> 8) },                      \
+            { (unsigned char)(fl), (unsigned char)((fl) >> 8) },              \
+            { (unsigned char)(kwkind), (unsigned char)((kwkind) >> 8) },      \
+            { (unsigned char)(kwmin), (unsigned char)((kwmin) >> 8) },        \
+            { (unsigned char)(kwmax), (unsigned char)((kwmax) >> 8) },        \
+            { 0, 0 }, nm };
+#endif
+
+// ---------------------------------------------------------------------------
 // Helper for seed source files: declares the header in its own section (placed
 // first by seed.ld) and opens the entry function (forced right after it, so the
 // header's entry_off == sizeof(struct seed_header)). The exported entry is a
@@ -163,6 +194,20 @@ extern const BerryServices *seed_svc;   // set on entry; used by the seed libc
 //   #include "seed.h"
 //   SEED_EXPORT(myseed) { return argv[0].num + argv[1].num; }
 // ---------------------------------------------------------------------------
+#ifdef __TINYC__
+#define SEED_EXPORT(name)                                                      \
+    SEED__EMIT_DESC(0, 0, 0, 0, "")                                           \
+    const BerryServices *seed_svc;                                            \
+    static double name##_body(const BerryServices *svc,                        \
+                              const berry_arg *argv, int argc);                \
+    double seed_main(const BerryServices *svc,                                 \
+                     const berry_arg *argv, int argc) {                        \
+        seed_svc = svc;                                                       \
+        return name##_body(svc, argv, argc);                                  \
+    }                                                                          \
+    static double name##_body(const BerryServices *svc,                        \
+                              const berry_arg *argv, int argc)
+#else
 #define SEED_EXPORT(name)                                                      \
     static double name##_body(const BerryServices *svc,                         \
                               const berry_arg *argv, int argc);                 \
@@ -177,6 +222,7 @@ extern const BerryServices *seed_svc;   // set on entry; used by the seed libc
     }                                                                          \
     static double name##_body(const BerryServices *svc,                         \
                               const berry_arg *argv, int argc)
+#endif
 
 // ---------------------------------------------------------------------------
 // SEED_KEYWORD — register a new BASIC keyword.
@@ -200,6 +246,20 @@ extern const BerryServices *seed_svc;   // set on entry; used by the seed libc
 // and is named with a trailing '$'. `kwmin`/`kwmax` bound the argument count.
 // Only seeds that use this macro become keywords; SEED_EXPORT seeds stay plain.
 // ---------------------------------------------------------------------------
+#ifdef __TINYC__
+#define SEED_KEYWORD(kwname, kwkind, kwmin, kwmax)                             \
+    SEED__EMIT_DESC(SEED_HDR_KEYWORD, kwkind, kwmin, kwmax, kwname)            \
+    const BerryServices *seed_svc;                                            \
+    static double seed_kw_body(const BerryServices *svc,                       \
+                               const berry_arg *argv, int argc);               \
+    double seed_main(const BerryServices *svc,                                 \
+                     const berry_arg *argv, int argc) {                        \
+        seed_svc = svc;                                                       \
+        return seed_kw_body(svc, argv, argc);                                 \
+    }                                                                          \
+    static double seed_kw_body(const BerryServices *svc,                       \
+                               const berry_arg *argv, int argc)
+#else
 #define SEED_KEYWORD(kwname, kwkind, kwmin, kwmax)                             \
     static double seed_kw_body(const BerryServices *svc,                       \
                                const berry_arg *argv, int argc);               \
@@ -219,5 +279,6 @@ extern const BerryServices *seed_svc;   // set on entry; used by the seed libc
     }                                                                         \
     static double seed_kw_body(const BerryServices *svc,                       \
                                const berry_arg *argv, int argc)
+#endif
 
 #endif // SEED_H

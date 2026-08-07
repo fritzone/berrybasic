@@ -11,12 +11,17 @@
 #include "pod_rt.h"       /* pod_svc: the services table, stashed by crt0 */
 #include <string.h>
 #include <stdlib.h>
+#include <dirent.h>       /* opendir/readdir: browse the card in the dialogs */
+#include <unistd.h>       /* getcwd */
+#include <sys/stat.h>     /* mkdir */
 
 POD_NAME("ed")
 POD_VERSION("1.0")
-POD_NEEDS(CAP_CONSOLE, "CONSOLE=draws the editor and reads the keyboard")
-POD_NEEDS(CAP_FILES,   "FILES=loads and saves the file being edited")
-POD_NEEDS(CAP_HEAP,    "HEAP=holds the text being edited")
+POD_NEEDS(CAP_GRAPHICS, "GRAPHICS=draws the screen, double-buffered so it never flickers")
+POD_NEEDS(CAP_CONSOLE,  "CONSOLE=reads the keyboard")
+POD_NEEDS(CAP_FILES,    "FILES=loads and saves the file being edited")
+POD_NEEDS(CAP_DIRS,     "DIRS=the Open/Save dialogs browse folders and make new ones")
+POD_NEEDS(CAP_HEAP,     "HEAP=holds the text being edited")
 
 /* ---------------------------------------------------------------- CONFIG */
 
@@ -29,7 +34,6 @@ static int wrapcol = 72;    /* word wrap column; 0 disables wrap */
 
 #define MAXLEN      255     /* longest line, as in the Pascal original      */
 #define TABSIZE     4
-#define HIGHLIGHT   1       /* tint the line the cursor is on               */
 #define USE_CP437   1       /* 0 if your font lacks the box-drawing glyphs  */
 
 /* Logical colours, as COLOUR/GCOL use them. */
@@ -81,38 +85,63 @@ static int wrapcol = 72;    /* word wrap column; 0 disables wrap */
 #define K_F1      0x101     /* help   */
 #define K_F2      0x102     /* save   */
 #define K_F3      0x103     /* open   */
+#define K_F7      0x107     /* new folder (in the file dialog) */
 #define K_F10     0x10A     /* menu   */
 #define K_PGUP    0x10D
 #define K_PGDN    0x10E
 
+/* Modifier bits from the keymods service (see seed/seed.h SEED_KMOD_*). */
+#define KMOD_SHIFT 0x001
+#define KMOD_CTRL  0x002
+#define KMOD_ALT   0x004
+
 /* ------------------------------------------------------- PLATFORM LAYER
  *
- *  Everything hardware-facing is confined to these few functions.  They
- *  speak VDU control codes, which is the text-mode API the console driver
- *  already understands - the portable equivalent of the original's writes
- *  straight into segment 0xB800.
+ *  ed draws in GRAPHICS mode with DOUBLE BUFFERING, using the system's own
+ *  console font (con_glyph / con_font). Every glyph is composed into the
+ *  off-screen back buffer and the finished frame is shown in one go (key()
+ *  flips just before it blocks for input), so a full redraw on every keypress
+ *  never flickers - the old VDU text-mode path repainted the visible screen
+ *  cell by cell, which did. The primitives below keep the rest of the editor
+ *  thinking in character cells; only these functions know about pixels.
  */
 
 static const BerryServices *S;
 
-/* All screen output goes through the VDU stream: control codes (12 clear,
- * 17 colour, 23 cursor shape, 31 cursor position) are interpreted, and bytes
- * >= 32 print as glyphs. Plain putc would drop the control codes. */
-static void out(int c)              { S->vdu(c); }
-static void cls(void)               { out(12); }
-static void at(int x, int y)        { out(31); out(x); out(y); }
-static void fg(int c)               { out(17); out(c); }
-static void bg(int c)               { out(17); out(128 + c); }
-/* getkey returns LF (10) for Enter on a USB keyboard but CR (13) over a serial
- * line; fold both to K_ENTER so every input loop needs only one test. */
-static int  key(void)               { int c = S->getkey(); return c == 13 ? K_ENTER : c; }
+static int CELLW = 8, CELLH = 16;   /* console font cell in pixels (con_font) */
 
-static void cursor(int on)
+/* BBC logical colours 0..7 as 0xRRGGBB, matching the system text palette. */
+static const unsigned pal[8] = {
+    0x000000, 0xFF0000, 0x00FF00, 0xFFFF00,
+    0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF
+};
+static unsigned cur_fg = 0xFFFFFF;  /* current foreground */
+static unsigned cur_bg = 0x000000;  /* current background */
+static int pen_x, pen_y;            /* pen position, in character cells */
+
+static void fg(int c) { cur_fg = pal[c & 7]; }
+static void bg(int c) { cur_bg = pal[c & 7]; }
+static void at(int x, int y) { pen_x = x; pen_y = y; }
+
+/* Draw one glyph cell in the current colours, then advance the pen. */
+static void out(int ch)
 {
-    int i;
-    out(23); out(1); out(on ? 1 : 0);
-    for (i = 0; i < 7; i++) out(0);
+    S->con_glyph(pen_x * CELLW, pen_y * CELLH, ch & 0xFF, cur_fg, cur_bg);
+    pen_x++;
 }
+static void cls(void) { S->gfx_clear(cur_bg); }
+
+/* Present the composed frame, then block for a key (folding a serial CR to LF). */
+static int key(void) { S->gfx_flip(); int c = S->getkey(); return c == 13 ? K_ENTER : c; }
+
+/* The text caret: an underline in the foreground colour at cell (col,row),
+ * drawn last so it sits on top of the frame. */
+static void caret(int col, int row)
+{
+    int px = col * CELLW, py = row * CELLH + CELLH - 2;
+    S->gfx_fillrect(px, py, px + CELLW - 1, py + 1, cur_fg);
+}
+static void cursor(int on) { (void)on; }   /* the caret is part of the frame now */
 
 static void puts_at(int x, int y, const char *s)
 {
@@ -143,6 +172,9 @@ static int curx;            /* column within the line, 0-based    */
 static int cury;            /* screen row of the cursor           */
 static int coloff;          /* horizontal scroll offset           */
 static int lineno = 1;      /* 1-based line number, for the status*/
+
+static Line *sel_anchor = 0;   /* selection anchor line; 0 = no selection */
+static int   sel_acol   = 0;   /* selection anchor column                 */
 
 static int win_x1, win_y1, win_x2, win_y2;   /* set by layout() from COLS/ROWS */
 
@@ -289,10 +321,17 @@ static const char *file_items[] = {
     " New         ", " Open...     ", " Save        ", " Save As...  ", " Quit        ", 0
 };
 static const char *edit_items[] = {
-    " Delete Line ", " Go to Top   ", " Go to Bottom", 0
+    " Cut          Ctrl-X ",
+    " Copy         Ctrl-C ",
+    " Paste        Ctrl-V ",
+    "-",                            /* separator */
+    " Delete Line  Ctrl-Y ",
+    " Go to Top           ",
+    " Go to Bottom        ",
+    0
 };
 static const char *help_items[] = {
-    " Keys...     ", " About       ", 0
+    " About       ", 0
 };
 static const struct menu_def {
     const char *title;              /* as drawn on the bar, e.g. " File " */
@@ -356,29 +395,145 @@ static void draw_status(void)
             " F1 Help  F2 Save  F3 Open  F10 Menu  Esc Quit ");
 }
 
+/* ----------------------------------------------------------- SELECTION */
+
+static void mark_changed(void);        /* defined in the editing section below */
+
+static int line_index(Line *t)
+{
+    int i = 0;
+    for (Line *p = first; p; p = p->next, i++) if (p == t) return i;
+    return -1;
+}
+
+/* Normalise the selection into start (sl,sc) <= end (el,ec). 1 if non-empty. */
+static int sel_ordered(Line **sl, int *sc, Line **el, int *ec)
+{
+    int ai, ci;
+    if (!sel_anchor) return 0;
+    ai = line_index(sel_anchor); ci = line_index(cur);
+    if (ai < ci || (ai == ci && sel_acol <= curx)) { *sl = sel_anchor; *sc = sel_acol; *el = cur; *ec = curx; }
+    else                                           { *sl = cur; *sc = curx; *el = sel_anchor; *ec = sel_acol; }
+    return !(*sl == *el && *sc == *ec);
+}
+
+/* Copy the selection to the system clipboard (lines joined with '\n'). */
+static void sel_copy(void)
+{
+    Line *sl, *el, *p; int sc, ec, i;
+    long n, k;
+    char *buf;
+    if (!sel_ordered(&sl, &sc, &el, &ec)) return;
+    if (sl == el) n = ec - sc;
+    else { n = (sl->len - sc) + 1; for (p = sl->next; p && p != el; p = p->next) n += p->len + 1; n += ec; }
+    buf = (char *)malloc(n + 1);
+    if (!buf) return;
+    k = 0;
+    if (sl == el) { for (i = sc; i < ec; i++) buf[k++] = sl->s[i]; }
+    else {
+        for (i = sc; i < sl->len; i++) buf[k++] = sl->s[i]; buf[k++] = '\n';
+        for (p = sl->next; p && p != el; p = p->next) { for (i = 0; i < p->len; i++) buf[k++] = p->s[i]; buf[k++] = '\n'; }
+        for (i = 0; i < ec; i++) buf[k++] = el->s[i];
+    }
+    buf[k] = 0;
+    S->clip_set(buf, (int)k);
+    free(buf);
+}
+
+/* Delete the selected text, leaving the cursor at its start; clears selection. */
+static void sel_delete(void)
+{
+    Line *sl, *el; int sc, ec, i;
+    if (!sel_ordered(&sl, &sc, &el, &ec)) { sel_anchor = 0; return; }
+    if (sl == el) {
+        for (i = ec; i <= sl->len; i++) sl->s[sc + (i - ec)] = sl->s[i];
+        sl->len -= (ec - sc); sl->s[sl->len] = 0;
+    } else {
+        int tail = el->len - ec;
+        Line *after = el->next, *p, *q;
+        sl->s[sc] = 0; sl->len = sc;
+        for (i = 0; i < tail && sl->len < MAXLEN; i++) sl->s[sl->len++] = el->s[ec + i];
+        sl->s[sl->len] = 0;
+        for (p = sl->next; p && p != after; p = q) { q = p->next; free(p); }   /* free middle + el */
+        sl->next = after; if (after) after->prev = sl;
+    }
+    cur = sl; curx = sc; top = sl;         /* top may have pointed at a freed line */
+    sel_anchor = 0;
+    lineno = line_index(cur) + 1;
+    mark_changed();
+}
+
+/* Paste helpers: insert one char / split the line, without word-wrap. */
+static void paste_char(int c)
+{
+    int i;
+    if (cur->len >= MAXLEN) return;
+    for (i = cur->len; i > curx; i--) cur->s[i] = cur->s[i - 1];
+    cur->s[curx++] = (char)c; cur->len++; cur->s[cur->len] = 0;
+}
+static void paste_newline(void)
+{
+    Line *nl = line_insert_after(cur, cur->s + curx);
+    if (!nl) return;
+    cur->s[curx] = 0; cur->len = curx;
+    cur = nl; curx = 0; lineno++;
+}
+
+/* Paste the clipboard at the cursor (replacing any selection). */
+static void do_paste(void)
+{
+    int n = S->clip_len(), i;
+    char *buf;
+    if (n <= 0) return;
+    if (sel_anchor) sel_delete();
+    buf = (char *)malloc(n + 1);
+    if (!buf) return;
+    S->clip_get(buf, n);
+    for (i = 0; i < n; i++) {
+        char c = buf[i];
+        if (c == '\r') ;                                  /* drop CR */
+        else if (c == '\n') paste_newline();
+        else if (c == '\t') paste_char(' ');
+        else if ((unsigned char)c >= 32) paste_char(c);
+    }
+    free(buf);
+    mark_changed();
+}
+
+/* -------------------------------------------------------------- DRAW */
+
 static void draw_text(void)
 {
     Line *p = top;
     int row, col, i;
+    Line *sl = 0, *el = 0; int sc = 0, ec = 0;
+    int has_sel, sl_idx = -1, el_idx = -1, top_idx = -1;
+
+    has_sel = sel_ordered(&sl, &sc, &el, &ec);
+    if (has_sel) { sl_idx = line_index(sl); el_idx = line_index(el); top_idx = line_index(top); }
 
     for (row = win_y1; row <= win_y2; row++) {
-        int hl = (HIGHLIGHT && p == cur);
-        bg(hl ? C_CYAN : C_BLUE);
-        fg(C_WHITE);
-        at(win_x1, row);
-        col = 0;
-        if (p) {
-            for (i = coloff; i < p->len && col <= win_x2 - win_x1; i++, col++)
-                out((unsigned char)p->s[i]);
+        int lidx = top_idx + (row - win_y1);
+        int hl_lo = -1, hl_hi = -1;
+        if (has_sel && p && lidx >= sl_idx && lidx <= el_idx) {
+            hl_lo = (lidx == sl_idx) ? sc : 0;
+            hl_hi = (lidx == el_idx) ? ec : p->len + 1;   /* +1 shows the newline is in the range */
         }
-        while (col <= win_x2 - win_x1) { out(' '); col++; }
+        at(win_x1, row);
+        for (col = 0, i = coloff; col <= win_x2 - win_x1; i++, col++) {
+            int selc = (i >= hl_lo && i < hl_hi);
+            if (selc) { bg(C_CYAN); fg(C_BLACK); } else { bg(C_BLUE); fg(C_WHITE); }
+            if (p && i < p->len) out((unsigned char)p->s[i]);
+            else                 out(' ');
+        }
         if (p) p = p->next;
     }
 }
 
 static void place_cursor(void)
 {
-    at(win_x1 + curx - coloff, cury);
+    fg(C_WHITE);                        /* a white caret on the blue text area */
+    caret(win_x1 + curx - coloff, cury);
 }
 
 static void redraw(void)
@@ -392,47 +547,127 @@ static void redraw(void)
     cursor(1);
 }
 
-/* -------------------------------------------------------- SMALL DIALOGS */
+/* -------------------------------------------------------- DIALOGS
+ *
+ *  A proper modal dialog: a bordered, titled box with a message and a row of
+ *  push-buttons. Buttons carry a hotkey (the letter after '&', drawn in red);
+ *  Left/Right or Tab move the focus, Enter/Space press the focused button, the
+ *  hotkey letter presses it directly, Esc cancels.
+ */
+static int dlg_up(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
 
-static void message(const char *msg)
+static int dlg_disp_len(const char *s) { int n = 0; for (; *s; s++) if (*s != '&') n++; return n; }
+static int dlg_btn_w(const char *s)    { return dlg_disp_len(s) + 4; }   /* "[ " label " ]" */
+static int dlg_hotkey(const char *s)   { for (; *s; s++) if (*s == '&' && s[1]) return s[1]; return 0; }
+
+/* A filled, bordered box with an optional title in the top edge. */
+static void draw_box(int x, int y, int w, int h, const char *title)
 {
-    int w = (int)strlen(msg) + 4;
-    int x = (COLS - w) / 2, y = ROWS / 2 - 1, i;
-
-    cursor(0);
+    int r;
     bg(C_WHITE); fg(C_BLACK);
-    for (i = 0; i < 3; i++) repeat_ch(x, y + i, ' ', w);
-    puts_at(x + 2, y + 1, msg);
-    puts_at(x + 2, y + 2, " [ press a key ] ");
-    key();
-    redraw();
+    for (r = 0; r < h; r++) repeat_ch(x, y + r, ' ', w);
+    at(x, y); out(B_TL); repeat_ch(x + 1, y, B_H, w - 2); at(x + w - 1, y); out(B_TR);
+    for (r = 1; r < h - 1; r++) { at(x, y + r); out(B_V); at(x + w - 1, y + r); out(B_V); }
+    at(x, y + h - 1); out(B_BL); repeat_ch(x + 1, y + h - 1, B_H, w - 2); at(x + w - 1, y + h - 1); out(B_BR);
+    if (title && *title) {
+        int tl = (int)strlen(title), tx = x + (w - tl - 2) / 2;
+        at(tx, y); out(' '); puts_at(tx + 1, y, title); out(' ');
+    }
 }
 
-/* Read a line of text into buf.  Returns 0 if cancelled with Esc. */
+static void draw_button(int x, int y, const char *label, int focused)
+{
+    const char *p;
+    bg(focused ? C_CYAN : C_WHITE); fg(C_BLACK);
+    at(x, y); out('['); out(' ');
+    for (p = label; *p; p++) {
+        if (*p == '&') { if (p[1]) { fg(C_RED); out((unsigned char)p[1]); fg(C_BLACK); p++; } }
+        else out((unsigned char)*p);
+    }
+    out(' '); out(']');
+}
+
+/* Show the dialog; returns the pressed button's index, or -1 on Esc. */
+static int dialog(const char *title, const char *msg, const char *const *btns, int nbtn, int defbtn)
+{
+    int i, msgw = (int)strlen(msg), brow = 0, innerw, w, h, x, y, focus = defbtn;
+    int bw[6];
+    if (nbtn > 6) nbtn = 6;
+    for (i = 0; i < nbtn; i++) { bw[i] = dlg_btn_w(btns[i]); brow += bw[i] + 1; }
+    if (nbtn > 0) brow -= 1;
+    innerw = msgw > brow ? msgw : brow;
+    w = innerw + 6; if (w > COLS - 2) w = COLS - 2; if (w < 14) w = 14;
+    h = 6; x = (COLS - w) / 2; y = (ROWS - h) / 2;
+
+    redraw();                                        /* editor behind the box */
+    for (;;) {
+        int c, mods, bx, by;
+        draw_box(x, y, w, h, title);
+        bg(C_WHITE); fg(C_BLACK);
+        puts_at(x + (w - msgw) / 2, y + 2, msg);
+        bx = x + (w - brow) / 2; by = y + h - 2;
+        for (i = 0; i < nbtn; i++) { draw_button(bx, by, btns[i], i == focus); bx += bw[i] + 1; }
+
+        c = key();
+        mods = S->keymods();
+        if (c == K_ESC) { redraw(); return -1; }
+        else if (c == K_LEFT  || (c == K_TAB && (mods & KMOD_SHIFT))) focus = (focus + nbtn - 1) % nbtn;
+        else if (c == K_RIGHT ||  c == K_TAB)                         focus = (focus + 1) % nbtn;
+        else if (c == K_ENTER || c == ' ') { redraw(); return focus; }
+        else for (i = 0; i < nbtn; i++) {
+            int hk = dlg_hotkey(btns[i]);
+            if (hk && dlg_up(c) == dlg_up(hk)) { redraw(); return i; }
+        }
+    }
+}
+
+/* A one-button information/error box. */
+static void message(const char *msg)
+{
+    static const char *ok[] = { "&OK" };
+    dialog("ed", msg, ok, 1, 0);
+}
+
+/* Read a line of text into buf: a titled input box with [ OK ] / [ Cancel ].
+ * Tab cycles the field and the two buttons; Enter accepts, Esc cancels.
+ * Returns 1 if OK'd with a non-empty entry, 0 if cancelled. */
 static int prompt(const char *label, char *buf, int max)
 {
-    int w = COLS / 2;
-    int x = (COLS - w) / 2, y = ROWS / 2 - 1;
-    int n = 0, c, i;
-
-    cursor(0);
-    bg(C_WHITE); fg(C_BLACK);
-    for (i = 0; i < 4; i++) repeat_ch(x, y + i, ' ', w);
-    puts_at(x + 2, y + 1, label);
+    int w = COLS / 2, x, y, n = 0, focus = 0;   /* focus: 0 field, 1 OK, 2 Cancel */
+    static const char *btns[] = { "&OK", "&Cancel" };
+    int bw0 = dlg_btn_w(btns[0]), bw1 = dlg_btn_w(btns[1]), h = 7;
+    if (w < 30) w = 30; if (w > COLS - 2) w = COLS - 2;
+    x = (COLS - w) / 2; y = (ROWS - h) / 2;
     buf[0] = 0;
 
-    cursor(1);
+    redraw();
     for (;;) {
-        repeat_ch(x + 2, y + 2, ' ', w - 4);
-        puts_at(x + 2, y + 2, buf);
-        at(x + 2 + n, y + 2);
+        int c, brow = bw0 + 1 + bw1, bx, by;
+        draw_box(x, y, w, h, "ed");
+        bg(C_WHITE); fg(C_BLACK);
+        puts_at(x + 2, y + 1, label);
+        bg(focus == 0 ? C_CYAN : C_WHITE); fg(C_BLACK);        /* the input field */
+        repeat_ch(x + 2, y + 3, ' ', w - 4);
+        puts_at(x + 2, y + 3, buf);
+        if (focus == 0) caret(x + 2 + n, y + 3);
+        bg(C_WHITE); fg(C_BLACK);
+        bx = x + (w - brow) / 2; by = y + h - 2;
+        draw_button(bx, by, btns[0], focus == 1);
+        draw_button(bx + bw0 + 1, by, btns[1], focus == 2);
+
         c = key();
-        if (c == K_ESC)   { redraw(); return 0; }
-        if (c == K_ENTER) { redraw(); return n > 0; }
-        if (c == K_BS)    { if (n) buf[--n] = 0; continue; }
-        if (c >= 32 && c < 127 && n < max - 1) {
-            buf[n++] = (char)c;
-            buf[n] = 0;
+        if (c == K_ESC) { redraw(); return 0; }
+        if (c == K_ENTER) { redraw(); return focus == 2 ? 0 : (n > 0); }   /* Enter: field/OK accept, Cancel cancels */
+        if (c == K_TAB) { focus = (focus + 1) % 3; continue; }
+        if (dlg_up(c) == 'O' && focus != 0) { redraw(); return n > 0; }
+        if (dlg_up(c) == 'C' && focus != 0) { redraw(); return 0; }
+        if (focus == 0) {                                      /* editing the field */
+            if (c == K_BS) { if (n) buf[--n] = 0; continue; }
+            if (c >= 32 && c < 127 && n < max - 1) { buf[n++] = (char)c; buf[n] = 0; }
+        } else {                                               /* on a button */
+            if (c == ' ') { redraw(); return focus == 2 ? 0 : (n > 0); }
+            if (c == K_LEFT)  focus = focus == 2 ? 1 : 0;
+            if (c == K_RIGHT) focus = focus == 1 ? 2 : (focus == 0 ? 1 : 2);
         }
     }
 }
@@ -444,28 +679,37 @@ static int prompt(const char *label, char *buf, int max)
 #define NAV_LEFT   (-2)
 #define NAV_RIGHT  (-3)
 
+/* A menu item that is just "-" is a non-selectable separator. */
+static int is_sep(const char *s) { return s[0] == '-' && s[1] == 0; }
+
 static int popup(int x, int y, const char *const *items, int n)
 {
     int sel = 0, i, c, w = 0;
 
     for (i = 0; i < n; i++) {
-        int l = (int)strlen(items[i]);
+        int l = is_sep(items[i]) ? 0 : (int)strlen(items[i]);
         if (l > w) w = l;
     }
     w += 2;
+    while (sel < n && is_sep(items[sel])) sel++;     /* never start on a separator */
 
     cursor(0);
     for (;;) {
         for (i = 0; i < n; i++) {
-            bg(i == sel ? C_CYAN : C_WHITE);
-            fg(C_BLACK);
-            repeat_ch(x, y + i, ' ', w);
-            puts_at(x + 1, y + i, items[i]);
+            if (is_sep(items[i])) {
+                bg(C_WHITE); fg(C_BLACK);
+                at(x, y + i);
+                for (int j = 0; j < w; j++) out(B_H);        /* a horizontal rule */
+            } else {
+                bg(i == sel ? C_CYAN : C_WHITE); fg(C_BLACK);
+                repeat_ch(x, y + i, ' ', w);
+                puts_at(x + 1, y + i, items[i]);
+            }
         }
         c = key();
-        if (c == K_UP)    { sel = sel ? sel - 1 : n - 1; continue; }
-        if (c == K_DOWN)  { sel = (sel + 1) % n;         continue; }
-        if (c == K_ENTER) return sel;
+        if (c == K_UP)    { do { sel = sel ? sel - 1 : n - 1; } while (is_sep(items[sel])); continue; }
+        if (c == K_DOWN)  { do { sel = (sel + 1) % n;         } while (is_sep(items[sel])); continue; }
+        if (c == K_ENTER) { if (!is_sep(items[sel])) return sel; continue; }
         if (c == K_ESC)   return NAV_CANCEL;
         if (c == K_LEFT)  return NAV_LEFT;    /* move to the menu on the left  */
         if (c == K_RIGHT) return NAV_RIGHT;   /* move to the menu on the right */
@@ -630,6 +874,207 @@ static void do_tab(void)
     for (i = 0; i < n; i++) insert_char(' ');
 }
 
+/* -------------------------------------------------------- FILE DIALOG
+ *
+ *  A browsing Open / Save-As dialog over the pod-libc <dirent.h>: it lists the
+ *  current directory (".." then sub-directories then files), lets you walk in
+ *  and out of folders, type a name, and make a new folder (F7).
+ */
+#define FD_MAX   400        /* most entries shown for one directory */
+#define FD_NAMEW 64         /* stored/displayed name width          */
+
+typedef struct { char name[FD_NAMEW]; int is_dir; long size; } fd_entry;
+static fd_entry fd_list[FD_MAX];
+static int      fd_n;
+static char     fd_dir[256];        /* current browse directory (absolute) */
+
+static int fd_less(const fd_entry *a, const fd_entry *b)   /* dirs first, then name */
+{
+    const char *x, *y;
+    if (a->is_dir != b->is_dir) return a->is_dir > b->is_dir;
+    for (x = a->name, y = b->name; *x && *y; x++, y++) {
+        int cx = (*x >= 'a' && *x <= 'z') ? *x - 32 : *x;
+        int cy = (*y >= 'a' && *y <= 'z') ? *y - 32 : *y;
+        if (cx != cy) return cx < cy;
+    }
+    return (unsigned char)*x < (unsigned char)*y;
+}
+
+static int fd_ci_eq(const char *a, const char *b)   /* case-insensitive equality */
+{
+    for (; *a && *b; a++, b++) {
+        int ca = (*a >= 'a' && *a <= 'z') ? *a - 32 : *a;
+        int cb = (*b >= 'a' && *b <= 'z') ? *b - 32 : *b;
+        if (ca != cb) return 0;
+    }
+    return *a == *b;
+}
+
+static void fd_pick(char *name, int sel)   /* copy entry `sel`'s name into name[] */
+{
+    int k = 0;
+    if (sel >= 0 && sel < fd_n)
+        for (; fd_list[sel].name[k] && k < FD_NAMEW - 1; k++) name[k] = fd_list[sel].name[k];
+    name[k] = 0;
+}
+
+static void fd_scan(void)           /* fill fd_list from fd_dir */
+{
+    DIR *d;
+    struct dirent *e;
+    int i;
+
+    fd_n = 0;
+    if (!(fd_dir[0] == '/' && fd_dir[1] == 0)) {                 /* ".." unless at root */
+        strcpy(fd_list[0].name, ".."); fd_list[0].is_dir = 1; fd_list[0].size = 0; fd_n = 1;
+    }
+    d = opendir(fd_dir);
+    if (d) {
+        while ((e = readdir(d)) && fd_n < FD_MAX) {
+            if (e->d_name[0] == '.' &&
+                (e->d_name[1] == 0 || (e->d_name[1] == '.' && e->d_name[2] == 0))) continue;
+            { int k = 0; for (; e->d_name[k] && k < FD_NAMEW - 1; k++) fd_list[fd_n].name[k] = e->d_name[k];
+              fd_list[fd_n].name[k] = 0; }
+            fd_list[fd_n].is_dir = (e->d_type == DT_DIR);
+            fd_list[fd_n].size   = e->d_size;
+            fd_n++;
+        }
+        closedir(d);
+    }
+    for (i = 1; i < fd_n; i++) {                                 /* insertion sort */
+        fd_entry t = fd_list[i]; int j = i - 1;
+        while (j >= 0 && !fd_less(&fd_list[j], &t)) { fd_list[j + 1] = fd_list[j]; j--; }
+        fd_list[j + 1] = t;
+    }
+}
+
+static void fd_enter(const char *name)      /* navigate into `name` (or ".." up) */
+{
+    int n = (int)strlen(fd_dir);
+    if (!strcmp(name, "..")) {
+        while (n > 0 && fd_dir[n - 1] == '/') n--;              /* strip trailing '/'   */
+        while (n > 0 && fd_dir[n - 1] != '/') n--;              /* drop last component  */
+        if (n <= 1) { fd_dir[0] = '/'; fd_dir[1] = 0; } else fd_dir[n - 1] = 0;
+        return;
+    }
+    if (n && fd_dir[n - 1] != '/') fd_dir[n++] = '/';
+    for (int i = 0; name[i] && n < (int)sizeof(fd_dir) - 1; i++) fd_dir[n++] = name[i];
+    fd_dir[n] = 0;
+}
+
+static void fd_path(const char *name, char *out, int outsz)   /* fd_dir + "/" + name */
+{
+    int n = 0;
+    for (int i = 0; fd_dir[i] && n < outsz - 1; i++) out[n++] = fd_dir[i];
+    if (n && out[n - 1] != '/' && n < outsz - 1) out[n++] = '/';
+    for (int i = 0; name[i] && n < outsz - 1; i++) out[n++] = name[i];
+    out[n] = 0;
+}
+
+/* Browse for a file. `save` shows the name field pre-filled for a new name.
+ * Returns 1 with an absolute path in `result`, 0 if cancelled. */
+static int file_dialog(const char *title, int save, char *result, int ressz)
+{
+    char name[FD_NAMEW];
+    int sel = 0, top = 0, edited = 0;   /* edited: user has typed into the name field */
+    int bw, bh, bx, by, listrows;
+
+    if (fd_dir[0] == 0) { if (getcwd(fd_dir, sizeof fd_dir) == 0 || fd_dir[0] == 0) { fd_dir[0] = '/'; fd_dir[1] = 0; } }
+    fd_scan();
+    if (save) {                                    /* pre-fill with the file's basename */
+        const char *b = filename, *p;
+        for (p = filename; *p; p++) if (*p == '/') b = p + 1;
+        { int k = 0; for (; b[k] && k < FD_NAMEW - 1; k++) name[k] = b[k]; name[k] = 0; }
+    } else fd_pick(name, 0);
+
+    bw = COLS - 8; if (bw > 64) bw = 64; if (bw < 30) bw = 30;
+    bh = ROWS - 6; if (bh > 22) bh = 22; if (bh < 10) bh = 10;
+    bx = (COLS - bw) / 2; by = (ROWS - bh) / 2;
+    listrows = bh - 6;
+
+    for (;;) {
+        int r, idx;
+        if (sel >= fd_n) sel = fd_n - 1;
+        if (sel < 0) sel = 0;
+        if (sel < top) top = sel;
+        if (sel >= top + listrows) top = sel - listrows + 1;
+        if (top < 0) top = 0;
+
+        redraw();                                  /* editor behind, erase old dialog */
+        bg(C_WHITE); fg(C_BLACK);
+        for (r = 0; r < bh; r++) repeat_ch(bx, by + r, ' ', bw);
+        puts_at(bx + 2, by, title);
+        puts_at(bx + 2, by + 1, "Dir: ");
+        { const char *dp = fd_dir; int dl = (int)strlen(dp), room = bw - 8;
+          if (dl > room) dp += dl - room;
+          puts_at(bx + 7, by + 1, dp); }
+
+        for (r = 0; r < listrows; r++) {
+            int ly = by + 3 + r;
+            idx = top + r;
+            bg(idx == sel && idx < fd_n ? C_CYAN : C_WHITE); fg(C_BLACK);
+            repeat_ch(bx + 2, ly, ' ', bw - 4);
+            if (idx < fd_n) {
+                const char *q;
+                at(bx + 3, ly);
+                if (fd_list[idx].is_dir) { for (q = "[DIR] "; *q; q++) out((unsigned char)*q); }
+                else                     { int s; for (s = 0; s < 6; s++) out(' '); }
+                for (q = fd_list[idx].name; *q; q++) out((unsigned char)*q);
+            }
+        }
+
+        bg(C_WHITE); fg(C_BLACK);
+        puts_at(bx + 2, by + bh - 2, "Name: ");
+        repeat_ch(bx + 8, by + bh - 2, ' ', bw - 10);
+        puts_at(bx + 8, by + bh - 2, name);
+        caret(bx + 8 + (int)strlen(name), by + bh - 2);
+        puts_at(bx + 2, by + bh - 1, save ? " Enter save  F7 new folder  Esc cancel "
+                                          : " Enter open  F7 new folder  Esc cancel ");
+
+        int c = key();
+        if (c == K_ESC) { redraw(); return 0; }
+        /* Navigation refills the name field from the selection (edited=0); the
+         * first keystroke afterwards starts a fresh name. */
+        if (c == K_UP)   { if (sel > 0)        { sel--; edited = 0; fd_pick(name, sel); } continue; }
+        if (c == K_DOWN) { if (sel < fd_n - 1) { sel++; edited = 0; fd_pick(name, sel); } continue; }
+        if (c == K_PGUP) { sel -= listrows; if (sel < 0) sel = 0; edited = 0; fd_pick(name, sel); continue; }
+        if (c == K_PGDN) { sel += listrows; if (sel > fd_n - 1) sel = fd_n - 1; edited = 0; fd_pick(name, sel); continue; }
+        if (c == K_F7) {
+            char nm[FD_NAMEW]; nm[0] = 0;
+            if (prompt("New folder name?", nm, sizeof nm) && nm[0]) {
+                char p[256]; fd_path(nm, p, sizeof p);
+                if (mkdir(p, 0777) != 0) message("Could not create the folder.");
+                fd_scan(); sel = 0; top = 0; edited = 0; fd_pick(name, 0);
+            }
+            continue;
+        }
+        if (c == K_ENTER) {
+            int di = -1, i;                       /* does the name field name a directory? */
+            for (i = 0; i < fd_n; i++)
+                if (fd_list[i].is_dir && fd_ci_eq(fd_list[i].name, name)) { di = i; break; }
+            if (di >= 0) {                        /* yes: walk into it */
+                fd_enter(fd_list[di].name);
+                fd_scan(); sel = 0; top = 0; edited = 0; fd_pick(name, 0);
+                continue;
+            }
+            if (name[0]) { fd_path(name, result, ressz); redraw(); return 1; }
+            continue;                             /* empty name: do nothing */
+        }
+        if (c == K_BS) {
+            if (!edited) { name[0] = 0; edited = 1; }   /* first edit starts fresh */
+            else { int l = (int)strlen(name); if (l) name[l - 1] = 0; }
+            continue;
+        }
+        if (c >= 32 && c < 127) {
+            int l;
+            if (!edited) { name[0] = 0; edited = 1; }   /* first char replaces the field */
+            l = (int)strlen(name);
+            if (l < FD_NAMEW - 1) { name[l] = (char)c; name[l + 1] = 0; }
+            continue;
+        }
+    }
+}
+
 /* --------------------------------------------------------- MENU ACTIONS */
 
 static void help_screen(void);          /* defined below; used by the Help menu */
@@ -643,6 +1088,30 @@ static void do_new(void)
     lineno = 1;
     changed = 0;
     strcpy(filename, "NONAME.TXT");
+}
+
+/* Open / Save / Save As, driven by the browsing file dialog. */
+static void do_open(void)
+{
+    char path[256];
+    if (file_dialog("Open", 0, path, sizeof path)) {
+        if (load_file(path) < 0) message("Could not open that file.");
+        else strcpy(filename, path);
+    }
+}
+static void do_saveas(void)
+{
+    char path[256];
+    if (file_dialog("Save As", 1, path, sizeof path)) {
+        if (save_file(path) < 0) message("Could not save.");
+        else { strcpy(filename, path); message("Saved."); }
+    }
+}
+static void do_save(void)
+{
+    if (!strcmp(filename, "NONAME.TXT")) { do_saveas(); return; }   /* never named yet */
+    if (save_file(filename) < 0) message("Could not save.");
+    else message("Saved.");
 }
 
 /* Delete the current line (also Ctrl-Y). Never empties the list. */
@@ -663,45 +1132,54 @@ static void goto_bottom(void) { while (cur->next) { cur = cur->next; lineno++; }
 /* Run the chosen (menu, item). Returns 1 if the editor should quit. */
 static int menu_action(int menu, int item)
 {
-    char buf[64];
-
     if (menu == 0) {                                  /* File */
         switch (item) {
-        case 0: do_new(); break;
-        case 1: if (prompt("Open which file?", buf, sizeof buf)) {
-                    if (load_file(buf) < 0) message("Could not open that file.");
-                    else strcpy(filename, buf);
-                } break;
-        case 2: if (save_file(filename) < 0) message("Could not save.");
-                else message("Saved."); break;
-        case 3: if (prompt("Save as?", buf, sizeof buf)) {
-                    if (save_file(buf) < 0) message("Could not save.");
-                    else { strcpy(filename, buf); message("Saved."); }
-                } break;
+        case 0: do_new();    break;
+        case 1: do_open();   break;
+        case 2: do_save();   break;
+        case 3: do_saveas(); break;
         case 4: return 1;                             /* Quit */
         }
-    } else if (menu == 1) {                           /* Edit */
+    } else if (menu == 1) {                           /* Edit (item 3 is the separator) */
         switch (item) {
-        case 0: delete_line();  break;
-        case 1: goto_top();     break;
-        case 2: goto_bottom();  break;
+        case 0: if (sel_anchor) { sel_copy(); sel_delete(); } break;  /* Cut   */
+        case 1: sel_copy();     break;                               /* Copy  */
+        case 2: do_paste();     break;                               /* Paste */
+        case 4: delete_line();  break;
+        case 5: goto_top();     break;
+        case 6: goto_bottom();  break;
         }
     } else {                                          /* Help */
         switch (item) {
-        case 0: help_screen(); break;
-        case 1: message("ed - a full-screen text editor for BerryBasiC"); break;
+        case 0: message("ed - a full-screen text editor for BerryBasiC"); break;
         }
     }
     return 0;
 }
 
-/* F10: drive the menu bar. Left/Right move between File/Edit/Help, Down/Enter
- * pick an item, Esc leaves. Returns 1 if the editor should quit. */
-static int run_menu(void)
+/* Which menu an Alt+letter accelerator opens (Alt+F/E/H), matching each menu
+ * title's first letter, case-insensitive. -1 if the letter names no menu. */
+static int menu_accel(int c)
 {
-    int active = 0, quit = 0;
+    int up = (c >= 'a' && c <= 'z') ? c - 32 : c;
+    for (int i = 0; i < NMENU; i++) {
+        const char *t = menus[i].title;
+        while (*t == ' ') t++;                        /* first letter of the title */
+        int tu = (*t >= 'a' && *t <= 'z') ? *t - 32 : *t;
+        if (tu == up) return i;
+    }
+    return -1;
+}
+
+/* Drive the menu bar starting on menu `active` (F10 opens File; Alt+letter opens
+ * that menu). Left/Right move between File/Edit/Help, Down/Enter pick an item,
+ * Esc leaves. Returns 1 if the editor should quit. */
+static int run_menu_at(int active)
+{
+    int quit = 0;
 
     for (;;) {
+        redraw();                        /* erase any previous dropdown first */
         draw_bar(active);
         int sel = popup(menus[active].x, 1, menus[active].items,
                         menu_count(menus[active].items));
@@ -715,6 +1193,8 @@ static int run_menu(void)
     return quit;
 }
 
+static int run_menu(void) { return run_menu_at(0); }
+
 static void help_screen(void)
 {
     static const char *lines[] = {
@@ -727,6 +1207,10 @@ static void help_screen(void)
         "  Tab                      indent",
         "  Ctrl-Y                   delete line",
         "  Ins                      insert / overwrite",
+        "  Shift + move keys        select text",
+        "  Ctrl-C / Ctrl-Ins        copy       (to the system clipboard)",
+        "  Ctrl-X / Shift-Del       cut",
+        "  Ctrl-V / Shift-Ins       paste",
         "  F2 / F3                  save / open",
         "  F1 / F10                 help / menu",
         "  Esc                      quit",
@@ -744,14 +1228,22 @@ static void help_screen(void)
 
 /* ---------------------------------------------------------------- MAIN */
 
-/* Size the editor to the real text grid. Falls back to the 80x25 defaults when
- * the console cannot report a size (e.g. the host build reports 0). */
+/* Size the editor to the real screen: the console font cell (con_font) and the
+ * framebuffer size (gfx_width/height) give the character grid in cells. Falls
+ * back to 8x16 / 80x25 when the values are unavailable (e.g. the host build). */
 static void layout(void)
 {
-    int cols = 0, rows = 0;
-    S->screen_size(&cols, &rows);
-    if (cols >= 20 && cols <= 400) COLS = cols;
-    if (rows >= 8  && rows <= 200) ROWS = rows;
+    int cw = 0, ch = 0, pw, ph;
+    S->con_font(&cw, &ch);
+    if (cw > 0) CELLW = cw;
+    if (ch > 0) CELLH = ch;
+
+    pw = S->gfx_width();
+    ph = S->gfx_height();
+    if (pw > 0 && CELLW > 0) COLS = pw / CELLW;
+    if (ph > 0 && CELLH > 0) ROWS = ph / CELLH;
+    if (COLS < 20) COLS = 80;
+    if (ROWS < 8)  ROWS = 25;
 
     win_x1 = 2;
     win_y1 = 2;
@@ -769,6 +1261,7 @@ int main(int argc, char **argv)
 
     S = pod_svc;                        /* crt0 stashed the services table here */
     layout();                           /* adapt to the real screen size */
+    S->gfx_backbuffer(1);               /* compose every frame off-screen */
 
     if (argc > 1 && argv[1] && argv[1][0]) {
         int n = (int)strlen(argv[1]);
@@ -784,12 +1277,51 @@ int main(int argc, char **argv)
 
     bg(C_BLUE); fg(C_WHITE);
     cls();
+    scroll_into_view();                 /* set top/cury so the caret starts in the text */
     redraw();
 
     while (!quit) {
         c = key();
 
-        switch (c) {
+        int mods = S->keymods(), handled = 0;
+
+        /* Alt+letter opens a menu by its first letter (Alt+F/E/H). Left Alt only,
+         * so AltGr (third-legend characters) still types normally. */
+        if (mods & KMOD_ALT) {
+            int mi = menu_accel(c);
+            if (mi >= 0) quit = run_menu_at(mi);
+            handled = 1;
+        }
+        /* System clipboard. USB gives the plain key + a modifier bit; a serial
+         * terminal sends the raw control code (0x03/0x16/0x18). */
+        else if (((mods & KMOD_CTRL) && (c == 'c' || c == 'C')) || ((mods & KMOD_CTRL) && c == K_INS) || c == 0x03) {
+            sel_copy(); handled = 1;                                  /* copy  */
+        }
+        else if (((mods & KMOD_CTRL) && (c == 'x' || c == 'X')) || ((mods & KMOD_SHIFT) && c == K_DEL) || c == 0x18) {
+            if (sel_anchor) { sel_copy(); sel_delete(); } handled = 1; /* cut   */
+        }
+        else if (((mods & KMOD_CTRL) && (c == 'v' || c == 'V')) || ((mods & KMOD_SHIFT) && c == K_INS) || c == 0x16) {
+            do_paste(); handled = 1;                                  /* paste */
+        }
+        else if ((mods & KMOD_CTRL) && (c == 'y' || c == 'Y')) { delete_line(); handled = 1; }  /* Ctrl-Y */
+        else if ((mods & KMOD_CTRL) && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { handled = 1; }  /* swallow */
+
+        if (!handled) {
+            /* Shift + a movement key extends the selection; any other movement
+             * clears it; an edit over a live selection replaces it. */
+            int is_move = (c == K_LEFT || c == K_RIGHT || c == K_UP || c == K_DOWN ||
+                           c == K_HOME || c == K_END || c == K_PGUP || c == K_PGDN);
+            if (is_move) {
+                if (mods & KMOD_SHIFT) { if (!sel_anchor) { sel_anchor = cur; sel_acol = curx; } }
+                else sel_anchor = 0;
+            } else if (sel_anchor && (c == K_BS || c == K_DEL)) {
+                sel_delete(); handled = 1;                 /* delete selection = the edit */
+            } else if (sel_anchor && (c == K_ENTER || c == K_TAB || (c >= 32 && c < 256))) {
+                sel_delete();                              /* replace: delete then insert */
+            }
+        }
+
+        if (!handled) switch (c) {
         case K_LEFT:
             if (curx > 0) curx--;
             else if (cur->prev) { go_up(); curx = cur->len; }
@@ -825,18 +1357,12 @@ int main(int argc, char **argv)
             break;
 
         case K_F2:
-            if (save_file(filename) < 0) message("Could not save.");
-            else message("Saved.");
+            do_save();
             break;
 
-        case K_F3: {
-            char buf[64];
-            if (prompt("Open which file?", buf, sizeof buf)) {
-                if (load_file(buf) < 0) message("Could not open that file.");
-                else strcpy(filename, buf);
-            }
+        case K_F3:
+            do_open();
             break;
-        }
 
         case K_F10:
             quit = run_menu();
@@ -852,20 +1378,21 @@ int main(int argc, char **argv)
         }
 
         if (quit && changed) {
-            char buf[8];
-            if (prompt("Save before leaving?  (y/n)", buf, sizeof buf)) {
-                if (buf[0] == 'y' || buf[0] == 'Y') save_file(filename);
-            }
-        }
+            static const char *b[] = { "&Save", "&Discard", "&Cancel" };
+            int r = dialog("ed", "Save changes before leaving?", b, 3, 0);
+            if (r == 0) {                                   /* Save */
+                if (!strcmp(filename, "NONAME.TXT")) do_saveas();
+                else if (save_file(filename) < 0) { message("Could not save."); quit = 0; }
+            } else if (r != 1) quit = 0;                    /* Cancel / Esc: stay in the editor */
+        }                                                   /* Discard (r==1): leave, unsaved */
 
         scroll_into_view();
         redraw();
     }
 
-    cursor(1);
-    bg(C_BLACK); fg(C_WHITE);
-    cls();
     free_all();
+    S->gfx_backbuffer(0);               /* back to direct drawing */
+    S->vdu(12);                         /* clear + home the text console for BASIC */
     return 0;
 }
 

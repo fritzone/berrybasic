@@ -102,6 +102,15 @@ if compgen -G "$ROOT/build/seeds/*.sed" >/dev/null; then
         mcopy -i "$DATAPART" "$sed" "::SEED/$(basename "$sed" | tr '[:lower:]' '[:upper:]')"
     done
 fi
+# A couple of seed SOURCES ship to /EXAMPLES/SEEDS so `tcc -seed NAME.C` can be
+# tried on the machine itself (both compile with no seed-libc, so on-device tcc
+# builds them straight over BerryServices). See the Native Code doc.
+mmd -i "$DATAPART" ::EXAMPLES ::EXAMPLES/SEEDS 2>/dev/null || true
+for src in add hypot; do
+    [ -e "$ROOT/seed/examples/$src.c" ] && \
+        mcopy -o -i "$DATAPART" "$ROOT/seed/examples/$src.c" \
+              "::EXAMPLES/SEEDS/$(echo $src | tr '[:lower:]' '[:upper:]').C"
+done
 # POD executables (built by 'make pods' with the BerryBasiC tcc). Example PODs go
 # in the data-partition root, where RUN "NAME.POD" / PODLOAD / PODINFO resolve a
 # bare name, and also in /POD (the spec's home for extension PODs).

@@ -3,3 +3,5 @@ berrybasic-sd.img
 sd.img
 # generated: mirror of seed/berry_services.h for the POD compiler (see Makefile)
 third_party/tinycc/include/berry_services.h
+# generated: mirror of seed/seed.h so `tcc -seed` finds it on the machine
+third_party/tinycc/include/seed.h
