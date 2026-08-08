@@ -107,12 +107,37 @@ void ttf_reset(void) {
     recompute_metrics();
 }
 
+// Resolve a font name to a path to open. A name with a path separator is taken
+// verbatim. A bare name (e.g. "PHILO.TTF") is looked up first in the current
+// directory (so a program can carry its own font), then in /sys/fonts, the home
+// for all installed TrueType fonts. Returns the path that actually opened, or
+// the original name if none did (so the caller's open reports the failure).
+static const char *ttf_resolve(const char *name, char *buf, int bufsz) {
+    for (const char *p = name; *p; p++)
+        if (*p == '/') return name;                // explicit path: use as-is
+
+    int ch = stg_open(name, STG_M_READ);           // 1. the current directory
+    if (ch > 0) { stg_close(ch); return name; }
+
+    int k = 0;                                     // 2. /sys/fonts/<name>
+    const char *pre = "/sys/fonts/";
+    while (*pre && k < bufsz - 1) buf[k++] = *pre++;
+    for (const char *p = name; *p && k < bufsz - 1; p++) buf[k++] = *p;
+    buf[k] = 0;
+    ch = stg_open(buf, STG_M_READ);
+    if (ch > 0) { stg_close(ch); return buf; }
+    return name;
+}
+
 int ttf_load(const char *name) {
     int slot = -1;
     for (int i = 0; i < MAX_FONTS; i++) if (!fonts[i].used) { slot = i; break; }
     if (slot < 0) return 0;                        // pool full
 
-    int ch = stg_open(name, STG_M_READ);
+    char pathbuf[128];
+    const char *path = ttf_resolve(name, pathbuf, (int)sizeof pathbuf);
+
+    int ch = stg_open(path, STG_M_READ);
     if (ch <= 0) return 0;
     long sz = stg_size(ch);
     stg_close(ch);
@@ -121,7 +146,7 @@ int ttf_load(const char *name) {
     size_t start = (font_off + 15) & ~(size_t)15;
     if (start + (size_t)sz > FONT_ARENA_SIZE) return 0;   // arena full
     unsigned char *data = font_arena + start;
-    if (stg_read(name, (char *)data, (int)sz) != (int)sz) return 0;
+    if (stg_read(path, (char *)data, (int)sz) != (int)sz) return 0;
 
     int off = stbtt_GetFontOffsetForIndex(data, 0);
     if (off < 0) return 0;                          // not a font

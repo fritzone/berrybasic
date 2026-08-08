@@ -35,7 +35,6 @@
  * in tccpod.c). */
 #define SEED__MAGIC       0x44454553u   /* 'S','E','E','D' little-endian */
 #define SEED__HDR_KEYWORD 0x0001u       /* seed_header.flags: registers a keyword */
-#define SEED__SLOT_SIZE   (16 * 1024)   /* interpreter's resident slot (interp_seed.inc) */
 #define SEED__PREFIX      48            /* reserved front gap = sizeof(header)+sizeof(keyword) */
 
 /* The ".seed.desc" manifest seed.h emits (little-endian, 28 bytes):
@@ -127,12 +126,6 @@ ST_FUNC int tcc_output_seed(TCCState *s1, FILE *f, const char *filename)
         }
     }
 
-    if ((int)init_size > SEED__SLOT_SIZE) {
-        tcc_error_noabort("seed: image is %d bytes, over the %d-byte slot limit",
-                          (int)init_size, SEED__SLOT_SIZE);
-        goto done;
-    }
-
     /* --- flatten the loaded sections; the [0,48) gap stays zero for now --- */
     image = tcc_mallocz(init_size ? init_size : SEED__PREFIX);
     for (i = 1; i < s1->nb_sections; i++) {
@@ -148,7 +141,7 @@ ST_FUNC int tcc_output_seed(TCCState *s1, FILE *f, const char *filename)
     seed_wr16(image + 4, abi);                       /* version = ABI built for */
     seed_wr16(image + 6, (unsigned)(flags & SEED__HDR_KEYWORD));
     seed_wr32(image + 8, (unsigned)entry_off);
-    seed_wr32(image + 12, 0);                        /* reserved */
+    seed_wr32(image + 12, (unsigned)image_size);     /* total footprint incl. .bss */
 
     /* --- keyword descriptor at offset 16..48 (struct seed_keyword) --- */
     if (flags & SEED__HDR_KEYWORD) {

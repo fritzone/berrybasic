@@ -12,5 +12,6 @@ SRC="$1"; OUT="$2"; shift 2
     "$SRC" \
     "$ROOT/podlib/src/crt0.c" "$ROOT/podlib/src/stdio.c" "$ROOT/podlib/src/stdlib.c" \
     "$ROOT/podlib/src/string.c" "$ROOT/podlib/src/misc.c" "$ROOT/podlib/src/extra.c" \
+    "$ROOT/podlib/src/math.c" "$ROOT/podlib/src/time.c" \
     "$ROOT/podlib/src/setjmp.S" "$TCC/lib/lib-arm64.c" \
     "$@" -o "$OUT"

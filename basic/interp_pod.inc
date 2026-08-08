@@ -85,6 +85,7 @@ static void    *pod_dn_alloc(unsigned a)                       { (void)a; return
 static void     pod_dn_free(void *a)                           { (void)a; }
 static void    *pod_dn_realloc(void *a, unsigned b)            { (void)a; (void)b; return 0; }
 static void    *pod_dn_alloca(unsigned a, unsigned b)          { (void)a; (void)b; return 0; }
+static void     pod_dn_icache(const void *a, unsigned long b)  { (void)a; (void)b; }
 static int      pod_dn_remove(const char *a)                   { (void)a; return -1; }
 static int      pod_dn_spawn(const char *a, int b, const char *const *c) { (void)a; (void)b; (void)c; return -1; }
 static int      pod_dn_mkdir(const char *a)                    { (void)a; return -1; }
@@ -129,6 +130,7 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->time_cs = pod_dn_timecs;
     s->alloc = pod_dn_alloc; s->free = pod_dn_free;
     s->realloc = pod_dn_realloc; s->alloc_aligned = pod_dn_alloca;
+    s->icache_sync = pod_dn_icache;
     s->file_remove = pod_dn_remove;
     s->spawn = pod_dn_spawn; s->mkdir = pod_dn_mkdir;
     s->dir_open = pod_dn_diropen; s->dir_read = pod_dn_dirread;
@@ -199,7 +201,7 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
         s->gpio_level = svc_gpio_level; s->gpio_wait = svc_gpio_wait;
     }
     if (caps & POD_CAP_TIME) s->time_cs = svc_time_cs;
-    if (caps & POD_CAP_HEAP) { s->alloc = svc_alloc; s->free = svc_free; s->realloc = svc_realloc; s->alloc_aligned = svc_alloc_aligned; }
+    if (caps & POD_CAP_HEAP) { s->alloc = svc_alloc; s->free = svc_free; s->realloc = svc_realloc; s->alloc_aligned = svc_alloc_aligned; s->icache_sync = svc_icache_sync; }
     if (caps & POD_CAP_SPAWN) s->spawn = svc_pod_spawn;
     if (caps & POD_CAP_DIRS) {
         s->mkdir = svc_pod_mkdir;
@@ -548,7 +550,7 @@ static void stmt_podload(void) {
         if (pod_slots[i].used && pod_slots[i].resident && s_eq(pod_slots[i].name, nm)) return;
 
     int nk = (int)pod_rd32(im.keyw);
-    if (seed_kw_n + nk > KW_SEED_MAX) { err("Too many keywords loaded"); return; }
+    if (seed_kw_n + nk > SEED_KW_MAX) { err("Too many keywords loaded"); return; }
     // Reject if any name already exists (a seed or another POD owns it).
     for (int i = 0; i < nk; i++) {
         const unsigned char *r = im.keyw + 4 + i * 24;
@@ -580,6 +582,7 @@ static void stmt_podload(void) {
         s_copy(k->name, name, 16);
         k->kind = kind; k->minargs = mn; k->maxargs = mx; k->slot = si;
         k->is_pod = 1;
+        k->entry  = 0;                          // POD keyword: runs via pod_entry
         k->pod_entry = base + hoff;
         k->pod_svc   = &pod_slots[si].svc;
         seed_kw_n++;

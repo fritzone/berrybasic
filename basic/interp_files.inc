@@ -273,7 +273,7 @@ static void stmt_delete(void) {
 // --- CAT: a rich directory listing ------------------------------------------
 // Categorise a file by extension into a short icon tag and a colour (BBC index).
 static void cat_kind(const char *name, int is_dir, const char **icon, int *colour) {
-    if (is_dir) { *icon = "[DIR]"; *colour = 4; return; }             // blue
+    if (is_dir) { *icon = "[DIR]"; *colour = 3; return; }             // not blue
     int n = 0; while (name[n]) n++;
     int dot = -1;
     for (int i = n - 1; i >= 0; i--) { if (name[i] == '.') { dot = i; break; } if (name[i] == '/') break; }
@@ -502,7 +502,7 @@ static void seed_scan_keywords(void) {
 }
 
 // SEED h%, "FILE.SED" : load a native seed from storage into an executable slot
-// and put its handle (1..SEED_MAX) into the numeric variable h%.
+// and put its handle into the numeric variable h%.
 static void stmt_seed(void) {
     lex_next();                                  // consume SEED
     if (tok != T_VAR) { err("Expected a variable name"); return; }
@@ -534,29 +534,35 @@ static void stmt_seed(void) {
         path[p++] = '.'; path[p++] = 'S'; path[p++] = 'E'; path[p++] = 'D'; path[p] = 0;
     }
 
-    int len = stg_read(path, stg_buf, STG_BUF_SIZE);
-    if (len < 0) { stg_err(len); return; }
-    if (len < (int)sizeof(struct seed_header)) { err("Not a valid seed file"); return; }
+    // Size the seed from the file itself: a channel gives its length, so the blob
+    // is read straight into a page-aligned run-heap block sized to it. There is no
+    // fixed slot, so no 16 KB cap and no fixed number of loaded seeds.
+    int ch = stg_open(path, STG_M_READ);
+    if (ch <= 0) { err("Not a valid seed file"); return; }
+    long fsz = stg_size(ch);
+    stg_close(ch);
+    if (fsz < (long)sizeof(struct seed_header)) { err("Not a valid seed file"); return; }
 
-    struct seed_header hdr;                       // copy bytewise (-mstrict-align safe)
+    struct seed_header hdr;                       // read + validate the 16-byte header
+    if (stg_read(path, stg_buf, (int)sizeof(hdr)) < (int)sizeof(hdr)) { err("Not a valid seed file"); return; }
     for (int i = 0; i < (int)sizeof(hdr); i++) ((char *)&hdr)[i] = stg_buf[i];
     if (hdr.magic != SEED_MAGIC)            { err("Not a valid seed file"); return; }
     if (hdr.version > BERRY_ABI_VERSION)    { err("Seed needs a newer interpreter"); return; }
-    if (len > SEED_SLOT_SIZE)               { err("Seed is too big"); return; }
-    if (hdr.entry_off >= (uint32_t)len)     { err("Not a valid seed file"); return; }
+    if (hdr.entry_off >= (uint32_t)fsz)     { err("Not a valid seed file"); return; }
 
-    int slot = -1;
-    for (int i = 0; i < SEED_MAX; i++) if (!seed_loaded[i]) { slot = i; break; }
-    if (slot < 0) { err("Too many seeds loaded"); return; }
-
-    for (int i = 0; i < SEED_SLOT_SIZE; i++) seed_pool[slot][i] = 0;   // clears .bss
-    for (int i = 0; i < len; i++) seed_pool[slot][i] = stg_buf[i];
-    icache_sync(seed_pool[slot], (unsigned long)len);                  // make executable
-    seed_entry_ptr[slot] = (seed_entry)(void *)(seed_pool[slot] + hdr.entry_off);
-    seed_loaded[slot] = 1;
+    int rec = seed_rec_alloc();
+    if (rec < 0) { err("Out of memory"); return; }
+    unsigned asz = seed_footprint(&hdr, (int)fsz);
+    char *mem = (char *)seed_alloc_page(asz);
+    if (!mem) { err("Seed is too big"); return; }
+    for (unsigned i = 0; i < asz; i++) mem[i] = 0;                    // zero code + .bss
+    if (stg_read(path, mem, (int)fsz) < (int)fsz) { err("Not a valid seed file"); return; }
+    icache_sync(mem, (unsigned long)fsz);                            // make executable
+    seed_recs[rec].entry = (seed_entry)(void *)(mem + hdr.entry_off);
+    seed_recs[rec].used  = 1;
 
     var_t *v = var_find(hname);
-    if (v) v->num = trunc_int(v->is_int, (double)(slot + 1));
+    if (v) v->num = trunc_int(v->is_int, (double)(rec + 1));
 }
 
 // CALL h%, arg... : invoke a seed for its side effects, discarding the result.

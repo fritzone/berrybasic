@@ -1,0 +1,14 @@
+PINBLINK - drive a 40-pin header pin from native code.
+
+Language features
+  - SEED_EXPORT; the seed GPIO API (pin mode, digital write, timing)
+  - reaching the Pi 4's header through the services table
+
+Try it
+  SEED h%, "PINBLINK.SED"
+    n% = CALL(h%, 17, 10)        REM pin 17, 10 blinks
+
+Build it on the machine
+  grow pinblink          # -> build/PINBLINK.SED
+It is also prebuilt in /SEED as PINBLINK.SED, ready to use.
+

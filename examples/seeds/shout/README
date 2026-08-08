@@ -1,0 +1,13 @@
+SHOUT - adds a statement keyword:  SHOUT "hello".
+
+Language features
+  - SEED_KEYWORD (SEED_KW_STATEMENT) - a seed used as a command
+  - reading a string argument and printing it
+
+Try it
+  SHOUT "hello"                -> HELLO
+
+Build it on the machine
+  grow shout          # -> build/SHOUT.SED
+It is also prebuilt in /SEED as SHOUT.SED, ready to use.
+

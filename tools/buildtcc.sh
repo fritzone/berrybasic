@@ -30,7 +30,7 @@ echo "[tcc-pod] compiling manifest"
 "$CC" -c -I"$TCC/include" "$TCC/tcc_pod.c"        -o "$O/tcc_pod.o"
 
 echo "[tcc-pod] compiling pod-libc"
-for f in crt0 stdio stdlib string misc extra; do
+for f in crt0 stdio stdlib string misc extra math time; do
     "$CC" -c $INC "$LIB/src/$f.c" -o "$O/$f.o"
 done
 "$CC" -c "$LIB/src/setjmp.S" -o "$O/setjmp.o"
@@ -38,6 +38,7 @@ done
 echo "[tcc-pod] linking -> $OUT"
 "$CC" -B"$TCC" -pod \
     "$O/tcc.o" "$O/libtcc.o" "$O/lib-arm64.o" "$O/tcc_pod.o" \
-    "$O/crt0.o" "$O/stdio.o" "$O/stdlib.o" "$O/string.o" "$O/misc.o" "$O/extra.o" "$O/setjmp.o" \
+    "$O/crt0.o" "$O/stdio.o" "$O/stdlib.o" "$O/string.o" "$O/misc.o" "$O/extra.o" \
+    "$O/math.o" "$O/time.o" "$O/setjmp.o" \
     -o "$OUT"
 echo "[tcc-pod] done: $OUT"

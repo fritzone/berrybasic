@@ -35,27 +35,7 @@ int strncasecmp(const char *a, const char *b, size_t n) {
 }
 int strcasecmp(const char *a, const char *b) { return stricmp(a, b); }
 
-// --- minimal <math.h> ------------------------------------------------------
-double fabs(double x)  { return x < 0 ? -x : x; }
-double floor(double x) { long long i = (long long)x; if ((double)i > x) i--; return (double)i; }
-double ceil(double x)  { long long i = (long long)x; if ((double)i < x) i++; return (double)i; }
-double ldexp(double x, int exp) {
-    if (exp >= 0) { while (exp--) x *= 2.0; } else { while (exp++) x *= 0.5; }
-    return x;
-}
-double frexp(double x, int *exp) {
-    int e = 0;
-    double a = x < 0 ? -x : x;
-    if (a != 0) { while (a >= 1.0) { a *= 0.5; e++; } while (a < 0.5) { a *= 2.0; e--; } }
-    if (exp) *exp = e;
-    return x < 0 ? -a : a;
-}
-double pow(double x, double y) {          // integer exponents only (enough here)
-    int n = (int)y; double r = 1.0;
-    if (n < 0) { x = 1.0 / x; n = -n; }
-    while (n--) r *= x;
-    return r;
-}
+// <math.h> proper (sqrt/trig/exp/log/pow and the rest) lives in math.c.
 // long double (128-bit) ldexp, for tinycc's float-constant parser. The quad
 // arithmetic resolves to the __*tf* soft-float helpers in lib-arm64.c.
 long double ldexpl(long double x, int e) {
@@ -68,7 +48,7 @@ int stat(const char *path, struct stat *st)  { (void)path; (void)st; return -1; 
 int fstat(int fd, struct stat *st)           { (void)fd; (void)st; return -1; }
 int mkdir(const char *path, int mode) {       /* routes to the CAP_DIRS service */
     (void)mode;
-    return (pod_svc && pod_svc->mkdir) ? pod_svc->mkdir(path) : -1;
+    return (berry_svc && berry_svc->mkdir) ? berry_svc->mkdir(path) : -1;
 }
 
 // --- <dirent.h> over the CAP_DIRS dir_open/dir_read services ---------------
@@ -77,15 +57,15 @@ struct DIR { int open; struct dirent ent; };
 static struct DIR g_dir;
 
 DIR *opendir(const char *path) {
-    if (!pod_svc || !pod_svc->dir_open) return 0;
-    if (!pod_svc->dir_open(path)) return 0;
+    if (!berry_svc || !berry_svc->dir_open) return 0;
+    if (!berry_svc->dir_open(path)) return 0;
     g_dir.open = 1;
     return &g_dir;
 }
 struct dirent *readdir(DIR *d) {
     int is_dir = 0; long size = 0;
-    if (!d || !d->open || !pod_svc || !pod_svc->dir_read) return 0;
-    if (!pod_svc->dir_read(d->ent.d_name, (int)sizeof d->ent.d_name, &is_dir, &size)) {
+    if (!d || !d->open || !berry_svc || !berry_svc->dir_read) return 0;
+    if (!berry_svc->dir_read(d->ent.d_name, (int)sizeof d->ent.d_name, &is_dir, &size)) {
         d->open = 0;
         return 0;
     }
@@ -95,4 +75,4 @@ struct dirent *readdir(DIR *d) {
 }
 int closedir(DIR *d) { if (d) d->open = 0; return 0; }
 int isatty(int fd)                    { return fd <= 2; }
-long clock(void) { return pod_svc && pod_svc->time_cs ? (long)pod_svc->time_cs() : 0; }
+long clock(void) { return berry_svc && berry_svc->time_cs ? (long)berry_svc->time_cs() : 0; }

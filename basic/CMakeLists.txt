@@ -43,6 +43,10 @@ target_compile_definitions(unit_tests PRIVATE
   FONT_TTF_PATH="${REPO}/fonts/Philosopher-Regular.ttf")
 target_include_directories(unit_tests PRIVATE
   ${REPO}/include ${REPO}/basic ${REPO}/seed ${REPO}/drivers ${REPO}/third_party)
+# berry_services.h + seed.h live in podlib/include, which is also a freestanding
+# libc; add it via -idirafter so the system headers (this is a hosted test build)
+# keep priority and only the ABI headers are picked up from there.
+target_compile_options(unit_tests PRIVATE -idirafter ${REPO}/podlib/include)
 target_link_libraries(unit_tests PRIVATE Catch2::Catch2WithMain)
 
 enable_testing()

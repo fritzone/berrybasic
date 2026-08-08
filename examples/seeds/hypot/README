@@ -1,0 +1,14 @@
+HYPOT - adds a numeric-function keyword:  r = HYPOT(dx, dy).
+
+Language features
+  - SEED_KEYWORD (SEED_KW_NUMFN) - a seed that adds a new FUNCTION keyword
+  - used directly, with no SEED / CALL
+  - auto-registered at startup from /SEED
+
+Try it
+  PRINT HYPOT(3, 4)            -> 5
+
+Build it on the machine
+  grow hypot          # -> build/HYPOT.SED
+It is also prebuilt in /SEED as HYPOT.SED, ready to use.
+

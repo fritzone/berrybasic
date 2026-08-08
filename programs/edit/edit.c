@@ -8,7 +8,7 @@
  * ======================================================================== */
 
 #include "pod.h"
-#include "pod_rt.h"       /* pod_svc: the services table, stashed by crt0 */
+#include "pod_rt.h"       /* berry_svc: the services table, stashed by crt0 */
 #include <string.h>
 #include <stdlib.h>
 #include <dirent.h>       /* opendir/readdir: browse the card in the dialogs */
@@ -1259,7 +1259,7 @@ int main(int argc, char **argv)
 {
     int c, i, quit = 0;
 
-    S = pod_svc;                        /* crt0 stashed the services table here */
+    S = berry_svc;                        /* crt0 stashed the services table here */
     layout();                           /* adapt to the real screen size */
     S->gfx_backbuffer(1);               /* compose every frame off-screen */
 

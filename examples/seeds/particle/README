@@ -1,0 +1,16 @@
+PARTICLE - step a whole array of TYPE records at native speed.
+
+Language features
+  - SEED_KEYWORD statement (PARTICLE name, n)
+  - TYPE ... ENDTYPE records, stepped in place
+  - a zero-copy pointer straight into the records' storage
+
+Try it
+  TYPE particle : x, y, vx, vy : ENDTYPE
+    DIM p(200) AS particle
+    PARTICLE "P", 200
+
+Build it on the machine
+  grow particle          # -> build/PARTICLE.SED
+It is also prebuilt in /SEED as PARTICLE.SED, ready to use.
+

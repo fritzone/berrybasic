@@ -23,9 +23,10 @@ POD_NEEDS(CAP_CONSOLE | CAP_FILES | CAP_HEAP | CAP_DIRS | CAP_SPAWN,
           "CONSOLE=progress; FILES=sources and outputs; HEAP=working memory; "
           "DIRS=the output directory; SPAWN=runs tcc for each step")
 
-extern const BerryServices *pod_svc;   /* stashed by the pod-libc crt0 */
+extern const BerryServices *berry_svc;   /* stashed by the pod-libc crt0 */
 
 #define TCC_PATH   "/sys/TCC.POD"
+#define GROW_PATH  "/sys/GROW.POD"    /* grow recurses into a subdir by spawning itself */
 #define MAX_TARGET 32
 #define VAL        1024
 
@@ -42,6 +43,11 @@ typedef struct {
 
 static Target targets[MAX_TARGET];
 static int    ntarget;
+
+/* Sub-projects: each named dir holds its own GROW file. A collecting GROW lists
+   them with `subdir NAME`, and grow builds each by recursing into it. */
+static char subdirs[MAX_TARGET][40];
+static int  nsubdir;
 
 static char proj_out[40]      = "build";
 static char proj_includes[256]= "";
@@ -172,12 +178,13 @@ podonly:
 static void new_block(int line, const char *kw, const char *name) {
     in_project = 0; cur_target = 0;
     if (!strcmp(kw, "project")) { in_project = 1; return; }
-    if (strcmp(kw, "pod") && strcmp(kw, "packet")) { errline(line, "unknown block keyword", kw); return; }
+    if (strcmp(kw, "pod") && strcmp(kw, "packet") && strcmp(kw, "seed"))
+        { errline(line, "unknown block keyword", kw); return; }
     if (ntarget >= MAX_TARGET) { errline(line, "too many targets", 0); return; }
     Target *t = &targets[ntarget++];
     memset(t, 0, sizeof *t);
     t->line = line;
-    t->kind = kw[0] == 'p' && kw[1] == 'a' ? 'K' : 'P';
+    t->kind = !strcmp(kw, "packet") ? 'K' : !strcmp(kw, "seed") ? 'S' : 'P';
     strncpy(t->name, name, 15);
     cur_target = t;
 }
@@ -225,6 +232,12 @@ static void parse(char *text) {
             if (!var_get(name)) var_set(name, v);   /* -s overrides win (set earlier) */
             continue;
         }
+        if (!strcmp(kwl, "subdir")) {
+            char nm[40]; strncpy(nm, rest, 39); nm[39] = 0;
+            char *sp = nm; while (*sp && !is_ws(*sp)) sp++; *sp = 0;   /* first token */
+            if (nm[0] && nsubdir < MAX_TARGET) { strncpy(subdirs[nsubdir], nm, 39); nsubdir++; }
+            continue;
+        }
         /* a block header: the name keeps its case */
         char name[16]; strncpy(name, rest, 15); name[15] = 0;
         char *sp = name; while (*sp && !is_ws(*sp)) sp++; *sp = 0;
@@ -270,7 +283,7 @@ static int spawn_tcc(void) {
         printf("\n");
     }
     if (opt_dryrun) return 0;
-    return pod_svc->spawn(TCC_PATH, cargc, (const char *const *)cargv);
+    return berry_svc->spawn(TCC_PATH, cargc, (const char *const *)cargv);
 }
 
 /* common include/define/option flags for a target */
@@ -353,6 +366,10 @@ static void print_caps(unsigned long long c) {
 static Target *find_target(const char *name, char kind) {
     for (int i = 0; i < ntarget; i++)
         if (targets[i].kind == kind && !strcmp(targets[i].name, name)) return &targets[i];
+    return 0;
+}
+static Target *find_any(const char *name) {
+    for (int i = 0; i < ntarget; i++) if (!strcmp(targets[i].name, name)) return &targets[i];
     return 0;
 }
 static void out_path(Target *t, const char *ext, char *buf, int sz) {
@@ -451,24 +468,57 @@ static int build_pod(Target *t) {
     return 0;
 }
 
+static int build_seed(Target *t) {
+    if (!t->source[0]) { printf("grow: %s: a seed needs a 'source'\n", t->name); had_error = 1; return -1; }
+    printf("  seed %s\n", t->name);
+    char sed[64]; out_path(t, "SED", sed, sizeof sed);
+    /* tcc -seed compiles and links every source in one position-independent pass
+       into a flat blob. It also links the berry-libc packet SEEDCORE by closure
+       (the seed analogue of a pod's `use CORE`): a self-contained seed pulls
+       nothing and stays tiny, one that calls printf/malloc/<graphics.h> pulls
+       just the members it needs. */
+    arg_reset(); arg1("tcc"); arg1("-seed");
+    const char *s = t->source;
+    while (*s) {
+        while (is_ws(*s)) s++; if (!*s) break; const char *st = s; while (*s && !is_ws(*s)) s++;
+        char src[64]; int l = (int)(s - st); if (l > 63) l = 63; memcpy(src, st, l); src[l] = 0;
+        printf("    compile  %s\n", src);
+        arg1(src);
+    }
+    arg2("-l", "SEEDCORE");
+    arg_split(proj_packets, "-L");
+    arg1("-o"); arg1(sed);
+    add_flags(t);
+    int rc = spawn_tcc();
+    if (rc != 0) { printf("grow: %s: seed build failed\n", t->name); had_error = 1; return -1; }
+    printf("    seed     %s\n", sed);
+    t->built = 1;
+    return 0;
+}
+
 static int build_target(Target *t) {
     if (t->built) return 0;
-    return t->kind == 'K' ? build_packet(t) : build_pod(t);
+    return t->kind == 'K' ? build_packet(t) : t->kind == 'S' ? build_seed(t) : build_pod(t);
 }
 
 /* ------------------------------------------------------------- commands */
+static const char *kind_word(char k) { return k == 'K' ? "packet" : k == 'S' ? "seed" : "pod"; }
+static const char *kind_ext(char k)  { return k == 'K' ? "PKT"    : k == 'S' ? "SED"  : "POD"; }
+
 static void cmd_list(void) {
     printf("targets in %s:\n", grow_file);
     for (int i = 0; i < ntarget; i++) {
         Target *t = &targets[i];
-        printf("  %-7s %-12s source: %s\n", t->kind == 'K' ? "packet" : "pod", t->name, t->source);
+        printf("  %-7s %-12s source: %s\n", kind_word(t->kind), t->name, t->source);
         if (t->use[0]) printf("                       use: %s\n", t->use);
     }
+    for (int i = 0; i < nsubdir; i++)
+        printf("  subdir  %s/  (its own GROW)\n", subdirs[i]);
 }
 static void cmd_clean(void) {
     for (int i = 0; i < ntarget; i++) {
         Target *t = &targets[i];
-        char p[64]; out_path(t, t->kind == 'K' ? "PKT" : "POD", p, sizeof p);
+        char p[64]; out_path(t, kind_ext(t->kind), p, sizeof p);
         if (remove(p) == 0) printf("  remove   %s\n", p);
         /* objects */
         const char *s = t->source;
@@ -479,10 +529,10 @@ static void cmd_clean(void) {
     }
     printf("cleaned %s\n", proj_out);
 }
-static void cmd_build(const char *only) {
-    if (pod_svc->mkdir) pod_svc->mkdir(proj_out);   /* ensure the output directory */
+/* Build the targets in THIS GROW file (all, or just `only`). */
+static int build_locals(const char *only) {
     int n = 0;
-    /* packets first (a pod's use pulls them in on demand too), then pods */
+    /* packets first (a pod's use pulls them in on demand too), then pods/seeds */
     for (int pass = 0; pass < 2 && !had_error; pass++)
         for (int i = 0; i < ntarget && !had_error; i++) {
             Target *t = &targets[i];
@@ -490,24 +540,278 @@ static void cmd_build(const char *only) {
             if (only && strcmp(t->name, only)) continue;
             if (!t->built) { if (build_target(t) == 0) n++; }
         }
+    if (n) printf("built %d target%s\n", n, n == 1 ? "" : "s");
+    return n;
+}
+
+static int is_subdir(const char *name) {
+    for (int i = 0; i < nsubdir; i++) if (!strcmp(subdirs[i], name)) return 1;
+    return 0;
+}
+
+/* Recurse into a sub-project: enter its directory and run grow there (a fresh
+   process that reads that dir's own GROW and builds it), then come back. */
+static int build_subdir(const char *dir) {
+    char cwd[128]; int cl = berry_svc->getcwd ? berry_svc->getcwd(cwd, sizeof cwd) : -1;
+    printf("--- %s ---\n", dir);
+    if (!berry_svc->chdir || berry_svc->chdir(dir) != 0) {
+        printf("grow: cannot enter %s/\n", dir); had_error = 1; return -1;
+    }
+    const char *av[4]; int ac = 0;
+    av[ac++] = "grow";
+    if (opt_verbose) av[ac++] = "-v";
+    if (opt_dryrun)  av[ac++] = "-n";
+    int rc = opt_dryrun ? 0 : berry_svc->spawn(GROW_PATH, ac, av);
+    if (cl >= 0) berry_svc->chdir(cwd); else berry_svc->chdir("..");
+    if (rc != 0) { printf("grow: subdir %s failed\n", dir); had_error = 1; return -1; }
+    return 0;
+}
+
+/* Build a selection (target and/or subdir names), or everything if none named. */
+static void cmd_grow(char **names, int nnames) {
+    if (ntarget > 0 && berry_svc->mkdir) berry_svc->mkdir(proj_out);   /* output dir */
+    if (nnames == 0) {
+        build_locals(0);
+        for (int i = 0; i < nsubdir && !had_error; i++) build_subdir(subdirs[i]);
+    } else {
+        for (int i = 0; i < nnames && !had_error; i++) {
+            if (find_any(names[i]))       build_locals(names[i]);
+            else if (is_subdir(names[i])) build_subdir(names[i]);
+            else { printf("grow: no target or subdir named '%s'\n", names[i]); had_error = 1; }
+        }
+    }
     if (had_error) { printf("grow: build failed\n"); exit(1); }
-    printf("built %d target%s\n", n, n == 1 ? "" : "s");
+}
+
+/* ------------------------------------------------ scaffolding (new/add/use) */
+static int  file_exists(const char *p) { FILE *f = fopen(p, "rb"); if (f) { fclose(f); return 1; } return 0; }
+static int  read_all(const char *p, char *buf, int sz) {
+    FILE *f = fopen(p, "rb"); if (!f) return -1;
+    int n = (int)fread(buf, 1, sz - 1, f); fclose(f); if (n < 0) n = 0; buf[n] = 0; return n;
+}
+static void write_all(const char *p, const char *data, int len) {
+    FILE *f = fopen(p, "wb"); if (!f) die("cannot write", p);
+    fwrite(data, 1, len, f); fclose(f);
+}
+static void upper_name(const char *in, char *out, int sz) {
+    int i = 0; for (; in[i] && i < sz - 1; i++) { char c = in[i]; out[i] = (c >= 'a' && c <= 'z') ? c - 32 : c; }
+    out[i] = 0;
+}
+static int is_ident(const char *s) {
+    if (!s || !*s) return 0;
+    char c = *s; if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_')) return 0;
+    for (const char *p = s + 1; *p; p++) { c = *p;
+        if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_')) return 0; }
+    return 1;
+}
+/* A starter source for a fresh target: an entry stub matching the kind. */
+static void make_entry_stub(char kind, const char *name, char *buf, int sz) {
+    if (kind == 'P')
+        snprintf(buf, sz,
+            "#include <stdio.h>\n#include <pod.h>\n\n"
+            "POD_NAME(\"%s\")\n"
+            "POD_NEEDS(CAP_CONSOLE, \"CONSOLE=greeting\")\n\n"
+            "int main(int argc, char **argv) {\n"
+            "    (void)argc; (void)argv;\n"
+            "    printf(\"hello from %s\\n\");\n"
+            "    return 0;\n}\n", name, name);
+    else if (kind == 'S')
+        snprintf(buf, sz,
+            "#include \"seed.h\"\n\n"
+            "// r = %s(x)  after this .SED is loaded with SEED / called with CALL.\n"
+            "SEED_EXPORT(%s) {\n"
+            "    (void)svc; (void)argc;\n"
+            "    return argc > 0 ? argv[0].num : 0;\n}\n", name, name);
+    else
+        snprintf(buf, sz,
+            "// %s packet: one source file == one packet member. Add more with\n"
+            "//   grow add %s FILE.C\n"
+            "int %s_value(void) {\n"
+            "    return 42;\n}\n", name, name, name);
+}
+
+/* Insert "    KEY  VAL" as the first property of the block named `name`.
+   Returns 0 on success, -1 if no such block. */
+static int grow_add_prop(const char *name, const char *key, const char *val) {
+    static char text[65536], out[65536];
+    int n = read_all(grow_file, text, sizeof text);
+    if (n < 0) die("no build file", grow_file);
+    /* find the block header line "pod|seed|packet <name>" at column 0 */
+    char *at = 0, *p = text;
+    while (*p) {
+        char *eol = p; while (*eol && *eol != '\n') eol++;
+        if (*p != ' ' && *p != '\t' && *p != '#' && *p != '\n') {
+            char *q = p; char kw[12]; int k = 0;
+            while (q < eol && *q != ' ' && *q != '\t') { if (k < 11) kw[k++] = *q; q++; }
+            kw[k] = 0;
+            if (!strcmp(kw, "pod") || !strcmp(kw, "seed") || !strcmp(kw, "packet")) {
+                while (q < eol && (*q == ' ' || *q == '\t')) q++;
+                char nm[16]; int j = 0;
+                while (q < eol && *q != ' ' && *q != '\t') { if (j < 15) nm[j++] = *q; q++; }
+                nm[j] = 0;
+                if (!strcmp(nm, name)) { at = (*eol ? eol + 1 : eol); break; }
+            }
+        }
+        p = (*eol ? eol + 1 : eol);
+    }
+    if (!at) return -1;
+    int off = (int)(at - text);
+    char line[160]; int ll = snprintf(line, sizeof line, "    %-7s%s\n", key, val);
+    if (n + ll >= (int)sizeof out) die("build file too large", grow_file);
+    memcpy(out, text, off);
+    memcpy(out + off, line, ll);
+    memcpy(out + off + ll, text + off, n - off);
+    write_all(grow_file, out, n + ll);
+    return 0;
+}
+
+static void cmd_new(const char *kinds, const char *name) {
+    if (!kinds || !name) die("usage: grow new pod|seed|packet NAME", 0);
+    char kind = !strcmp(kinds, "pod") ? 'P' : !strcmp(kinds, "seed") ? 'S'
+              : !strcmp(kinds, "packet") ? 'K' : 0;
+    if (!kind) { printf("grow new: kind must be pod, seed or packet (not '%s')\n", kinds); exit(1); }
+    if (!is_ident(name)) { printf("grow new: '%s' must be a C identifier (letter, then letters/digits/_)\n", name); exit(1); }
+
+    static char text[65536], out[65536];
+    int n = read_all(grow_file, text, sizeof text);
+    if (n > 0) { parse(text); if (find_any(name)) { printf("grow: a target named '%s' already exists in %s\n", name, grow_file); exit(1); } }
+
+    char up[24]; upper_name(name, up, sizeof up);
+    char srcfile[28]; snprintf(srcfile, sizeof srcfile, "%s.C", up);
+    if (!file_exists(srcfile)) {
+        static char stub[1024]; make_entry_stub(kind, name, stub, sizeof stub);
+        write_all(srcfile, stub, (int)strlen(stub));
+        printf("  create   %s\n", srcfile);
+    } else printf("  reuse    %s (already exists)\n", srcfile);
+
+    int off = 0;
+    if (n <= 0) off += snprintf(out, sizeof out, "# GROW build file\nproject\n    out    build\n");
+    else { memcpy(out, text, n); off = n; if (off && out[off-1] != '\n') out[off++] = '\n'; }
+    off += snprintf(out + off, sizeof out - off, "\n%s %s\n    source %s\n", kinds, name, srcfile);
+    if (kind == 'P') off += snprintf(out + off, sizeof out - off, "    use    CORE\n    needs  CONSOLE\n");
+    write_all(grow_file, out, off);
+    if (n <= 0) printf("  create   %s\n", grow_file);
+    printf("  %-7s %s  ->  %s/%s.%s\n", kinds, name, proj_out, name, kind_ext(kind));
+    printf("Next: edit %s, then 'grow %s' to build it.\n", srcfile, name);
+}
+
+static void cmd_add(const char *name, char **files, int nfiles) {
+    if (!name || nfiles < 1) die("usage: grow add TARGET FILE...", 0);
+    static char text[65536];
+    int n = read_all(grow_file, text, sizeof text);
+    if (n < 0) die("no build file", grow_file);
+    parse(text);
+    Target *t = find_any(name);
+    if (!t) { printf("grow: no target named '%s' in %s\n", name, grow_file); exit(1); }
+    for (int i = 0; i < nfiles; i++) {
+        if (!file_exists(files[i])) {
+            char stub[128];
+            snprintf(stub, sizeof stub, "// %s - part of %s (%s)\n", files[i], name, kind_word(t->kind));
+            write_all(files[i], stub, (int)strlen(stub));
+            printf("  create   %s\n", files[i]);
+        } else printf("  reuse    %s\n", files[i]);
+        if (grow_add_prop(name, "source", files[i]) != 0) { printf("grow: could not find block '%s'\n", name); exit(1); }
+        printf("  source   %s  ->  %s\n", files[i], name);
+    }
+}
+
+static void cmd_use(const char *pod, const char *pkt) {
+    if (!pod || !pkt) die("usage: grow use POD PACKET", 0);
+    static char text[65536];
+    int n = read_all(grow_file, text, sizeof text);
+    if (n < 0) die("no build file", grow_file);
+    parse(text);
+    Target *t = find_any(pod);
+    if (!t) { printf("grow: no target named '%s' in %s\n", pod, grow_file); exit(1); }
+    if (t->kind != 'P') { printf("grow: 'use' applies to a pod; '%s' is a %s\n", pod, kind_word(t->kind)); exit(1); }
+    if (grow_add_prop(pod, "use", pkt) != 0) { printf("grow: could not find pod '%s'\n", pod); exit(1); }
+    printf("  use      %s  ->  %s\n", pkt, pod);
+}
+
+/* Print a .SED blob's header (magic, version, entry, footprint). */
+static void seed_info(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) return;
+    unsigned char h[16]; int nr = (int)fread(h, 1, 16, f);
+    long sz = 0; if (fseek(f, 0, 2) == 0) sz = ftell(f);
+    fclose(f);
+    if (nr < 16) return;
+    unsigned magic = h[0]|(h[1]<<8)|(h[2]<<16)|((unsigned)h[3]<<24);
+    unsigned ver = h[4]|(h[5]<<8), flags = h[6]|(h[7]<<8);
+    unsigned entry = h[8]|(h[9]<<8)|(h[10]<<16)|((unsigned)h[11]<<24);
+    unsigned img = h[12]|(h[13]<<8)|(h[14]<<16)|((unsigned)h[15]<<24);
+    printf("    magic    %s   abi %u%s\n", magic == 0x44454553u ? "SEED" : "(bad)", ver,
+           (flags & 1) ? "   keyword" : "");
+    printf("    entry    0x%x   file %ld B   footprint %u B\n", entry, sz, img);
+}
+
+static void cmd_info(const char *name) {
+    if (!name) {
+        printf("targets in %s:\n", grow_file);
+        for (int i = 0; i < ntarget; i++) {
+            Target *t = &targets[i];
+            char out[64]; out_path(t, kind_ext(t->kind), out, sizeof out);
+            printf("  %-7s %-12s %s\n", kind_word(t->kind), t->name,
+                   file_exists(out) ? "[built]" : "[not built]");
+        }
+        return;
+    }
+    Target *t = find_any(name);
+    if (!t) { printf("grow: no target named '%s' in %s\n", name, grow_file); exit(1); }
+    printf("%s %s\n", kind_word(t->kind), t->name);
+    printf("  source   %s\n", t->source);
+    if (t->use[0])   printf("  use      %s\n", t->use);
+    if (t->needs[0]) printf("  needs    %s\n", t->needs);
+    char out[64]; out_path(t, kind_ext(t->kind), out, sizeof out);
+    if (!file_exists(out)) { printf("  not built yet - run 'grow %s'\n", t->name); return; }
+    printf("  built    %s\n", out);
+    if (t->kind == 'P') print_caps(read_pod_caps(out));
+    else if (t->kind == 'S') seed_info(out);
+    else { arg_reset(); arg1("tcc"); arg1("-pkt"); arg1("list"); arg1(out); spawn_tcc(); }  /* packet members */
+}
+
+static void usage(void) {
+    printf("grow - the BerryBasiC build system\n\n");
+    printf("Build:\n");
+    printf("  grow                    build every target (and every subdir)\n");
+    printf("  grow NAME...            build the named targets / subdirs\n");
+    printf("  grow list               list the targets and subdirs\n");
+    printf("  grow info [NAME]        show a target and its built artifact\n");
+    printf("  grow clean              remove build outputs\n\n");
+    printf("Scaffold:\n");
+    printf("  grow new pod NAME       create a pod    target + NAME.C\n");
+    printf("  grow new seed NAME      create a seed   target + NAME.C\n");
+    printf("  grow new packet NAME    create a packet target + NAME.C\n");
+    printf("  grow add NAME FILE...   add source file(s) to a target\n");
+    printf("  grow use POD PKT        make a pod link a packet\n\n");
+    printf("Options:  -f FILE  -v (verbose)  -n (dry run)  -s NAME=VALUE\n");
 }
 
 /* ------------------------------------------------------------------ main */
 int main(int argc, char **argv) {
-    const char *command = 0;
+    char *pos[16]; int npos = 0;
     for (int i = 1; i < argc; i++) {
         char *a = argv[i];
-        if (!strcmp(a, "-v")) opt_verbose = 1;
+        if      (!strcmp(a, "-v")) opt_verbose = 1;
         else if (!strcmp(a, "-n")) opt_dryrun = 1;
+        else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(); return 0; }
         else if (!strcmp(a, "-f") && i + 1 < argc) grow_file = argv[++i];
         else if (!strcmp(a, "-s") && i + 1 < argc) {
             char *eq = strchr(argv[++i], '=');
             if (eq) { *eq = 0; var_set(argv[i], eq + 1); }
-        } else if (a[0] != '-' && !command) command = a;
+        } else if (a[0] != '-') { if (npos < 16) pos[npos++] = a; }
     }
+    const char *command = npos > 0 ? pos[0] : 0;
 
+    /* scaffolding: these create/edit files and handle a missing GROW themselves.
+       They each need their arguments, so `grow new/add/use` with too few words
+       falls through to the build path -- which lets a target or subdir named
+       like a subcommand (e.g. the `add` seed example) still build. */
+    if (command && !strcmp(command, "help")) { usage(); return 0; }
+    if (command && !strcmp(command, "new") && npos >= 3) { cmd_new(pos[1], pos[2]); return 0; }
+    if (command && !strcmp(command, "add") && npos >= 3) { cmd_add(pos[1], pos + 2, npos - 2); return 0; }
+    if (command && !strcmp(command, "use") && npos >= 3) { cmd_use(pos[1], pos[2]); return 0; }
+
+    /* everything else reads the GROW file */
     FILE *f = fopen(grow_file, "r");
     if (!f) die("no build file", grow_file);
     static char text[65536];
@@ -520,6 +824,7 @@ int main(int argc, char **argv) {
 
     if (command && !strcmp(command, "list"))  { cmd_list(); return 0; }
     if (command && !strcmp(command, "clean")) { cmd_clean(); return 0; }
-    cmd_build(command);   /* build all, or just `command` if it names a target */
+    if (command && !strcmp(command, "info"))  { cmd_info(npos > 1 ? pos[1] : 0); return 0; }
+    cmd_grow(pos, npos);   /* build the named targets/subdirs, or everything */
     return 0;
 }

@@ -1,5 +1,5 @@
 10 REM TrueType text: LOADFONT / FONTSIZE / FONTSTYLE / GTEXT and metrics
-20 REM Put a .ttf on the SD card; PHILO.TTF (Philosopher) is bundled by default.
+20 REM Fonts live in /sys/fonts; PHILO.TTF (Philosopher) is bundled by default.
 30 F = LOADFONT("PHILO.TTF")
 40 IF F = 0 THEN F = LOADFONT("PHILOSOPHER-REGULAR.TTF")
 50 IF F = 0 THEN PRINT "No font found - copy a .ttf onto the card." : END

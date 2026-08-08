@@ -27,5 +27,15 @@ char  *strerror(int errnum);
 int    stricmp(const char *a, const char *b);
 int    strcasecmp(const char *a, const char *b);
 int    strncasecmp(const char *a, const char *b, size_t n);
+char  *strtok(char *s, const char *delim);
+char  *strtok_r(char *s, const char *delim, char **save);
+void  *memccpy(void *d, const void *s, int c, size_t n);
+void  *memrchr(const void *s, int c, size_t n);
+char  *strsep(char **sp, const char *delim);
+char  *stpcpy(char *d, const char *s);
+char  *strrev(char *s);
+size_t strlcpy(char *d, const char *s, size_t n);
+size_t strlcat(char *d, const char *s, size_t n);
+char  *strcasestr(const char *haystack, const char *needle);
 
 #endif

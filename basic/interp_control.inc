@@ -288,7 +288,7 @@ static void exec_statement(void) {
             case KW_AUTO:     stmt_auto();     return;
             case KW_EDIT:     stmt_edit();     return;
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
-                           for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;
+                           seed_recs_reset();
                            pod_reset();
                            seed_heap_reset(); coll_reset();
                            con_set_gfx_mode(1);   // back to the default coordinate regime
@@ -467,7 +467,7 @@ static void run_program(int start_pc, int start_off) {
     try_sp = 0;
     g_errcode = 0; g_errmsg[0] = 0;
     scratch_base = 0;
-    for (int i = 0; i < SEED_MAX; i++) seed_loaded[i] = 0;   // fresh run reloads its seeds
+    seed_recs_reset();                                      // fresh run reloads its seeds
     seed_heap_reset();                                       // and starts with a clean heap
     coll_reset();                                            // ... including its collections
     sound_reset();                                           // silence any leftover notes

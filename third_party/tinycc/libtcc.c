@@ -980,7 +980,13 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type)
         if (!s->section_align)
             s->section_align = 0x1000;
     }
-    if (s->seed) {
+    if (s->seed && output_type == TCC_OUTPUT_OBJ) {
+        /* `tcc -seed -c`: compile a relocatable object with the seed's GOT-free,
+           PC-relative codegen (arm64_sym keys off s->seed) but leave it as a
+           normal .o. Packed into a .PKT, such objects link into a seed with no
+           absolute relocations, so a seed can pull the shared berry-libc by
+           closure (tcc -seed x.c -l SEEDCORE) the way a POD links CORE. */
+    } else if (s->seed) {
         /* A seed is shaped like a POD -- static, freestanding, base 0, fully
            position independent (tccseed.c) -- but it lives in a small resident
            slot with no MMU split, so it packs sections tightly (16-byte gaps)

@@ -44,12 +44,12 @@ char *realpath(const char *path, char *resolved) {
 
 // --- assert ----------------------------------------------------------------
 void __pod_assert_fail(const char *expr, const char *file, int line) {
-    if (pod_svc) {
-        pod_svc->puts("assert failed: ", 15);
-        if (expr) pod_svc->puts(expr, (int)strlen(expr));
-        pod_svc->puts(" at ", 4);
-        if (file) pod_svc->puts(file, (int)strlen(file));
-        pod_svc->putc('\n');
+    if (berry_svc) {
+        berry_svc->puts("assert failed: ", 15);
+        if (expr) berry_svc->puts(expr, (int)strlen(expr));
+        berry_svc->puts(" at ", 4);
+        if (file) berry_svc->puts(file, (int)strlen(file));
+        berry_svc->putc('\n');
     }
     abort();
 }
@@ -58,13 +58,15 @@ void __pod_assert_fail(const char *expr, const char *file, int line) {
 // Seconds since 2020-01-01, derived from the boot clock plus a fixed base, so a
 // build timestamp is monotonic and plausible (the loader has no wall clock).
 time_t time(time_t *t) {
-    time_t v = pod_svc->time_cs ? (time_t)(pod_svc->time_cs() / 100u) : 0;
+    time_t v = berry_svc->time_cs ? (time_t)(berry_svc->time_cs() / 100u) : 0;
     if (t) *t = v;
     return v;
 }
-struct tm *localtime(const time_t *t) { (void)t; return 0; }
-struct tm *gmtime(const time_t *t)    { (void)t; return 0; }
-int gettimeofday(void *tv, void *tz)  { (void)tv; (void)tz; return -1; }
+int gettimeofday(void *tv, void *tz)  { (void)tz;
+    if (tv) { long *p = (long *)tv; p[0] = (long)time(0); p[1] = 0; }   // {tv_sec, tv_usec}
+    return 0;
+}
+// gmtime/localtime/mktime/difftime/strftime/asctime/ctime live in time.c.
 
 // --- glob (stub: report "no matches", which the callers treat as no wildcard) ---
 int glob(const char *pattern, int flags, void *errfn, void *pglob) {
@@ -87,10 +89,10 @@ int open(const char *path, int flags, ...) {
     else if (flags & O_RDWR) mode = (flags & O_CREAT) ? POD_OPEN_WRITE : POD_OPEN_UPDATE;
     else mode = POD_OPEN_READ;                                   // r
     if ((flags & O_CREAT) && (flags & O_TRUNC)) mode = POD_OPEN_WRITE;
-    int h = pod_svc->file_open(path, mode);
+    int h = berry_svc->file_open(path, mode);
     if (!h) return -1;
     for (int i = 0; i < POD_FD_MAX; i++) if (!fd_handle[i]) { fd_handle[i] = h; return POD_FD_BASE + i; }
-    pod_svc->file_close(h);
+    berry_svc->file_close(h);
     return -1;
 }
 int creat(const char *path, int mode) { (void)mode; return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0); }
@@ -111,39 +113,39 @@ int __pod_fd_take(int fd) {
 }
 
 long read(int fd, void *buf, unsigned long count) {
-    if (fd == 0) { unsigned char *p = buf; for (unsigned long i = 0; i < count; i++) p[i] = (unsigned char)(pod_svc->getkey() & 0xFF); return (long)count; }
+    if (fd == 0) { unsigned char *p = buf; for (unsigned long i = 0; i < count; i++) p[i] = (unsigned char)(berry_svc->getkey() & 0xFF); return (long)count; }
     int h = fd_to_handle(fd);
     if (!h) return -1;
-    return pod_svc->file_read(h, buf, (int)count);
+    return berry_svc->file_read(h, buf, (int)count);
 }
 long write(int fd, const void *buf, unsigned long count) {
-    if (fd == 1 || fd == 2) { pod_svc->puts((const char *)buf, (int)count); return (long)count; }
+    if (fd == 1 || fd == 2) { berry_svc->puts((const char *)buf, (int)count); return (long)count; }
     int h = fd_to_handle(fd);
     if (!h) return -1;
-    return pod_svc->file_write(h, buf, (int)count);
+    return berry_svc->file_write(h, buf, (int)count);
 }
 long lseek(int fd, long off, int whence) {
     int h = fd_to_handle(fd);
     if (!h) return -1;
-    return pod_svc->file_seek(h, off, whence);
+    return berry_svc->file_seek(h, off, whence);
 }
 int close(int fd) {
     int i = fd - POD_FD_BASE;
     if (i < 0 || i >= POD_FD_MAX || !fd_handle[i]) return (fd >= 0 && fd <= 2) ? 0 : -1;
-    int r = pod_svc->file_close(fd_handle[i]);
+    int r = berry_svc->file_close(fd_handle[i]);
     fd_handle[i] = 0;
     return r < 0 ? -1 : 0;
 }
-int unlink(const char *path) { return pod_svc->file_remove(path) < 0 ? -1 : 0; }
+int unlink(const char *path) { return berry_svc->file_remove(path) < 0 ? -1 : 0; }
 int __pod_remove(const char *path) { return unlink(path); }
 
 char *getcwd(char *buf, unsigned long size) {   /* routes to the CAP_DIRS service */
     if (!buf || size == 0) return 0;
-    if (pod_svc && pod_svc->getcwd && pod_svc->getcwd(buf, (int)size) >= 0) return buf;
+    if (berry_svc && berry_svc->getcwd && berry_svc->getcwd(buf, (int)size) >= 0) return buf;
     buf[0] = '.'; buf[1] = 0; return buf;       /* fallback: current directory */
 }
 int   chdir(const char *path) {                 /* routes to the CAP_DIRS service */
-    return (pod_svc && pod_svc->chdir) ? pod_svc->chdir(path) : -1;
+    return (berry_svc && berry_svc->chdir) ? berry_svc->chdir(path) : -1;
 }
 
 // mmap/mprotect exist only so tccrun.c (the -run JIT, unused in a POD) links;

@@ -1,0 +1,16 @@
+UPRECS - uppercase a text field of every record in an array.
+
+Language features
+  - SEED_KEYWORD statement (UPRECS name, field)
+  - TYPE records with string fields
+  - reaching record text storage from a seed and editing it in place
+
+Try it
+  TYPE player : name$, score : ENDTYPE
+    DIM team(2) AS player : ... fill team() ...
+    UPRECS "TEAM", "NAME$"
+
+Build it on the machine
+  grow uprecs          # -> build/UPRECS.SED
+It is also prebuilt in /SEED as UPRECS.SED, ready to use.
+

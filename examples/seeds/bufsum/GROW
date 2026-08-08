@@ -1,0 +1,2 @@
+seed bufsum
+    source bufsum.c

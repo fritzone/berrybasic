@@ -1,0 +1,14 @@
+UPPER - upper-case a string: string in, string out.
+
+Language features
+  - SEED_EXPORT with a string argument (snapshotted to scratch)
+  - a string return via set_return_str, read back with CALL$
+
+Try it
+  SEED h%, "UPPER.SED"
+    PRINT CALL$(h%, "berry")     -> BERRY
+
+Build it on the machine
+  grow upper          # -> build/UPPER.SED
+It is also prebuilt in /SEED as UPPER.SED, ready to use.
+

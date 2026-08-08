@@ -7,14 +7,14 @@
 #include "pod_rt.h"
 
 // --- dynamic memory --------------------------------------------------------
-void *malloc(size_t size)               { return pod_svc->alloc((unsigned)size); }
-void  free(void *ptr)                   { pod_svc->free(ptr); }
-void *realloc(void *ptr, size_t size)   { return pod_svc->realloc(ptr, (unsigned)size); }
+void *malloc(size_t size)               { return berry_svc->alloc((unsigned)size); }
+void  free(void *ptr)                   { berry_svc->free(ptr); }
+void *realloc(void *ptr, size_t size)   { return berry_svc->realloc(ptr, (unsigned)size); }
 
 void *calloc(size_t nmemb, size_t size) {
     size_t total = nmemb * size;
     if (size && total / size != nmemb) return NULL;     // overflow
-    void *p = pod_svc->alloc((unsigned)total);
+    void *p = berry_svc->alloc((unsigned)total);
     if (p) memset(p, 0, total);
     return p;
 }
@@ -120,3 +120,21 @@ long long llabs(long long n) { return n < 0 ? -n : n; }
 static unsigned long rand_state = 1;
 void srand(unsigned seed) { rand_state = seed; }
 int  rand(void) { rand_state = rand_state * 1103515245UL + 12345UL; return (int)((rand_state >> 16) & 0x7fffffffUL); }
+
+// --- integer division results + a couple of allocation helpers -------------
+div_t   div(int n, int d)         { div_t r;   r.quot = n / d; r.rem = n % d; return r; }
+ldiv_t  ldiv(long n, long d)      { ldiv_t r;  r.quot = n / d; r.rem = n % d; return r; }
+lldiv_t lldiv(long long n, long long d) { lldiv_t r; r.quot = n / d; r.rem = n % d; return r; }
+
+void *reallocarray(void *p, size_t n, size_t sz) {
+    size_t total = n * sz;
+    if (sz && total / sz != n) return 0;                    // overflow
+    return realloc(p, total);
+}
+int posix_memalign(void **memptr, size_t alignment, size_t size) {
+    if (alignment < sizeof(void *) || (alignment & (alignment - 1))) return 22;   // EINVAL
+    void *p = aligned_alloc(alignment, size);
+    if (!p) return 12;                                       // ENOMEM
+    *memptr = p;
+    return 0;
+}

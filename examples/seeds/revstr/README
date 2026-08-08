@@ -1,0 +1,13 @@
+REVSTR - adds a string-function keyword:  a$ = REVERSE$("abc").
+
+Language features
+  - SEED_KEYWORD (SEED_KW_STRFN, name ends in $)
+  - a seed that returns a STRING (set_return_str), read as a$ = REVERSE$(...)
+
+Try it
+  PRINT REVERSE$("berry")      -> yrreb
+
+Build it on the machine
+  grow revstr          # -> build/REVSTR.SED
+It is also prebuilt in /SEED as REVSTR.SED, ready to use.
+

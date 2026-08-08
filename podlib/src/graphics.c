@@ -7,7 +7,9 @@
 #include "pod_rt.h"
 #include "graphics.h"
 
+#ifndef BERRY_SEED   /* the capability manifest is a POD concept; seeds get ungated services */
 POD_NEEDS(CAP_GRAPHICS | CAP_TIME, "GRAPHICS=drawing and text; TIME=gdelay")
+#endif
 
 // The sixteen classic BGI/EGA colours as 0xRRGGBB.
 static const unsigned int g_pal[16] = {
@@ -49,18 +51,18 @@ int initgraph(void) {
     cur_color = 0xFFFFFF; bk_color = 0x000000; fill_color = 0xFFFFFF;
     fill_pat = SOLID_FILL; cp_x = cp_y = 0; just_h = LEFT_TEXT; just_v = TOP_TEXT;
     s_lw = 1; s_lj = JOIN_MITER; s_lc = CAP_BUTT; push_line_style();   // default pen
-    return pod_svc->gfx_avail();
+    return berry_svc->gfx_avail();
 }
-void closegraph(void) { pod_svc->gfx_noclip(); }
-int  getmaxx(void) { int w = pod_svc->gfx_width();  return w > 0 ? w - 1 : 0; }
-int  getmaxy(void) { int h = pod_svc->gfx_height(); return h > 0 ? h - 1 : 0; }
+void closegraph(void) { berry_svc->gfx_noclip(); }
+int  getmaxx(void) { int w = berry_svc->gfx_width();  return w > 0 ? w - 1 : 0; }
+int  getmaxy(void) { int h = berry_svc->gfx_height(); return h > 0 ? h - 1 : 0; }
 int  getmaxcolor(void) { return 15; }
-void cleardevice(void) { pod_svc->gfx_noclip(); pod_svc->gfx_clear(bk_color); }
+void cleardevice(void) { berry_svc->gfx_noclip(); berry_svc->gfx_clear(bk_color); }
 
 // --- double buffering ------------------------------------------------------
-int  setdoublebuffer(int on) { return pod_svc->gfx_backbuffer(on); }
-void flippage(void)          { pod_svc->gfx_flip(); }
-int  getdoublebuffer(void)   { return pod_svc->gfx_buffered(); }
+int  setdoublebuffer(int on) { return berry_svc->gfx_backbuffer(on); }
+void flippage(void)          { berry_svc->gfx_flip(); }
+int  getdoublebuffer(void)   { return berry_svc->gfx_buffered(); }
 
 // --- colour ----------------------------------------------------------------
 unsigned int rgb(int r, int g, int b) { return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255); }
@@ -74,11 +76,11 @@ void setfillstyle(int pat, int c)    { fill_pat = pat; fill_color = pal(c); }
 void setrgbfillcolor(int r, int g, int b) { fill_pat = SOLID_FILL; fill_color = rgb(r, g, b); }
 
 // --- pixels and the current position ---------------------------------------
-void putpixel(int x, int y, int c) { pod_svc->gfx_putpixel(x, y, pal(c)); }
-int  getpixel(int x, int y)        { return (int)pod_svc->gfx_getpixel(x, y); }
+void putpixel(int x, int y, int c) { berry_svc->gfx_putpixel(x, y, pal(c)); }
+int  getpixel(int x, int y)        { return (int)berry_svc->gfx_getpixel(x, y); }
 void moveto(int x, int y)          { cp_x = x; cp_y = y; }
 void moverel(int dx, int dy)       { cp_x += dx; cp_y += dy; }
-void lineto(int x, int y)          { pod_svc->gfx_line(cp_x, cp_y, x, y, cur_color); cp_x = x; cp_y = y; }
+void lineto(int x, int y)          { berry_svc->gfx_line(cp_x, cp_y, x, y, cur_color); cp_x = x; cp_y = y; }
 void linerel(int dx, int dy)       { lineto(cp_x + dx, cp_y + dy); }
 int  getx(void)                    { return cp_x; }
 int  gety(void)                    { return cp_y; }
@@ -87,7 +89,7 @@ int  gety(void)                    { return cp_y; }
 // --- line style -------------------------------------------------------------
 // The pen (width/join/cap) lives in the kernel graphics layer; the seed keeps a
 // copy so each setter can push the full triple through the one service.
-static void push_line_style(void) { pod_svc->gfx_line_style(s_lw, s_lj, s_lc); }
+static void push_line_style(void) { berry_svc->gfx_line_style(s_lw, s_lj, s_lc); }
 void setlinewidth(int w)  { s_lw = w < 1 ? 1 : w; push_line_style(); }
 void setlinejoin(int j)   { s_lj = j; push_line_style(); }
 void setlinecap(int c)    { s_lc = c; push_line_style(); }
@@ -96,30 +98,30 @@ void setlinestyle(int linestyle, unsigned upattern, int thickness) {
     setlinewidth(thickness);
 }
 
-void line(int x1, int y1, int x2, int y2) { pod_svc->gfx_line(x1, y1, x2, y2, cur_color); }
+void line(int x1, int y1, int x2, int y2) { berry_svc->gfx_line(x1, y1, x2, y2, cur_color); }
 
 void rectangle(int l, int t, int r, int b) {
     int pts[8] = { l, t, r, t, r, b, l, b };
-    pod_svc->gfx_polyline(pts, 4, 1 /*closed*/, cur_color);   // honours width + join
+    berry_svc->gfx_polyline(pts, 4, 1 /*closed*/, cur_color);   // honours width + join
 }
 void bar(int l, int t, int r, int b) {
-    if (fill_pat != EMPTY_FILL) pod_svc->gfx_fillrect(l, t, r, b, fill_color);
+    if (fill_pat != EMPTY_FILL) berry_svc->gfx_fillrect(l, t, r, b, fill_color);
 }
 void bar3d(int l, int t, int r, int b, int depth, int topflag) {
-    if (fill_pat != EMPTY_FILL) pod_svc->gfx_fillrect(l, t, r, b, fill_color);
+    if (fill_pat != EMPTY_FILL) berry_svc->gfx_fillrect(l, t, r, b, fill_color);
     rectangle(l, t, r, b);
     if (depth > 0) {
         int dx = depth, dy = -depth;             // BGI depth rises up-and-right
-        pod_svc->gfx_line(r, t, r + dx, t + dy, cur_color);
-        pod_svc->gfx_line(r, b, r + dx, b + dy, cur_color);
-        pod_svc->gfx_line(r + dx, b + dy, r + dx, t + dy, cur_color);
+        berry_svc->gfx_line(r, t, r + dx, t + dy, cur_color);
+        berry_svc->gfx_line(r, b, r + dx, b + dy, cur_color);
+        berry_svc->gfx_line(r + dx, b + dy, r + dx, t + dy, cur_color);
         if (topflag) {
-            pod_svc->gfx_line(l, t, l + dx, t + dy, cur_color);
-            pod_svc->gfx_line(l + dx, t + dy, r + dx, t + dy, cur_color);
+            berry_svc->gfx_line(l, t, l + dx, t + dy, cur_color);
+            berry_svc->gfx_line(l + dx, t + dy, r + dx, t + dy, cur_color);
         }
     }
 }
-void circle(int x, int y, int r) { pod_svc->gfx_circle(x, y, r, cur_color); }
+void circle(int x, int y, int r) { berry_svc->gfx_circle(x, y, r, cur_color); }
 
 void ellipse(int cx, int cy, int a0, int a1, int rx, int ry) {
     if (a1 < a0) a1 += 360;
@@ -129,15 +131,15 @@ void ellipse(int cx, int cy, int a0, int a1, int rx, int ry) {
         double a = a0 + (double)(a1 - a0) * i / steps;
         int X = cx + (int)(rx * dcos_deg(a));
         int Y = cy - (int)(ry * dsin_deg(a));
-        if (!first) pod_svc->gfx_line(px, py, X, Y, cur_color);
+        if (!first) berry_svc->gfx_line(px, py, X, Y, cur_color);
         px = X; py = Y; first = 0;
     }
 }
 void arc(int x, int y, int a0, int a1, int r) { ellipse(x, y, a0, a1, r, r); }
 
 void fillellipse(int cx, int cy, int rx, int ry) {
-    if (fill_pat != EMPTY_FILL) pod_svc->gfx_fillellipse(cx, cy, rx, ry, fill_color);
-    pod_svc->gfx_ellipse(cx, cy, rx, ry, cur_color);
+    if (fill_pat != EMPTY_FILL) berry_svc->gfx_fillellipse(cx, cy, rx, ry, fill_color);
+    berry_svc->gfx_ellipse(cx, cy, rx, ry, cur_color);
 }
 
 // A filled elliptical sector (pie wedge): centre + a fan of arc points.
@@ -151,82 +153,82 @@ void sector(int cx, int cy, int a0, int a1, int rx, int ry) {
         pts[n++] = cx + (int)(rx * dcos_deg(a));
         pts[n++] = cy - (int)(ry * dsin_deg(a));
     }
-    if (fill_pat != EMPTY_FILL) pod_svc->gfx_fillpoly(pts, n / 2, fill_color);
+    if (fill_pat != EMPTY_FILL) berry_svc->gfx_fillpoly(pts, n / 2, fill_color);
     for (int i = 0; i + 3 < n; i += 2)
-        pod_svc->gfx_line(pts[i], pts[i + 1], pts[i + 2], pts[i + 3], cur_color);
-    pod_svc->gfx_line(pts[n - 2], pts[n - 1], cx, cy, cur_color);   // close back to centre
-    pod_svc->gfx_line(cx, cy, pts[2], pts[3], cur_color);
+        berry_svc->gfx_line(pts[i], pts[i + 1], pts[i + 2], pts[i + 3], cur_color);
+    berry_svc->gfx_line(pts[n - 2], pts[n - 1], cx, cy, cur_color);   // close back to centre
+    berry_svc->gfx_line(cx, cy, pts[2], pts[3], cur_color);
 }
 void pieslice(int x, int y, int a0, int a1, int r) { sector(x, y, a0, a1, r, r); }
 
 void drawpoly(int npts, const int *p) {
-    pod_svc->gfx_polyline(p, npts, 0 /*open*/, cur_color);   // honours width + join + caps
+    berry_svc->gfx_polyline(p, npts, 0 /*open*/, cur_color);   // honours width + join + caps
 }
 void fillpoly(int npts, const int *p) {
     if (npts < 2) return;
-    if (fill_pat != EMPTY_FILL) pod_svc->gfx_fillpoly(p, npts, fill_color);
+    if (fill_pat != EMPTY_FILL) berry_svc->gfx_fillpoly(p, npts, fill_color);
     for (int i = 0; i + 1 < npts; i++)
-        pod_svc->gfx_line(p[i * 2], p[i * 2 + 1], p[(i + 1) * 2], p[(i + 1) * 2 + 1], cur_color);
-    pod_svc->gfx_line(p[(npts - 1) * 2], p[(npts - 1) * 2 + 1], p[0], p[1], cur_color);
+        berry_svc->gfx_line(p[i * 2], p[i * 2 + 1], p[(i + 1) * 2], p[(i + 1) * 2 + 1], cur_color);
+    berry_svc->gfx_line(p[(npts - 1) * 2], p[(npts - 1) * 2 + 1], p[0], p[1], cur_color);
 }
-void floodfill(int x, int y, int border) { (void)border; pod_svc->gfx_flood(x, y, fill_color); }
+void floodfill(int x, int y, int border) { (void)border; berry_svc->gfx_flood(x, y, fill_color); }
 
 void setviewport(int x1, int y1, int x2, int y2, int clip) {
-    if (clip) pod_svc->gfx_clip(x1, y1, x2, y2); else pod_svc->gfx_noclip();
+    if (clip) berry_svc->gfx_clip(x1, y1, x2, y2); else berry_svc->gfx_noclip();
 }
-void clearviewport(void) { pod_svc->gfx_clear(bk_color); }   // clears the current clip region
+void clearviewport(void) { berry_svc->gfx_clear(bk_color); }   // clears the current clip region
 
 // --- text ------------------------------------------------------------------
-int  loadfont(const char *f)      { return pod_svc->font_load(f); }
-void settextfont(int h)           { pod_svc->font_select(h); }
-void settextsize(int px)          { pod_svc->font_size(px); }
+int  loadfont(const char *f)      { return berry_svc->font_load(f); }
+void settextfont(int h)           { berry_svc->font_select(h); }
+void settextsize(int px)          { berry_svc->font_size(px); }
 void settextstyle(int font, int direction, int charsize) {
     (void)direction;
-    if (font > 0)     pod_svc->font_select(font);
-    if (charsize > 0) pod_svc->font_size(charsize);
+    if (font > 0)     berry_svc->font_select(font);
+    if (charsize > 0) berry_svc->font_size(charsize);
 }
-void setfontstyle(int b, int i, int u) { pod_svc->font_style(b, i, u); }
+void setfontstyle(int b, int i, int u) { berry_svc->font_style(b, i, u); }
 void settextjustify(int h, int v)      { just_h = h; just_v = v; }
-int  textwidth(const char *s)          { return pod_svc->text_width(s, slen(s)); }
-int  textheight(const char *s)         { (void)s; return pod_svc->text_height(); }
+int  textwidth(const char *s)          { return berry_svc->text_width(s, slen(s)); }
+int  textheight(const char *s)         { (void)s; return berry_svc->text_height(); }
 
 // Place text per the current justification. gfx_text wants the baseline; we
 // approximate the ascent as 4/5 of the line height for TOP/CENTER/BOTTOM anchors.
 static void draw_text_anchored(int x, int y, const char *s) {
     int len = slen(s);
-    int w = pod_svc->text_width(s, len);
-    int h = pod_svc->text_height();
+    int w = berry_svc->text_width(s, len);
+    int h = berry_svc->text_height();
     int ascent = (h * 4) / 5;
     int bx = x, by = y + ascent;
     if (just_h == CENTER_TEXT) bx -= w / 2; else if (just_h == RIGHT_TEXT) bx -= w;
     if (just_v == VCENTER_TEXT) by -= h / 2; else if (just_v == BOTTOM_TEXT) by -= h;
-    pod_svc->gfx_text(bx, by, s, len, cur_color);
+    berry_svc->gfx_text(bx, by, s, len, cur_color);
 }
 void outtextxy(int x, int y, const char *s) { draw_text_anchored(x, y, s); }
 void outtext(const char *s) {
     draw_text_anchored(cp_x, cp_y, s);
-    cp_x += pod_svc->text_width(s, slen(s));
+    cp_x += berry_svc->text_width(s, slen(s));
 }
 
 // --- conveniences ----------------------------------------------------------
 // --- graphics mode and coordinate conversion --------------------------------
-int gfx_mode(void) { return pod_svc->gfx_mode(); }
+int gfx_mode(void) { return berry_svc->gfx_mode(); }
 
 void gfx_from_basic(int bx, int by, int *px, int *py) {
-    if (pod_svc->gfx_mode() == 2) { if (px) *px = bx; if (py) *py = by; return; }
-    int w = pod_svc->gfx_width(), h = pod_svc->gfx_height();
+    if (berry_svc->gfx_mode() == 2) { if (px) *px = bx; if (py) *py = by; return; }
+    int w = berry_svc->gfx_width(), h = berry_svc->gfx_height();
     if (px) *px = bx * w / GFX_BBC_W;
     if (py) *py = (h - 1) - by * h / GFX_BBC_H;          // BBC y-up -> device y-down
 }
 
 void gfx_to_basic(int px, int py, int *bx, int *by) {
-    if (pod_svc->gfx_mode() == 2) { if (bx) *bx = px; if (by) *by = py; return; }
-    int w = pod_svc->gfx_width(), h = pod_svc->gfx_height();
+    if (berry_svc->gfx_mode() == 2) { if (bx) *bx = px; if (by) *by = py; return; }
+    int w = berry_svc->gfx_width(), h = berry_svc->gfx_height();
     if (bx) *bx = px * GFX_BBC_W / w;
     if (by) *by = (h - 1 - py) * GFX_BBC_H / h;
 }
 
 void gdelay(int cs) {
-    unsigned t = pod_svc->time_cs();
-    while ((unsigned)(pod_svc->time_cs() - t) < (unsigned)cs) { }
+    unsigned t = berry_svc->time_cs();
+    while ((unsigned)(berry_svc->time_cs() - t) < (unsigned)cs) { }
 }

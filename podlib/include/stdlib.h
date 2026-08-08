@@ -42,4 +42,13 @@ char *realpath(const char *path, char *resolved);
 #define EXIT_FAILURE 1
 #define RAND_MAX 0x7fffffff
 
+typedef struct { int quot, rem; } div_t;
+typedef struct { long quot, rem; } ldiv_t;
+typedef struct { long long quot, rem; } lldiv_t;
+div_t   div(int n, int d);
+ldiv_t  ldiv(long n, long d);
+lldiv_t lldiv(long long n, long long d);
+void   *reallocarray(void *p, size_t n, size_t sz);
+int     posix_memalign(void **memptr, size_t alignment, size_t size);
+
 #endif

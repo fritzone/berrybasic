@@ -3129,6 +3129,8 @@ Put a `.ttf` on the card (the Philosopher font ships as `PHILO.TTF`) and the flo
 
 `LOADFONT(filename$)` reads a TrueType font and returns a **handle** (a small number, 1 upward) that identifies it; it also makes that font the current one. It returns **0** on failure - the file is missing, is not a font, or too many fonts are loaded (up to 8 at once). Loaded fonts are released when a program is `RUN` or `NEW`ed, so load them at the start of a run.
 
+A bare name (no `/`) is searched for first in the **program's own directory**, then in **`/sys/fonts`** - the home for every installed font, so `LOADFONT("PHILO.TTF")` finds the bundled Philosopher font from anywhere on the card. Put your own `.ttf` next to your program to override, or in `/sys/fonts` to make it available everywhere. A name that contains a path (`"art/title.ttf"`) is taken exactly as given. The same search backs `<graphics.h>`'s `loadfont` in a seed or POD, so native code finds fonts the same way.
+
 ```basic
 TITLE = LOADFONT("PHILO.TTF")
 BODY  = LOADFONT("SERIF.TTF")     : REM several fonts can be open at once
@@ -3797,7 +3799,7 @@ Notes:
 - Keyword names are matched as whole words and are **case-insensitive**, but they **cannot shadow a built-in** keyword - the built-ins always win. Pick a distinctive name, since a registered keyword otherwise becomes reserved (a variable of the same name is no longer reachable).
 - The interpreter checks the **argument count** against the range the seed declared and raises `Wrong number of arguments` if it is out of range.
 - Function keywords are called **with parentheses** (`HYPOT(3,4)`); statement keywords take a bare, comma-separated list (`BOX 1, 2, 3, 4`).
-- Up to **16** keyword seeds are registered. They stay resident for the whole session - a `RUN` or `NEW` does not unload them - so a keyword is always available. Only seeds built with `SEED_KEYWORD` (below) become keywords; plain `SEED_EXPORT` seeds are untouched and still load on demand.
+- Keyword seeds are registered at startup and stay resident for the whole session - a `RUN` or `NEW` does not unload them - so a keyword is always available. Only seeds built with `SEED_KEYWORD` (below) become keywords; plain `SEED_EXPORT` seeds are untouched and still load on demand. There is no fixed limit on the size of a seed or on how many you load: each is given a block sized to it, carved from the seed heap.
 
 To make one, a seed uses the `SEED_KEYWORD` macro from `seed.h` instead of `SEED_EXPORT`, giving the keyword name, its kind, and the minimum/maximum argument count. The function body is the implementation; the gathered arguments arrive in `argv[]`:
 
@@ -3818,7 +3820,7 @@ SEED_KEYWORD("SHOUT", SEED_KW_STATEMENT, 1, 1) { // SHOUT "hi"
 }
 ```
 
-A string function (`SEED_KW_STRFN`) returns its text through `svc->set_return_str`, exactly as `CALL$` does, and is named with a trailing `$`. Build and install a keyword seed the usual way (`make seeds`, then `make sdimage`, or drop the `.SED` into `/seed`); it is picked up on the next start. The bundled examples are `seed/examples/hypot.c`, `shout.c` and `revstr.c` (plus `particle.c` / `uprecs.c` for records, and `inputlog.c` / `paint.c` for interactive keyboard-and-mouse loops).
+A string function (`SEED_KW_STRFN`) returns its text through `svc->set_return_str`, exactly as `CALL$` does, and is named with a trailing `$`. Build and install a keyword seed the usual way (`make seeds`, then `make sdimage`, or drop the `.SED` into `/seed`); it is picked up on the next start. The bundled examples are `examples/seeds/hypot/hypot.c`, `shout.c` and `revstr.c` (plus `particle.c` / `uprecs.c` for records, and `inputlog.c` / `paint.c` for interactive keyboard-and-mouse loops).
 
 ### What a seed can do
 
@@ -3879,7 +3881,7 @@ The off-screen buffer **keeps its contents between flips**, so a loop doesn't ha
 
 Under the services this is `gfx_backbuffer` / `gfx_flip` / `gfx_buffered`, if you are not using `<graphics.h>`.
 
-Not every loop wants this. **Incremental** drawing - `paint.c` adding a line segment per frame - never shows a half-drawn screen and doesn't need buffering; turning it on would only add a full-screen copy per flip. Use it when you clear and redraw. `seed/examples/inputlog.c` is the worked example.
+Not every loop wants this. **Incremental** drawing - `paint.c` adding a line segment per frame - never shows a half-drawn screen and doesn't need buffering; turning it on would only add a full-screen copy per flip. Use it when you clear and redraw. `examples/seeds/inputlog/inputlog.c` is the worked example.
 
 ### Keyboard and mouse from a seed
 
@@ -3929,8 +3931,8 @@ for (;;) {
 
 Two complete examples ship:
 
-- **`seed/examples/inputlog.c`** - `INPUTLOG` (optionally `INPUTLOG x, y`) draws a live panel showing the pointer position and how far it last moved, three lamps for the buttons, the last key as a character and a code, running totals of keys/clicks/moves, and a log of the last few events. `Q` or `ESC` returns to BASIC and prints the totals. It is the short answer to "what am I actually getting from the keyboard and mouse?".
-- **`seed/examples/paint.c`** - `PAINT`: drag with the left button to draw, right button clears, `1`-`7` pick a colour, `Q` or `ESC` quits.
+- **`examples/seeds/inputlog/inputlog.c`** - `INPUTLOG` (optionally `INPUTLOG x, y`) draws a live panel showing the pointer position and how far it last moved, three lamps for the buttons, the last key as a character and a code, running totals of keys/clicks/moves, and a log of the last few events. `Q` or `ESC` returns to BASIC and prints the totals. It is the short answer to "what am I actually getting from the keyboard and mouse?".
+- **`examples/seeds/paint/paint.c`** - `PAINT`: drag with the left button to draw, right button clears, `1`-`7` pick a colour, `Q` or `ESC` quits.
 
 Both own the screen while they run, and both draw their own pointer: `inkey` hides the system arrow whenever it returns, so for the length of the loop there is nothing on screen following the mouse unless the seed draws it.
 
@@ -3997,7 +3999,7 @@ Field names are passed as BASIC stores them: upper case, with the `$` or `%` suf
 
 > Because a seed names the record, a seed's own keyword can never get in the way of your type names: `PARTICLE.SED` may register `PARTICLE` and you can still write `TYPE particle`. Type and field names are matched only where nothing else is legal.
 
-The complete examples are `seed/examples/particle.c` (the zero-copy numeric case) and `seed/examples/uprecs.c` (text fields).
+The complete examples are `examples/seeds/particle/particle.c` (the zero-copy numeric case) and `examples/seeds/uprecs/uprecs.c` (text fields).
 
 ### Working memory
 
@@ -4070,7 +4072,7 @@ SEED_EXPORT(pinblink)
 20 PRINT CALL(h%, 17, 10)        : REM blink BCM 17 ten times
 ```
 
-The full example ships as `seed/examples/pinblink.c` (built to `PINBLINK.SED`).
+The full example ships as `examples/seeds/pinblink/pinblink.c` (built to `PINBLINK.SED`).
 
 ### Graphics from a Seed
 
@@ -4086,7 +4088,7 @@ gfx_from_basic((int)argv[0].num, (int)argv[1].num, &px, &py);   // BASIC's coord
 line(px - 10, py, px + 10, py);                                 // then draw in device pixels
 ```
 
-`gfx_from_basic` is an identity in `MODE 2` and applies the flip+scale in `MODE 1`; `gfx_to_basic` is the inverse, for handing coordinates back. `gfx_mode()` returns `1` or `2`. The BBC logical extent those helpers convert against is exposed as `GFX_BBC_W` / `GFX_BBC_H` (1280 × 1024) - the only place a seed should reference those numbers. The bundled `seed/examples/nativexy.c` (the `NATIVEXY` keyword) demonstrates the round-trip: a crosshair drawn from BASIC coordinates lands exactly where BASIC's own `PLOT 69, x, y` would, in either mode.
+`gfx_from_basic` is an identity in `MODE 2` and applies the flip+scale in `MODE 1`; `gfx_to_basic` is the inverse, for handing coordinates back. `gfx_mode()` returns `1` or `2`. The BBC logical extent those helpers convert against is exposed as `GFX_BBC_W` / `GFX_BBC_H` (1280 × 1024) - the only place a seed should reference those numbers. The bundled `examples/seeds/nativexy/nativexy.c` (the `NATIVEXY` keyword) demonstrates the round-trip: a crosshair drawn from BASIC coordinates lands exactly where BASIC's own `PLOT 69, x, y` would, in either mode.
 
 While the term BGI might be familiar to some of our more seasoned readers, this implementation differs from the DOS original only in the modern direction: colours are **24-bit truecolour** (the classic sixteen colour *names* - `RED`, `LIGHTBLUE`, `YELLOW`, ... - still work as a palette via `setcolor`, and `setrgbcolor(r,g,b)` unlocks the rest), and text is drawn with scalable **TrueType** fonts instead of the old bitmap `.CHR` fonts. Coordinates are device pixels with the origin at the **top-left** (the BGI convention - note this is upside-down from BASIC's own bottom-left graphics).
 
@@ -4123,7 +4125,7 @@ SEED_EXPORT(chart)
 
 Because drawing lands on whatever surface BASIC is currently targeting, a seed composes with BASIC graphics: a program can `BUFFER ON`, call a seed to render a frame, then `FLIP`, or point a `SPRITETARGET` at a sprite and let the seed draw into it.
 
-On the host build there is no framebuffer, so `initgraph()` returns 0 and every drawing call does nothing (the text-*measuring* calls still work); a portable seed checks `initgraph()` once and bails out if it is 0. The full tour ships as `seed/examples/bgidemo.c` (built to `BGIDEMO.SED`), and the header is `seed/include/graphics.h`.
+On the host build there is no framebuffer, so `initgraph()` returns 0 and every drawing call does nothing (the text-*measuring* calls still work); a portable seed checks `initgraph()` once and bails out if it is 0. The full tour ships as `examples/seeds/bgidemo/bgidemo.c` (built to `BGIDEMO.SED`), and the header is `podlib/include/graphics.h`.
 
 #### Setup and information
 
@@ -4305,7 +4307,7 @@ SEED_EXPORT(sortarr) {
 }
 ```
 
-What is **not** provided is anything that needs an operating system - `printf`, file I/O, `getenv`, `exit`, threads, `time`, and so on. Calling one of those is a link error (`undefined reference to 'printf'`), which is the build telling you the seed reached outside its sandbox. Use the services (`svc`) for I/O instead: `svc->puts` to print, `svc->getkey`/`svc->inkey` for the keyboard, `svc->time_cs` for timing. The library lives in `seed/include/` and `seed/runtime/`; adding a missing pure function is just a declaration in the header and a definition in the runtime.
+A seed links the **berry-libc** - the *same* C library a POD uses (its sources are in `podlib/`) - so `printf`, `malloc`/`free`, the string functions, `<stdio.h>` file access and `<graphics.h>` all work; the cross build (`make seeds`) links it, and on the machine `grow` links it from `SEEDCORE.PKT`, pulling only the members a seed actually references. The one real limit is not "no OS": it is **position independence**. A seed is copied into a fixed slot and run with no per-load fixups, so it may contain no absolute relocation - no pointer initialiser, no `static const char *tbl[]`, no function table (`undefined reference` from a missing symbol, or a reloc the build rejects, is how you find out). Reaching the interpreter itself - the console, BASIC's variables and arrays, returning a string - is always through the services (`svc`): `svc->puts`, `svc->getkey`/`svc->inkey`, `svc->num_array`, `svc->set_return_str`, `svc->time_cs`.
 
 ### Starting a new seed
 
@@ -4384,7 +4386,7 @@ Three rules:
   
     The build gates on this and prints the offending addresses rather than shipping a blob that would misbehave. (A pointer the optimiser can see through is simply folded away and never becomes a problem - it is the ones that must really exist in memory that bite.)
 
-> The curated demos in `seed/examples/` are one file each by design - the main `make seeds` rule turns every `seed/examples/*.c` into its own `.SED`. Multi-file seeds live in their own directory under `seed/garden/`, which is exactly what `make newseed` creates.
+> The curated demos in `examples/seeds/` are one file each by design - the main `make seeds` rule turns every `examples/seeds/*/*.c` into its own `.SED`. Multi-file seeds live in their own directory under `seed/garden/`, which is exactly what `make newseed` creates.
 
 ### Writing a seed
 
@@ -4483,7 +4485,7 @@ SEED_EXPORT(seed)
 
 ### Building a seed
 
-Put the source in `seed/examples/` and run:
+Put the source in `examples/seeds/` and run:
 
 ```text
 make seeds

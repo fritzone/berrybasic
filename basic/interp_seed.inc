@@ -13,13 +13,46 @@
 // the BerryServices vtable below, which is what keeps them self-contained. See
 // seed/seed.h for the ABI.
 // ---------------------------------------------------------------------------
-#define SEED_MAX        8
-#define SEED_SLOT_SIZE  (16 * 1024)
 enum { SEED_MAX_ARGS = 16 };
 
-static char       seed_pool[SEED_MAX][SEED_SLOT_SIZE] __attribute__((aligned(4096)));
-static int        seed_loaded[SEED_MAX];
-static seed_entry seed_entry_ptr[SEED_MAX];
+// A loaded SEED/CALL seed. There is no fixed number of them and no fixed size:
+// each seed's code is a page-aligned block carved from the run heap and sized to
+// the blob, and the record table grows on demand. Both are wiped on RUN/NEW (a
+// program reloads its own seeds), so seed_recs is reset to 0 there. Handle =
+// record index + 1.
+typedef struct { int used; seed_entry entry; } seed_rec_t;
+static seed_rec_t *seed_recs;          // grown from the run heap; 0 after a reset
+static int         seed_rec_n;         // records touched (high-water within the array)
+static int         seed_rec_cap;       // allocated capacity
+
+static void *seed_alloc(unsigned nbytes);   // the run-heap allocator, defined below
+
+// Drop every loaded seed. The blobs and this table live in the run heap, which
+// seed_heap_reset() wipes on RUN/NEW, so we just forget the pointers.
+static void seed_recs_reset(void) { seed_recs = 0; seed_rec_n = 0; seed_rec_cap = 0; }
+
+// Reserve a fresh record and return its index, or -1 on OOM. Reuses a freed slot
+// when one exists, else appends (growing the array from the run heap).
+static int seed_rec_alloc(void) {
+    for (int i = 0; i < seed_rec_n; i++) if (!seed_recs[i].used) return i;
+    if (seed_rec_n >= seed_rec_cap) {
+        int ncap = seed_rec_cap ? seed_rec_cap * 2 : 8;
+        seed_rec_t *nt = (seed_rec_t *)seed_alloc((unsigned)(ncap * sizeof(seed_rec_t)));
+        if (!nt) return -1;
+        for (int i = 0; i < seed_rec_n; i++) nt[i] = seed_recs[i];   // old copy leaks until RUN
+        seed_recs = nt; seed_rec_cap = ncap;
+    }
+    return seed_rec_n++;
+}
+
+// A page-aligned executable block from the run heap, sized to nbytes (rounded up
+// to a page). Not individually freed: reclaimed wholesale by the RUN/NEW reset.
+static void *seed_alloc_page(unsigned nbytes) {
+    unsigned asz = (nbytes + 4095u) & ~4095u;
+    char *raw = (char *)seed_alloc(asz + 4096u);        // slack to reach a page boundary
+    if (!raw) return 0;
+    return (void *)(((unsigned long)raw + 4095u) & ~(unsigned long)4095u);
+}
 
 static char g_seed_retstr[MAX_STR];   // string result staged by set_return_str
 static int  g_seed_retstr_len;        // -1 = the last call set no string
@@ -38,19 +71,51 @@ typedef union seed_hdr_u {
     long double _align;                                   // force 16-byte units
 } seed_blk;
 
-static seed_blk seed_heap[SEED_HEAP_SIZE / sizeof(seed_blk)];
+// 4096-aligned so a page-aligned sub-allocation is a whole number of blocks from
+// the base (native seed code needs a page-aligned load address for ADRP+ADD).
+static seed_blk seed_heap[SEED_HEAP_SIZE / sizeof(seed_blk)] __attribute__((aligned(4096)));
 static seed_blk seed_freelist;        // circular free-list sentinel
 static seed_blk *seed_freep;          // 0 until first use / after a reset
+
+// Session-persistent high-water mark. Native seed code (both SEED/CALL blobs and
+// keyword seeds) has to run from executable RAM; there is no OS page allocator,
+// so it is carved from this same 48 MB arena. Keyword seeds, however, must SURVIVE
+// RUN/NEW (they are language extensions loaded once at startup), and the run heap
+// below is wiped on every RUN. So keyword-seed code and the keyword table grow
+// DOWN from the top of the arena, past seed_sys_top, which the reset leaves alone;
+// the K&R free-list only ever covers [seed_heap, seed_sys_top). When no keyword
+// seeds are loaded, seed_sys_top is the arena end and the heap behaves as before.
+static seed_blk *seed_sys_top;        // 0 until first use; else the persistent floor
 
 static void seed_heap_reset(void) { seed_freep = 0; }     // lazily re-inited
 
 static void seed_heap_init(void) {
+    if (!seed_sys_top) seed_sys_top = seed_heap + sizeof(seed_heap) / sizeof(seed_blk);
     seed_blk *base = seed_heap;
-    base->s.size = (unsigned)(sizeof(seed_heap) / sizeof(seed_blk));
+    base->s.size = (unsigned)(seed_sys_top - seed_heap);   // run heap = below the floor
     base->s.next = &seed_freelist;
     seed_freelist.s.next = base;
     seed_freelist.s.size = 0;
     seed_freep = &seed_freelist;
+}
+
+// Reserve `nbytes` of page-aligned persistent memory from the top of the arena
+// for a native keyword seed's code. Keyword seeds are scanned once at startup,
+// BEFORE the run heap is first used, so moving the floor down here never disturbs
+// a live allocation; if the run heap is already in use we refuse rather than
+// corrupt it (return 0). Never individually freed: it lives for the session.
+static void *seed_persist_page(unsigned nbytes) {
+    if (nbytes == 0) return 0;
+    if (seed_freep) return 0;    // run heap already live: only safe before first use (boot)
+    if (!seed_sys_top) seed_sys_top = seed_heap + sizeof(seed_heap) / sizeof(seed_blk);
+    unsigned units = (nbytes + sizeof(seed_blk) - 1) / sizeof(seed_blk);
+    seed_blk *top = seed_sys_top - units;
+    unsigned long a = (unsigned long)top & ~(unsigned long)0xFFF;   // floor address to 4096
+    top = (seed_blk *)a;
+    if (top < seed_heap + (4u * 1024 * 1024) / sizeof(seed_blk)) return 0;  // keep run room
+    seed_sys_top = top;          // seed_heap_init() (lazy, still pending) will honour it
+    for (seed_blk *q = top; q < top + units; q++) q->s.next = 0, q->s.size = 0;  // zero
+    return top;
 }
 
 static void *seed_alloc(unsigned nbytes) {
@@ -388,6 +453,7 @@ static int  svc_chdir(const char *path)            { return stg_chdir(path); }
 static void svc_clip_set(const char *d, int n)     { con_clip_set(d, n); }
 static int  svc_clip_get(char *b, int max)         { return con_clip_get(b, max); }
 static int  svc_clip_len(void)                     { return con_clip_len(); }
+static void svc_icache_sync(const void *a, unsigned long n) { icache_sync(a, n); }
 static int  svc_getkey(void)                      { return bas_getkey(); }
 static int  svc_inkey(int cs)                     { return bas_inkey(cs); }
 // The call is the poll: nothing services the mouse while a seed runs, so a seed
@@ -615,6 +681,10 @@ static const BerryServices g_svc = {
     svc_keymods,
     svc_gfx_mode,
     svc_gfx_line_style, svc_gfx_polyline,
+    svc_vdu, svc_screen_size, svc_con_font, svc_con_glyph,
+    svc_dir_open, svc_dir_read, svc_getcwd, svc_chdir,
+    svc_clip_set, svc_clip_get, svc_clip_len,
+    svc_icache_sync,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma
@@ -625,7 +695,7 @@ static double seed_run_collect(void) {
     double h = need_num();
     if (g_err) return 0;
     int slot = (int)h - 1;
-    if (slot < 0 || slot >= SEED_MAX || !seed_loaded[slot]) { err("No such seed"); return 0; }
+    if (slot < 0 || slot >= seed_rec_n || !seed_recs[slot].used) { err("No such seed"); return 0; }
 
     berry_arg argv[SEED_MAX_ARGS];
     int argc = 0;
@@ -648,7 +718,7 @@ static double seed_run_collect(void) {
 
     g_seed_retstr_len = -1;
     double ret = 0;
-    if (seed_invoke(seed_entry_ptr[slot], &g_svc, argv, argc, &ret) != 0) {
+    if (seed_invoke(seed_recs[slot].entry, &g_svc, argv, argc, &ret) != 0) {
         err("Native seeds run on the Pi, not the host build");
         return 0;
     }
@@ -663,21 +733,29 @@ static double seed_run_collect(void) {
 // section) into a resident pool that a RUN/NEW never clears, so the keyword is
 // always available — used directly, without SEED/CALL.
 // ---------------------------------------------------------------------------
-#define KW_SEED_MAX 16                 // how many keyword seeds can be resident
+// Native keyword seeds are scanned once at startup, so their code is carved from
+// the persistent top of the seed heap (seed_persist_page) and survives every
+// RUN/NEW; there is no per-seed size limit. The registry table below holds both
+// native seeds and POD extensions. It is a fixed, generous size: keyword
+// extensions are inherently few (the whole language has ~100 keywords), and
+// unlike the seed code it must persist across RUN yet grow at PODLOAD time, which
+// a top-of-heap bump cannot do safely once the run heap is live.
+#define SEED_KW_MAX 256
 
 // A dynamic (runtime-registered) keyword. Both native seeds (from /seed at
 // startup) and POD extensions (PODLOAD) live in this one table, so the lexer and
-// dispatch treat them alike. is_pod picks the backend: a seed runs from
-// kwseed_pool[slot] through g_svc; a POD keyword runs from pod_entry (inside a
-// resident POD image) through its own capability-gated pod_svc.
+// dispatch treat them alike. is_pod picks the backend: a native seed runs from
+// its persistent code block via `entry`; a POD keyword runs from pod_entry
+// (inside a resident POD image) through its own capability-gated pod_svc.
 typedef struct {
-    char name[16]; int kind; int minargs; int maxargs; int slot;
-    int is_pod; const void *pod_entry; const void *pod_svc;
+    char name[16]; int kind; int minargs; int maxargs;
+    int is_pod;              // 0 = native seed, 1 = POD keyword
+    int slot;               // POD: pod_pool index (PODFREE drops its keywords). native: -1
+    const void *entry;      // native seed: entry pointer into its persistent block
+    const void *pod_entry, *pod_svc;
 } seed_kw_t;
 
-static char       kwseed_pool[KW_SEED_MAX][SEED_SLOT_SIZE] __attribute__((aligned(4096)));
-static seed_entry kwseed_entry[KW_SEED_MAX];
-static seed_kw_t  seed_kw_tab[KW_SEED_MAX];
+static seed_kw_t  seed_kw_tab[SEED_KW_MAX];
 static int        seed_kw_n = 0;
 
 // Find a registered keyword by (already upper-cased) name; -1 if none.
@@ -696,8 +774,19 @@ static const char *seed_kw_name(int idx) {
     return seed_kw_tab[idx].name;
 }
 
-// Validate a loaded .sed blob and, if it registers a keyword, copy it into the
-// resident pool and add it to the table. Returns 1 if a keyword was installed.
+// Bytes to reserve for a loaded seed: the header's image_size (total footprint
+// including .bss, stamped by tcc -seed) when it is known, else the blob length
+// plus a 16 KB zeroed margin for a gcc-built seed's .bss (matching the old fixed
+// slot, which zeroed 16 KB). Rounded up to a page.
+static unsigned seed_footprint(const struct seed_header *hdr, int len) {
+    unsigned foot = hdr->image_size ? hdr->image_size : (unsigned)len + 16384u;
+    if (foot < (unsigned)len) foot = (unsigned)len;
+    return (foot + 4095u) & ~4095u;
+}
+
+// Validate a loaded .sed blob and, if it registers a keyword, copy it into a
+// persistent code block and add it to the table. Returns 1 if a keyword was
+// installed.
 static int seed_kw_register(const char *blob, int len) {
     if (len < (int)(sizeof(struct seed_header) + sizeof(struct seed_keyword))) return 0;
     struct seed_header hdr;                         // copy bytewise (-mstrict-align)
@@ -706,8 +795,7 @@ static int seed_kw_register(const char *blob, int len) {
     if (hdr.version > BERRY_ABI_VERSION)      return 0;
     if (!(hdr.flags & SEED_HDR_KEYWORD))     return 0;   // a plain seed: not a keyword
     if (hdr.entry_off >= (uint32_t)len)      return 0;
-    if (len > SEED_SLOT_SIZE)                return 0;   // too big for a resident slot
-    if (seed_kw_n >= KW_SEED_MAX)            return 0;   // table full
+    if (seed_kw_n >= SEED_KW_MAX)            return 0;   // registry full
 
     struct seed_keyword d;
     for (int i = 0; i < (int)sizeof(d); i++)
@@ -725,18 +813,19 @@ static int seed_kw_register(const char *blob, int len) {
     if (mx > SEED_MAX_ARGS) mx = SEED_MAX_ARGS;
     if (mx < mn)            mx = mn;
 
-    int slot = seed_kw_n;
-    for (int i = 0; i < SEED_SLOT_SIZE; i++) kwseed_pool[slot][i] = 0;   // clears .bss
-    for (int i = 0; i < len; i++)            kwseed_pool[slot][i] = blob[i];
-    icache_sync(kwseed_pool[slot], (unsigned long)len);                  // make executable
-    kwseed_entry[slot] = (seed_entry)(void *)(kwseed_pool[slot] + hdr.entry_off);
+    char *mem = (char *)seed_persist_page(seed_footprint(&hdr, len));   // zeroed, page-aligned
+    if (!mem) return 0;                                // out of persistent room
+    for (int i = 0; i < len; i++) mem[i] = blob[i];
+    icache_sync(mem, (unsigned long)len);              // make executable
 
+    int slot = seed_kw_n;
     s_copy(seed_kw_tab[slot].name, name, 16);
     seed_kw_tab[slot].kind    = kind;
     seed_kw_tab[slot].minargs = mn;
     seed_kw_tab[slot].maxargs = mx;
-    seed_kw_tab[slot].slot    = slot;
     seed_kw_tab[slot].is_pod  = 0;              // a native seed keyword
+    seed_kw_tab[slot].slot    = -1;             // native: not a POD slot
+    seed_kw_tab[slot].entry   = (const void *)(mem + hdr.entry_off);
     seed_kw_tab[slot].pod_entry = 0;
     seed_kw_tab[slot].pod_svc   = 0;
     seed_kw_n++;
@@ -790,7 +879,7 @@ static int seed_kw_invoke(seed_kw_t *k, berry_arg *argv, int argc, double *out) 
         rc = pod_run_kw(k->pod_entry, (const BerryServices *)k->pod_svc,
                         (const berry_arg *)argv, argc, out);
     else                    // a native seed keyword
-        rc = seed_invoke(kwseed_entry[k->slot], &g_svc, argv, argc, out);
+        rc = seed_invoke((seed_entry)k->entry, &g_svc, argv, argc, out);
     if (rc != 0) { err("Native code runs on the Pi, not the host build"); return -1; }
     return 0;
 }

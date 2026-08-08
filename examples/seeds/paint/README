@@ -1,0 +1,14 @@
+PAINT - drag the mouse to draw; keyboard + mouse from inside a seed.
+
+Language features
+  - SEED_KEYWORD statement (PAINT)
+  - an interactive input loop in a seed: getkey / inkey plus mouse x, y, buttons
+  - direct pixel drawing
+
+Try it
+  PAINT                        REM drag the left button; Q or ESC quits
+
+Build it on the machine
+  grow paint          # -> build/PAINT.SED
+It is also prebuilt in /SEED as PAINT.SED, ready to use.
+

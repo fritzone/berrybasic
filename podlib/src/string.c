@@ -126,3 +126,62 @@ char *strndup(const char *s, size_t n) {
     if (p) { memcpy(p, s, len); p[len] = '\0'; }
     return p;
 }
+
+// --- more <string.h> -------------------------------------------------------
+static char *g_strtok_save;
+char *strtok_r(char *s, const char *delim, char **save) {
+    char *p = s ? s : *save;
+    if (!p) return 0;
+    p += strspn(p, delim);
+    if (!*p) { *save = 0; return 0; }
+    char *tok = p;
+    p = strpbrk(p, delim);
+    if (p) { *p = 0; *save = p + 1; } else *save = 0;
+    return tok;
+}
+char *strtok(char *s, const char *delim) { return strtok_r(s, delim, &g_strtok_save); }
+
+void *memccpy(void *d, const void *s, int c, size_t n) {
+    unsigned char *dp = d; const unsigned char *sp = s;
+    while (n--) { *dp = *sp; if (*sp == (unsigned char)c) return dp + 1; dp++; sp++; }
+    return 0;
+}
+void *memrchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s + n;
+    while (n--) if (*--p == (unsigned char)c) return (void *)p;
+    return 0;
+}
+char *strsep(char **sp, const char *delim) {
+    char *s = *sp; if (!s) return 0;
+    char *e = strpbrk(s, delim);
+    if (e) { *e = 0; *sp = e + 1; } else *sp = 0;
+    return s;
+}
+char *stpcpy(char *d, const char *s) { while ((*d = *s)) { d++; s++; } return d; }
+char *strrev(char *s) {
+    size_t i = 0, j = strlen(s); if (j) j--;
+    while (i < j) { char t = s[i]; s[i++] = s[j]; s[j--] = t; }
+    return s;
+}
+size_t strlcpy(char *d, const char *s, size_t n) {
+    size_t l = strlen(s);
+    if (n) { size_t c = l < n - 1 ? l : n - 1; memcpy(d, s, c); d[c] = 0; }
+    return l;
+}
+size_t strlcat(char *d, const char *s, size_t n) {
+    size_t dl = strnlen(d, n);
+    if (dl == n) return n + strlen(s);
+    size_t l = strlen(s), c = l < n - dl - 1 ? l : n - dl - 1;
+    memcpy(d + dl, s, c); d[dl + c] = 0;
+    return dl + l;
+}
+static int ci(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+char *strcasestr(const char *h, const char *n) {
+    if (!*n) return (char *)h;
+    for (; *h; h++) {
+        const char *a = h, *b = n;
+        while (*a && *b && ci((unsigned char)*a) == ci((unsigned char)*b)) { a++; b++; }
+        if (!*b) return (char *)h;
+    }
+    return 0;
+}

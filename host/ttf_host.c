@@ -3,6 +3,7 @@
 // interface as the target backend (drivers/ttf.c). The host has no framebuffer,
 // so con_gtext is a no-op there, but LOADFONT / FONTSIZE / TEXTWIDTH / FONTHEIGHT
 // all work and are testable.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -41,12 +42,27 @@ void ttf_reset(void) {
     recompute_metrics();
 }
 
+/* A bare font name is looked up in the current directory, then in /sys/fonts
+   (matching the target loader in drivers/ttf.c); a path is used verbatim. */
+static const char *ttf_resolve(const char *name, char *buf, int bufsz) {
+    for (const char *p = name; *p; p++) if (*p == '/') return name;
+    int ch = stg_open(name, STG_M_READ);
+    if (ch > 0) { stg_close(ch); return name; }
+    snprintf(buf, bufsz, "/sys/fonts/%s", name);
+    ch = stg_open(buf, STG_M_READ);
+    if (ch > 0) { stg_close(ch); return buf; }
+    return name;
+}
+
 int ttf_load(const char *name) {
     int slot = -1;
     for (int i = 0; i < MAX_FONTS; i++) if (!fonts[i].used) { slot = i; break; }
     if (slot < 0) return 0;
 
-    int ch = stg_open(name, STG_M_READ);
+    char pathbuf[512];
+    const char *path = ttf_resolve(name, pathbuf, (int)sizeof pathbuf);
+
+    int ch = stg_open(path, STG_M_READ);
     if (ch <= 0) return 0;
     long sz = stg_size(ch);
     stg_close(ch);
@@ -54,7 +70,7 @@ int ttf_load(const char *name) {
 
     unsigned char *data = (unsigned char *)malloc((size_t)sz);
     if (!data) return 0;
-    if (stg_read(name, (char *)data, (int)sz) != (int)sz) { free(data); return 0; }
+    if (stg_read(path, (char *)data, (int)sz) != (int)sz) { free(data); return 0; }
 
     int off = stbtt_GetFontOffsetForIndex(data, 0);
     if (off < 0 || !stbtt_InitFont(&fonts[slot].info, data, off)) { free(data); return 0; }

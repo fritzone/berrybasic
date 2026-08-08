@@ -1,0 +1,16 @@
+BGIDEMO - a tour of the BGI-style graphics library, drawn from native code.
+
+Language features
+  - <graphics.h>: initgraph, rectangle/circle, bar/pieslice, fillpoly, arc
+  - TrueType text from a seed (loadfont, settextstyle, outtextxy)
+  - drawing straight onto the BASIC screen at native speed
+
+Try it
+  LOADFONT "PHILO.TTF"
+    SEED h%, "BGIDEMO.SED" : CALL h%, 0
+
+Build it on the machine
+  grow bgidemo          # -> build/BGIDEMO.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as BGIDEMO.SED, ready to use.
+

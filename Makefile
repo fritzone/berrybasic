@@ -19,7 +19,12 @@ HOST_DIR    = host
 BUILD_DIR   = build
 
 # Header search path shared by every target object.
-INCLUDES = -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(DRIVERS_DIR) -I$(BASIC_DIR) -I$(SEED_DIR)
+# berry_services.h + seed.h live with the berry-libc in podlib/include. That dir
+# is also a freestanding libc (its stdint.h/errno.h/... would shadow the system
+# ones), so it goes in via -idirafter: searched only AFTER the system/compiler
+# headers, so the ABI headers are found without the libc headers stealing names.
+INCLUDES = -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(DRIVERS_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) \
+           -idirafter podlib/include
 
 # -mstrict-align: the MMU is disabled early, so all memory is treated as Device
 # memory where unaligned 16/32-bit accesses fault. This stops the compiler
@@ -124,7 +129,8 @@ run: $(KERNEL) $(SDIMG)
 # basic/basic.c is shared with the target; only the backends differ.
 HOSTCC      = cc
 HOST_BIN    = $(BUILD_DIR)/basic_host
-HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -I$(DRIVERS_DIR) -Ithird_party
+HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -I$(DRIVERS_DIR) -Ithird_party \
+              -idirafter podlib/include
 HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
               $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/sound_host.c \
               $(HOST_DIR)/gpio_host.c $(HOST_DIR)/i2c_host.c $(HOST_DIR)/ttf_host.c $(HOST_DIR)/gfx_host.c \
@@ -158,16 +164,21 @@ coverage:
 #   make seeds
 # -I.../include gives seeds the freestanding seed libc (<stdlib.h>, <string.h>,
 # <ctype.h>); -I.../seed finds "seed.h".
-SEED_SRC = $(wildcard $(SEED_DIR)/examples/*.c)
-SEED_OUT = $(patsubst $(SEED_DIR)/examples/%.c,$(BUILD_DIR)/seeds/%.sed,$(SEED_SRC))
+# Each seed example is its own project dir: examples/seeds/<name>/<name>.c (+ a
+# GROW and a README, so it also builds on the machine with `grow`). The gcc
+# cross build here still produces the prebuilt /SEED blobs from the same sources.
+SEED_SRC = $(wildcard examples/seeds/*/*.c)
+SEED_OUT = $(foreach s,$(SEED_SRC),$(BUILD_DIR)/seeds/$(notdir $(s:.c=.sed)))
 SEED_CFLAGS = -O2 -ffreestanding -nostdlib -fno-builtin -mcpu=cortex-a72 -mstrict-align \
-              -mcmodel=tiny -fno-pic -ffunction-sections -fdata-sections \
-              -I$(SEED_DIR)/include -I$(SEED_DIR)
+              -mcmodel=tiny -fno-pic -ffunction-sections -fdata-sections -DBERRY_SEED \
+              -Ipodlib/include -I$(SEED_DIR) -I$(TCC_DIR)/include
 
-# The seed C library: every .c under seed/runtime/ is linked into each seed, and
-# --gc-sections drops whatever a given seed doesn't use.
-SEED_RT_SRC = $(wildcard $(SEED_DIR)/runtime/*.c)
-SEED_RT_OBJ = $(patsubst $(SEED_DIR)/runtime/%.c,$(BUILD_DIR)/seeds/rt_%.o,$(SEED_RT_SRC))
+# The C library is the ONE berry-libc in podlib/ - the same sources a POD links,
+# now also compiled (with the seed toolchain) into each seed; --gc-sections drops
+# whatever a given seed doesn't use. crt0/setjmp are POD-only (a seed enters via
+# SEED_EXPORT, not main), so they are not in this list.
+SEED_RT_SRC = $(addprefix podlib/src/,string.c stdlib.c stdio.c misc.c extra.c graphics.c math.c time.c)
+SEED_RT_OBJ = $(patsubst podlib/src/%.c,$(BUILD_DIR)/seeds/rt_%.o,$(SEED_RT_SRC))
 
 # The self-containment gate. A seed is copied to whatever address a slot happens
 # to be at, so every address inside it must be computed relative to the program
@@ -188,11 +199,12 @@ SEED_BAD_RELOC = R_AARCH64_(ABS(16|32|64)|MOVW_UABS)
 
 seeds: $(SEED_OUT)
 
-$(BUILD_DIR)/seeds/rt_%.o: $(SEED_DIR)/runtime/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/seeds/rt_%.o: podlib/src/%.c | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/seeds
 	$(CC) $(SEED_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR)/seed.ld $(SEED_RT_OBJ) | $(BUILD_DIR)
+.SECONDEXPANSION:
+$(BUILD_DIR)/seeds/%.sed: examples/seeds/$$*/$$*.c podlib/include/seed.h $(SEED_DIR)/seed.ld $(SEED_RT_OBJ) | $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)/seeds
 	$(CC) $(SEED_CFLAGS) -c $< -o $(BUILD_DIR)/seeds/$*.o
 	$(LD) --emit-relocs --gc-sections -T $(SEED_DIR)/seed.ld \
@@ -212,11 +224,11 @@ $(BUILD_DIR)/seeds/%.sed: $(SEED_DIR)/examples/%.c $(SEED_DIR)/seed.h $(SEED_DIR
 # results onto the data card so RUN "NAME.POD" / PODLOAD find them.
 TCC_DIR  = third_party/tinycc
 POD_TCC  = $(TCC_DIR)/arm64-tcc
-# The unified services table (seed/berry_services.h) is the single source of
-# truth for both the seed and POD ABI. The compiler ships its own include tree,
-# so mirror the header there; it is a generated copy (see .gitignore). Every POD
-# rule depends on $(POD_TCC), which order-only-depends on this, so the copy is
-# refreshed before any POD is compiled.
+# The unified services table (podlib/include/berry_services.h) is the single
+# source of truth for both the seed and POD ABI, and lives with the rest of the
+# berry-libc headers. The compiler ships its own include tree, so mirror the
+# header there; it is a generated copy (see .gitignore). Every POD rule depends
+# on $(POD_TCC), which order-only-depends on this, so it is refreshed first.
 TCC_SVC_HDR = $(TCC_DIR)/include/berry_services.h
 # seed.h rides along in the compiler include tree too, so `tcc -seed prog.c`
 # finds <seed.h> on the machine (it pulls in berry_services.h + stdint.h, which
@@ -242,24 +254,34 @@ GFX_PKT     = $(BUILD_DIR)/lib/GFX.PKT
 # lib-arm64 (128-bit soft-float) is NOT a CORE.PKT member: the on-machine packet
 # linker loops on its symbol table. It ships as SOFTFP.O, a plain object grow
 # force-links for any pod that uses CORE (printf/double math reach it).
-CORE_OBJ    = $(addprefix $(BUILD_DIR)/lib/pl_,stdio.o stdlib.o string.o misc.o extra.o setjmp.o)
+CORE_OBJ    = $(addprefix $(BUILD_DIR)/lib/pl_,stdio.o stdlib.o string.o misc.o extra.o setjmp.o math.o time.o)
 CORE_PKT    = $(BUILD_DIR)/lib/CORE.PKT
 CRT0_OBJ    = $(BUILD_DIR)/lib/crt0.o
 SOFTFP_OBJ  = $(BUILD_DIR)/lib/pl_lib-arm64.o
 PODLIB_CC   = $(POD_TCC) -B$(TCC_DIR) -nostdinc -Ipodlib/include -I$(TCC_DIR)/include
+
+# SEEDCORE.PKT: the SAME berry-libc, but compiled with the seed toolchain
+# (`tcc -seed -c`, GOT-free PC-relative) so `tcc -seed x.c -l SEEDCORE` links it
+# by closure -- the seed analogue of CORE.PKT for pods. A seed pulls only the
+# members it references, so a self-contained seed stays tiny. The 128-bit
+# soft-float (lib-arm64) packs cleanly as a member here, pulled only by seeds
+# that format floating point.
+SEEDCORE_CC  = $(POD_TCC) -B$(TCC_DIR) -seed -c -DBERRY_SEED -nostdinc -Ipodlib/include -I$(TCC_DIR)/include
+SEEDCORE_OBJ = $(addprefix $(BUILD_DIR)/lib/sc_,string.o stdlib.o stdio.o misc.o extra.o graphics.o setjmp.o lib-arm64.o math.o time.o)
+SEEDCORE_PKT = $(BUILD_DIR)/lib/SEEDCORE.PKT
 
 # Native applications: each is a program in programs/<dir>/<dir>.c that installs
 # to /SYS as <POD>.POD. An entry is "<dir>:<POD>[:bare]" - the optional ":bare"
 # marks a self-contained pod_main POD (built with `tcc -pod`); otherwise it is a
 # pod-libc program (linked with the runtime by podcc.sh). To add one, drop
 # programs/<name>/<name>.c and add it here. `edit` -> ED.POD (EDIT is a keyword).
-APP_LIST = edit:ED grow:GROW show:SHOW echo:ECHO:bare
+APP_LIST = edit:ED grow:GROW show:SHOW echo:ECHO:bare seedrun:SEEDRUN
 app_dir  = $(word 1,$(subst :, ,$(1)))
 app_pod  = $(word 2,$(subst :, ,$(1)))
 app_bare = $(word 3,$(subst :, ,$(1)))
 APP_OUT  = $(foreach a,$(APP_LIST),$(BUILD_DIR)/sys/$(call app_pod,$(a)).POD)
 
-pods: $(POD_OUT) $(SUM_POD) $(APP_OUT) $(TCC_POD) $(MATH_PKT) $(GFX_PKT) $(CORE_PKT) $(CRT0_OBJ) $(SOFTFP_OBJ)
+pods: $(POD_OUT) $(SUM_POD) $(APP_OUT) $(TCC_POD) $(MATH_PKT) $(GFX_PKT) $(CORE_PKT) $(CRT0_OBJ) $(SOFTFP_OBJ) $(SEEDCORE_PKT)
 
 # The `sum` example command (a bare pod_main) installs to /SYS.
 $(SUM_POD): examples/pods/sum.c $(TCC_SVC_HDR) $(POD_TCC) | $(BUILD_DIR)
@@ -293,6 +315,19 @@ $(CRT0_OBJ): podlib/src/crt0.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR
 $(CORE_PKT): $(CORE_OBJ) $(POD_TCC)
 	$(POD_TCC) -pkt $@ $(CORE_OBJ)
 
+# SEEDCORE members: the berry-libc under `tcc -seed -c` (PC-relative objects).
+$(BUILD_DIR)/lib/sc_%.o: podlib/src/%.c $(TCC_DIR)/include/pod.h $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(SEEDCORE_CC) $< -o $@
+$(BUILD_DIR)/lib/sc_setjmp.o: podlib/src/setjmp.S $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(SEEDCORE_CC) $< -o $@
+$(BUILD_DIR)/lib/sc_lib-arm64.o: $(TCC_DIR)/lib/lib-arm64.c $(POD_TCC) | $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/lib
+	$(SEEDCORE_CC) $< -o $@
+$(SEEDCORE_PKT): $(SEEDCORE_OBJ) $(POD_TCC)
+	$(POD_TCC) -pkt $@ $(SEEDCORE_OBJ)
+
 # MATH.PKT: the imath demo packet (source under examples/pods/). `tcc -pkt`
 # derives the symbol table and capabilities from the member.
 $(MATH_OBJ): $(MATH_SRC) $(POD_TCC) | $(BUILD_DIR)
@@ -316,10 +351,10 @@ $(TCC_POD): $(POD_TCC) tools/buildtcc.sh $(TCC_DIR)/tcc_pod.c \
 	tools/buildtcc.sh $@
 
 # Mirror the single-source services header into the compiler's include tree.
-$(TCC_SVC_HDR): seed/berry_services.h
+$(TCC_SVC_HDR): podlib/include/berry_services.h
 	cp $< $@
 
-$(TCC_SEED_HDR): seed/seed.h
+$(TCC_SEED_HDR): podlib/include/seed.h
 	cp $< $@
 
 # Build the AArch64 cross tcc once (it is what emits target PODs on this host).
