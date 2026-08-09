@@ -84,6 +84,15 @@ if compgen -G "$ROOT/examples/*/" >/dev/null; then
             mcopy -i "$DATAPART" "$file" "::EXAMPLES/$group/$(basename "$file" | tr '[:lower:]' '[:upper:]')"
         done
     done
+    # The graphical Example Browser sits at the top of /EXAMPLES (with its logo).
+    # It CHAINs into each group to run an example and gets itself back. Load it
+    # with:  CD EXAMPLES : LOAD "MENU" : RUN
+    [ -e "$ROOT/examples/menu.bas" ] && \
+        mcopy -o -i "$DATAPART" "$ROOT/examples/menu.bas" "::EXAMPLES/MENU.BAS"
+    [ -e "$ROOT/examples/more.bas" ] && \
+        mcopy -o -i "$DATAPART" "$ROOT/examples/more.bas" "::EXAMPLES/MORE.BAS"
+    [ -e "$ROOT/examples/logo.png" ] && \
+        mcopy -o -i "$DATAPART" "$ROOT/examples/logo.png" "::EXAMPLES/LOGO.PNG"
     # poddemo drives HELLO.POD / HYPOT.POD (built by 'make pods'); ship them
     # alongside it so the example is self-contained.
     if [ -d "$ROOT/examples/pods" ]; then

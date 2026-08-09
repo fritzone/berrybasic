@@ -38,6 +38,7 @@ enum {
     KW_DELAY,                                                       // DELAY cs: pause for n centiseconds
     KW_POKE,                                                        // POKE addr,byte (alias for ?addr=byte)
     KW_EXEC,                                                        // EXEC "stmt" : run a string as BASIC
+    KW_CHAIN,                                                       // CHAIN c$[,r$] : run another .BAS, then optionally r$
     KW_PINMODE, KW_PINSET, KW_PINCLR,                              // GPIO statements
     KW_OUTPUT, KW_PULLUP, KW_PULLDOWN, KW_ALT,                    // PINMODE sub-keywords (INPUT reused)
     KW_I2CWRITE, KW_I2CREAD,                                       // I2C statements
@@ -200,7 +201,7 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "STARTSWITH", KW_STARTSWITH }, { "ENDSWITH", KW_ENDSWITH },
     { "SPLIT", KW_SPLIT }, { "JOIN$", KW_JOINS },
     { "PEEK", KW_PEEK }, { "POKE", KW_POKE },
-    { "EVAL", KW_EVAL }, { "EXEC", KW_EXEC },
+    { "EVAL", KW_EVAL }, { "EXEC", KW_EXEC }, { "CHAIN", KW_CHAIN },
     { "PINMODE", KW_PINMODE }, { "PIN", KW_PIN }, { "PINS", KW_PINS },
     { "PINSET", KW_PINSET }, { "PINCLR", KW_PINCLR }, { "PINWAIT", KW_PINWAIT },
     { "I2CWRITE", KW_I2CWRITE }, { "I2CREAD", KW_I2CREAD }, { "I2CPROBE", KW_I2CPROBE },

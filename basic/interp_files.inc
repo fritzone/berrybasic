@@ -55,13 +55,12 @@ static void stmt_save(void) {
     if (r) stg_err(r);
 }
 
-// LOAD "name" : clear the current program and parse the file's numbered lines.
-static void stmt_load(void) {
-    char name[64];
-    if (!read_filename(name, sizeof name)) return;
+// Read a .BAS file into the program store, replacing the current program (and
+// clearing variables), exactly as LOAD does. Returns 0 or a negative stg_* code.
+// Shared by LOAD and CHAIN.
+static int load_bas_file(const char *name) {
     int n = stg_read(name, stg_buf, STG_BUF_SIZE);
-    if (n < 0) { stg_err(n); return; }
-
+    if (n < 0) return n;
     prog_n = 0;
     clear_vars();
     int i = 0;
@@ -83,6 +82,64 @@ static void stmt_load(void) {
             prog_store(num, p);
         }
     }
+    return 0;
+}
+
+// LOAD "name" : clear the current program and parse the file's numbered lines.
+static void stmt_load(void) {
+    char name[64];
+    if (!read_filename(name, sizeof name)) return;
+    int r = load_bas_file(name);
+    if (r < 0) stg_err(r);
+}
+
+// ---------------------------------------------------------------------------
+// CHAIN: run another BASIC program, discarding the current one. A short FIFO
+// holds the program(s) queued to run next; the interpreter's top-level run loop
+// (run_chain_queue, in interp_control.inc) drains it after the current program
+// stops. The two-argument form `CHAIN callee$, caller$` runs callee$ and then,
+// once it finishes, reloads and runs caller$ - so a menu can launch an example
+// and get itself back automatically, without a resident-program snapshot.
+// ---------------------------------------------------------------------------
+#define CHAIN_MAX 4
+static char chain_q[CHAIN_MAX][64];
+static int  chain_qn = 0;
+static void chain_reset(void)                 { chain_qn = 0; }
+static void chain_enqueue(const char *name)   { if (chain_qn < CHAIN_MAX) s_copy(chain_q[chain_qn++], name, 64); }
+static void chain_dequeue(char *out) {
+    s_copy(out, chain_q[0], 64);
+    for (int i = 1; i < chain_qn; i++) s_copy(chain_q[i - 1], chain_q[i], 64);
+    if (chain_qn > 0) chain_qn--;
+}
+
+// Uppercase a program name and default its extension to .BAS (the FAT is 8.3 and
+// case-folding, so "koch" and "graphics/koch" both resolve after this).
+static void chain_normalise(char *name) {
+    int i = 0, dot = 0;
+    for (; name[i]; i++) { name[i] = up(name[i]); if (name[i] == '.') dot = 1; }
+    if (!dot && i < 59) { name[i] = '.'; name[i+1] = 'B'; name[i+2] = 'A'; name[i+3] = 'S'; name[i+4] = 0; }
+}
+
+// CHAIN callee$ [, caller$]
+static void stmt_chain(void) {
+    lex_next();                                         // consume CHAIN
+    value_t s = need_str(); if (g_err) return;
+    char callee[64]; int cn = s.len; if (cn > 63) cn = 63;
+    for (int i = 0; i < cn; i++) callee[i] = s.str[i];
+    callee[cn] = 0;
+    char caller[64]; caller[0] = 0;
+    if (tok == T_COMMA) {
+        lex_next();
+        value_t s2 = need_str(); if (g_err) return;
+        int rn = s2.len; if (rn > 63) rn = 63;
+        for (int i = 0; i < rn; i++) caller[i] = s2.str[i];
+        caller[rn] = 0;
+    }
+    chain_normalise(callee);
+    chain_qn = 0;                                       // a fresh CHAIN replaces any queue
+    chain_enqueue(callee);
+    if (caller[0]) { chain_normalise(caller); chain_enqueue(caller); }
+    g_stop = 1;                                         // unwind the current program
 }
 
 // LIST "file" support (the parser is in interp_list.inc). Splits a raw file line

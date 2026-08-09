@@ -1317,6 +1317,8 @@ Executes the current program from its lowest line number. `RUN` first **clears a
 RUN
 ```
 
+Press **Ctrl+C** at any time to stop a running program and return to the prompt - even one stuck in an endless loop that never reads the keyboard. (A program that installs an `ON KEY` handler takes over the keyboard and manages Ctrl+C itself.) Other keys, including `Esc`, are passed through to the program, so a program is free to use `Esc` for its own purposes.
+
 ### LIST
 
 Displays the stored program, **pretty-printed**:
@@ -1471,6 +1473,23 @@ Clears the current program and variables, then loads a program from a file.
 ```basic
 LOAD "GAME"
 ```
+
+### CHAIN
+
+Loads **another** `.BAS` program and runs it, discarding the current one - like `LOAD` immediately followed by `RUN`, but from inside a running program. The file name is any **string expression** (a literal or a variable), and the `.BAS` extension is added if you leave it off.
+
+```basic
+CHAIN "GAME"
+CHAIN LEVEL$
+```
+
+Given a **second** name, `CHAIN` runs the first program and then, once it finishes, loads and runs the second one:
+
+```basic
+CHAIN "KOCH", "MENU"
+```
+
+This is how a menu launches something and gets itself back: it `CHAIN`s the chosen program with its own name as the second argument, so when that program ends the menu reappears. Each program is loaded fresh and starts with a clean slate (its own variables, screen and modules), exactly as a top-level `RUN` would. The Example Browser (`CD EXAMPLES : LOAD "MENU" : RUN`) is built entirely on this.
 
 ### CAT / DIR
 

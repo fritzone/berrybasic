@@ -164,6 +164,7 @@ static void exec_statement(void) {
             case KW_TONE:  stmt_tone();    return;
             case KW_POKE:  stmt_poke_kw(); return;
             case KW_EXEC:  stmt_exec();    return;
+            case KW_CHAIN: stmt_chain();   return;
             case KW_PINMODE: stmt_pinmode(); return;
             case KW_PIN:     stmt_pin();     return;   // write form; read form PIN(n) in expressions
             case KW_PINSET:  stmt_pinset(1); return;
@@ -381,6 +382,24 @@ static void dispatch_handler(const char *name) {
 // handler can't itself be interrupted by another event.
 static void poll_events(void) {
     if (in_event || g_err || g_stop) return;
+    // Ctrl+C stops a running program (the universal "interrupt"). Drain the
+    // keyboard so a stray key can't hide a following Ctrl+C; any other key is
+    // left in g_pending_key for the program's next GET / INKEY (so Esc and the
+    // rest still reach programs that want them). This makes every program
+    // stoppable - even a tight animation loop that never reads the keyboard -
+    // while a program that installed ON KEY keeps full control of the keys.
+    // Ctrl+C is byte 3 from a serial terminal, or 'c'/'C' with the Ctrl
+    // modifier from a USB keyboard (which delivers the plain letter + a mod
+    // bit), exactly as the REPL detects it.
+    if (!ev_key.active) {
+        int k;
+        while ((k = con_inkey(0)) >= 0) {
+            if (k == 3 || ((con_keymods() & 0x002) && (k == 'c' || k == 'C'))) {
+                g_stop = 1; return;                // 0x002 = KMOD_CTRL
+            }
+            g_pending_key = k;
+        }
+    }
     if (!ev_timer.active && !ev_mouse.active && !ev_key.active) {
         int any = 0;
         for (int i = 0; i < EV_PIN_MAX; i++) if (ev_pin[i].active) { any = 1; break; }
@@ -449,7 +468,7 @@ static void run_body(int pc, int off) {
 
 static int run_depth;                          // nested run_program depth (for IMPORT)
 
-static void run_program(int start_pc, int start_off) {
+static void run_program_once(int start_pc, int start_off) {
     int outer = (run_depth == 0);
     run_depth++;
     // Only the outermost RUN pulls in modules (and strips them at the end), so a
@@ -519,5 +538,23 @@ static void run_program(int start_pc, int start_off) {
         con_line_width(1); con_line_join(CON_JOIN_MITER); con_line_cap(CON_CAP_BUTT);  // default BASIC pen
         sgfx_line_style(1, CON_JOIN_MITER, CON_CAP_BUTT);   // ... and the seed pen
     }
+}
+
+// Drain the CHAIN queue: load and run each queued .BAS in turn. Iterative (not
+// recursive) so a menu that endlessly chains example->menu->example never grows
+// the C stack. Each program is loaded fresh and run as an outer program, so it
+// gets a clean screen, variables and modules - just like a top-level RUN.
+static void run_chain_queue(void) {
+    while (chain_qn > 0 && !g_err) {
+        char f[64];
+        chain_dequeue(f);
+        if (load_bas_file(f) < 0) { err("CHAIN: no such file"); break; }
+        run_program_once(0, 0);
+    }
+}
+
+static void run_program(int start_pc, int start_off) {
+    run_program_once(start_pc, start_off);
+    if (run_depth == 0) run_chain_queue();     // top-level run: honour any CHAIN
 }
 

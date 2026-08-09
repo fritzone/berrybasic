@@ -91,6 +91,7 @@ static int process_line(char *line) {
     exec_text(p, 0);
     // A direct "GOTO/GOSUB <line>" starts the program running from there.
     if (!g_err && g_branch) run_program(g_branch_line, g_branch_off);
+    else if (!g_err && chain_qn > 0) run_chain_queue();   // immediate-mode CHAIN
     return 1;
 }
 
@@ -98,6 +99,7 @@ void basic_init(void) {
     prog_n = 0;
     main_n = 0;
     run_depth = 0;
+    chain_reset();
     n_imported = 0;
     var_n = 0;
     g_err = 0;
