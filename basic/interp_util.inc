@@ -48,6 +48,7 @@ static int  g_errcode = 0;         // numeric code (for ERR): 0 = none / built-i
 static int  g_errline = -1;        // line the error happened on (for deferred report)
 static int  g_err_reported = 0;    // has the pending error already been printed?
 static int  try_sp    = 0;         // depth of active TRY handlers (0 = none)
+static int  try_open  = 0;         // lexically open TRY blocks (awaiting ENDTRY)
 
 static void set_errmsg(const char *msg) {
     int i = 0;

@@ -152,6 +152,18 @@ void con_gtext(int x, int y, const char *s, int len);
 // USB keyboard is present (a serial terminal sends characters, not modifiers).
 int  con_keymods(void);
 
+// --- system monitor (F12 overlay) -------------------------------------------
+// Memory usage across the interpreter's fixed pools, filled by the interpreter
+// (sys_meminfo, implemented in basic.c) and read by the kernel's F12 overlay.
+// All figures are in bytes. "heap" is the 48 MB seed/POD arena; "vars" is the
+// GC'd string heap for BASIC variables; "dim" is the DIM byte arena.
+typedef struct {
+    unsigned long heap_used, heap_total;
+    unsigned long vars_used, vars_total;
+    unsigned long dim_used,  dim_total;
+} sysmem_t;
+void sys_meminfo(sysmem_t *m);
+
 // --- pointer (USB mouse) ----------------------------------------------------
 // Poll the mouse and report the current pointer position in raw framebuffer
 // pixels (origin top-left: x in 0..width-1, y in 0..height-1) and the button

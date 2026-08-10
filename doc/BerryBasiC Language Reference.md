@@ -1319,6 +1319,18 @@ RUN
 
 Press **Ctrl+C** at any time to stop a running program and return to the prompt - even one stuck in an endless loop that never reads the keyboard. (A program that installs an `ON KEY` handler takes over the keyboard and manages Ctrl+C itself.) Other keys, including `Esc`, are passed through to the program, so a program is free to use `Esc` for its own purposes.
 
+#### The F12 system monitor
+
+Press **F12** at any time - at the prompt or while a program runs - to toggle a small **system-monitor overlay** in the top-right corner of the screen. Press F12 again to hide it. It shows, updated a couple of times a second:
+
+- **CPU** - how busy the machine is: near 0% while it waits for you at the prompt, up to 100% while a program is computing (the bar turns amber then red as it climbs).
+- **MEM** - how much of the 48 MB seed / POD / collections heap is in use (to one decimal). This heap fills when you load a native seed, run a `.POD`, or build a `DICT`/`LIST`/`TREE`; a plain BASIC program leaves it at `0.0%`.
+- **VARS** - how much of BASIC's own working memory is in use (to one decimal): the string heap that holds your string variables plus the arena that `DIM name size` hands out. This is what an ordinary program consumes, so this is the gauge to watch when you `DIM` big buffers or juggle a lot of text.
+- **USE / FRE** - the seed/POD heap (the `MEM` one) as used and free kilobytes.
+- **UP** - how long the machine has been running, as minutes:seconds.
+
+F12 is handled by the system, not your program, so it is swallowed and never reaches `GET`, `INKEY` or an `ON KEY` handler - a program can never see or block it. The overlay draws on top of whatever is on screen (text, graphics, even a double-buffered animation) and lifts cleanly when you switch it off.
+
 ### LIST
 
 Displays the stored program, **pretty-printed**:
@@ -3622,7 +3634,7 @@ The path may be typed **with or without quotes**: `CD examples`, `CD ..` and `CD
 | `DIRDATE$`        | last-modified date as `"YYYY-MM-DD"`                                                                                                  |
 | `DIRTIME$`        | last-modified time as `"HH:MM"`                                                                                                       |
 
-Only one scan is active at a time, and `.` / `..` are not reported. Test `DIROPEN` directly as a condition - `IF DIROPEN(p$) THEN ...` - rather than comparing it (like `OPENIN`, writing `DIROPEN(p$) = 0` does not work).
+Only one scan is active at a time, and `.` / `..` are not reported. Test `DIROPEN` directly as a condition - `IF DIROPEN(p$) THEN ...` - rather than comparing it (writing `DIROPEN(p$) = 0` does not work).
 
 ```basic
 10 IF DIROPEN("/") THEN 30
@@ -3638,13 +3650,24 @@ Only one scan is active at a time, and `.` / `..` are not reported. Test `DIROPE
 
 A program can open a file on the SD card as a **channel** and read or write its bytes directly. Writes go straight to the real FAT filesystem, so the files can be read on a PC (and by other programs). Up to four files may be open at once.
 
-Open a file with one of three functions, each returning a channel number (a small positive integer), or **0** if it could not be opened:
+Open a file with one of three functions, each returning a channel number (a small positive integer). If the file cannot be opened they **raise an error** (which a `TRY ... CATCH` can handle - see *Error Handling*), rather than returning a value you must remember to test:
 
-| Function         | Opens a file for...                                          | If the file...             |
-| ---------------- | ------------------------------------------------------------ | -------------------------- |
-| `OPENIN "name"`  | reading                                                      | doesn't exist to returns 0 |
-| `OPENOUT "name"` | writing (creates a new file, or **empties** an existing one) | is created fresh           |
-| `OPENUP "name"`  | reading *and* writing                                        | doesn't exist to returns 0 |
+| Function         | Opens a file for...                                          | If the file...                          |
+| ---------------- | ------------------------------------------------------------ | --------------------------------------- |
+| `OPENIN "name"`  | reading                                                      | doesn't exist to raises `File not found`  |
+| `OPENOUT "name"` | writing (creates a new file, or **empties** an existing one) | is created fresh (`Can't create file` if it can't be) |
+| `OPENUP "name"`  | reading *and* writing                                        | doesn't exist to raises `File not found`  |
+
+To open a file that may not exist without stopping the program, wrap the `OPENIN` in a `TRY ... CATCH` block:
+
+```basic
+10 TRY
+20   C = OPENIN "SCORES.DAT"
+30   PRINT "loaded, "; EXT# C; " bytes" : CLOSE# C
+40 CATCH
+50   PRINT "no saved scores yet"
+60 ENDTRY
+```
 
 All the other file words take a channel after a `#`:
 

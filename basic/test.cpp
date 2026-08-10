@@ -474,6 +474,27 @@ TEST_CASE("file errors are reported") {
     REQUIRE_THAT(run_raw("DELETE \"NOSUCH.XYZ\"\n"),ContainsSubstring("not found"));
 }
 
+TEST_CASE("OPENIN on a missing file raises a catchable error") {
+    // Bare OPENIN of a file that doesn't exist stops the program with File not found.
+    REQUIRE_THAT(run("10 C = OPENIN \"NOSUCH.DAT\"\n20 PRINT \"reached\""),
+                 ContainsSubstring("File not found"));
+    REQUIRE_THAT(run("10 C = OPENIN \"NOSUCH.DAT\"\n20 PRINT \"reached\""),
+                 !ContainsSubstring("reached"));
+    // ...and TRY/CATCH can handle it so the program carries on.
+    REQUIRE_THAT(run("10 TRY\n20 C = OPENIN \"NOSUCH.DAT\"\n30 CATCH\n"
+                     "40 PRINT \"caught \"; ERR$\n50 ENDTRY\n60 PRINT \"carrying on\""),
+                 ContainsSubstring("caught File not found"));
+    REQUIRE_THAT(run("10 TRY\n20 C = OPENIN \"NOSUCH.DAT\"\n30 CATCH\n"
+                     "40 PRINT ERR$\n50 ENDTRY\n60 PRINT \"carrying on\""),
+                 ContainsSubstring("carrying on"));
+}
+
+TEST_CASE("OPENUP on a missing file raises a catchable error") {
+    REQUIRE_THAT(run("10 TRY\n20 C = OPENUP \"NOSUCH.DAT\"\n30 CATCH\n"
+                     "40 PRINT \"caught\"\n50 ENDTRY"),
+                 ContainsSubstring("caught"));
+}
+
 TEST_CASE("RENUMBER renumbers stored lines") {
     std::string out = run_raw(
         "10 PRINT 1\n"
@@ -844,6 +865,21 @@ TEST_CASE("a successful TRY block skips the handler") {
     REQUIRE_THAT(out, ContainsSubstring("ok"));
     REQUIRE_THAT(out, ContainsSubstring("done"));
     REQUIRE_THAT(out, !ContainsSubstring("BAD"));
+}
+
+TEST_CASE("a stray ENDTRY with no TRY is reported") {
+    REQUIRE_THAT(run("10 PRINT \"hi\"\n20 ENDTRY"),
+                 ContainsSubstring("ENDTRY without a matching TRY"));
+}
+
+TEST_CASE("a stray CATCH with no TRY is reported") {
+    REQUIRE_THAT(run("10 PRINT \"hi\"\n20 CATCH"),
+                 ContainsSubstring("CATCH without a matching TRY"));
+}
+
+TEST_CASE("ENDTRY is still fine after a genuine TRY/CATCH, and a later stray one is caught") {
+    REQUIRE_THAT(run("10 TRY\n20 RAISE \"x\"\n30 CATCH\n40 PRINT \"ok\"\n50 ENDTRY\n60 ENDTRY"),
+                 ContainsSubstring("ENDTRY without a matching TRY"));
 }
 
 TEST_CASE("RAISE sets ERR and ERR$") {

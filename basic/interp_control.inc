@@ -52,6 +52,7 @@ static void stmt_try(void) {
     lx = cur_text + save_off;
     lex_next();
 
+    try_open++;                                  // one more block awaiting its ENDTRY
     try_rec_t *h = &try_stack[try_sp++];
     h->catch_pc = cpc; h->catch_off = coff;
     h->call_sp = call_sp;
@@ -64,12 +65,21 @@ static void stmt_try(void) {
 // CATCH reached in normal flow: the protected block finished with no error, so
 // discard the handler and skip past the matching ENDTRY (don't run the handler).
 static void stmt_catch(void) {
+    if (try_open <= 0) { err("CATCH without a matching TRY"); return; }
     if (try_sp > 0) try_sp--;                    // this block succeeded
     lex_next();                                  // consume CATCH
-    skip_to_close(KW_TRY, KW_ENDTRY, "CATCH without a matching ENDTRY");
+    // Skipping past ENDTRY means it won't run as a statement, so close the block here.
+    if (skip_to_close(KW_TRY, KW_ENDTRY, "CATCH without a matching ENDTRY")) try_open--;
 }
 
-static void stmt_endtry(void) { lex_next(); }    // no-op join point
+// ENDTRY is only reached as a statement as the join point at the end of a CATCH
+// handler that actually ran (the no-error path skips past it in stmt_catch). If no
+// TRY is lexically open, this is a stray ENDTRY.
+static void stmt_endtry(void) {
+    if (try_open <= 0) { err("ENDTRY without a matching TRY"); return; }
+    try_open--;
+    lex_next();                                  // consume ENDTRY
+}
 
 // RAISE : throw a user error.
 //   RAISE "message"            (code 0)
@@ -484,6 +494,7 @@ static void run_program_once(int start_pc, int start_off) {
     fn_ret_sp = 0;
     local_sp = 0;
     try_sp = 0;
+    try_open = 0;
     g_errcode = 0; g_errmsg[0] = 0;
     scratch_base = 0;
     seed_recs_reset();                                      // fresh run reloads its seeds
@@ -531,6 +542,7 @@ static void run_program_once(int start_pc, int start_off) {
             g_err_reported = 1;
         }
         try_sp = 0;
+        try_open = 0;
         prog_n = main_n;                       // strip imported module lines
         con_screen(0, 0);                      // restore the startup resolution (no-op if unchanged)
         con_backbuffer(0);                     // un-buffer so the prompt draws to the visible screen

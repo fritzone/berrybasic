@@ -36,6 +36,14 @@ void gfx_reset_target(void);
 void putpixel(int x, int y, uint32_t color);
 void putpixel_op(int x, int y, uint32_t color);   // like putpixel but applies the plot op
 uint32_t getpixel(int x, int y);
+
+// Direct access to the VISIBLE front buffer, bypassing double-buffering (BUFFER
+// ON) and any SPRITETARGET redirection. The F12 system overlay uses these so it
+// is always composited on-screen no matter where ordinary drawing is going.
+void     gfx_front_putpixel(int x, int y, uint32_t color);
+uint32_t gfx_front_getpixel(int x, int y);
+int      gfx_front_width(void);
+int      gfx_front_height(void);
 void bar(int x1, int y1, int x2, int y2, uint32_t color);
 void cleardevice(void);
 

@@ -108,6 +108,7 @@ static void call_named(int is_fn, const char *name, value_t *retval) {
     int save_sbase = scratch_base, save_stop = scratch_top;
     int local_mark = local_sp;
     int save_try = try_sp;                       // discard any TRY the body leaves open
+    int save_topen = try_open;                   // the body's TRY/ENDTRY balance is its own
 
     scratch_base = scratch_top;                  // body temporaries start above the args
     call_sp++;
@@ -216,6 +217,7 @@ static void call_named(int is_fn, const char *name, value_t *retval) {
     // (which lives in scratch) survives; rewind it for PROC.
     call_sp--;
     try_sp = save_try;                           // drop TRY handlers opened in the body
+    try_open = save_topen;
     scratch_base = save_sbase;
     if (!is_fn) scratch_top = save_stop;
     g_return = 0;

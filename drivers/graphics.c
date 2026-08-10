@@ -103,6 +103,20 @@ void gfx_flip(void) {
 
 int gfx_buffered(void) { return buffered; }
 
+// --- direct front-buffer access (F12 system overlay) ------------------------
+// These always target the real visible surface, ignoring the buffered/sprite
+// redirection of fb_buf, so the overlay shows on screen even mid-BUFFER.
+void gfx_front_putpixel(int x, int y, uint32_t color) {
+    if ((unsigned)x >= front_width || (unsigned)y >= front_height) return;
+    front_buf[(uint64_t)y * front_pitch_words + x] = color;
+}
+uint32_t gfx_front_getpixel(int x, int y) {
+    if ((unsigned)x >= front_width || (unsigned)y >= front_height) return 0;
+    return front_buf[(uint64_t)y * front_pitch_words + x];
+}
+int gfx_front_width(void)  { return (int)front_width; }
+int gfx_front_height(void) { return (int)front_height; }
+
 void putpixel(int x, int y, uint32_t color) {
     if (clipped(x, y)) return;
     fb_buf[y * fb_pitch_words + x] = color;

@@ -262,6 +262,17 @@ static void boot_msg(const char *s) {
 
 static int read_esc_seq(void);   // serial escape-sequence decode (defined below)
 
+// --- F12 system-monitor overlay: shared hooks -------------------------------
+// A few symbols live up here so the input path can see them: term_pollchar
+// toggles the overlay on F12, and the input-wait loops refresh it and feed the
+// CPU-load accounting. The drawing itself is defined lower down, next to the
+// mouse pointer (it needs pointer_hide()).
+static int      g_sysmon_on = 0;        // overlay visible? (toggled by F12)
+static uint64_t g_idle_us   = 0;        // cumulative microseconds spent idle-waiting
+static void sysmon_toggle(void)  { g_sysmon_on = !g_sysmon_on; }
+static void sysmon_tick(void);          // refresh + paint the overlay if due
+static void sysmon_after_flip(void);    // re-composite the overlay after a buffer flip
+
 // Return the next key from any keyboard (DWC2 USB-C or xHCI USB-A), falling back
 // to the UART, or 0 if nothing is pending. A key is an int: printable keys are
 // their Latin-1 character, the rest are the KEY_* codes in usb_hid.h.
@@ -270,11 +281,17 @@ static int read_esc_seq(void);   // serial escape-sequence decode (defined below
 // arrows and friends as escape sequences (ESC [ A ...), so those are decoded
 // here rather than in one caller - that way a serial arrow key and a USB arrow
 // key are the same key to everything above, GET and the line editor alike.
+//
+// F12 is intercepted here as a system key: it toggles the overlay and is swallowed
+// (returns 0), so it never reaches the REPL, GET/INKEY or a running program.
 static int term_pollchar(void) {
     int c = 0;
     if (g_kbd_ok)        c = usb_kbd_getchar();
     if (!c && g_xhci_ok) c = xhci_kbd_getchar();
-    if (c) return c;                              // already a decoded key
+    if (c) {
+        if (c == KEY_F12) { sysmon_toggle(); return 0; }   // system key: toggle + swallow
+        return c;                                          // already a decoded key
+    }
 
     c = (unsigned char)uart_getc();
     if (c == 0x1B) c = read_esc_seq();            // serial: ESC [ A -> KEY_UP, ...
@@ -384,6 +401,7 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
     uint32_t last_blink = TIMER_CLO;
 
     for (;;) {
+        uint64_t it0 = con_micros();             // each polling iteration is idle time
         int c = term_pollchar();
         if (!c) {
             uint32_t now = TIMER_CLO;
@@ -393,10 +411,13 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
                 edit_cursor_at(sc, sr, pos);
                 cursor_set(!cursor_visible);
             }
+            sysmon_tick();                       // refresh the F12 overlay while waiting
             pointer_tick();                      // move/repaint the pointer on top
             sound_pump();                        // keep queued notes playing while idle
+            g_idle_us += con_micros() - it0;     // credit the whole idle spin (incl. the poll)
             continue;
         }
+        g_idle_us += con_micros() - it0;         // the poll that returned a key was still a wait
         pointer_hide();                          // a key arrived; hide before redrawing
 
         // --- system clipboard: paste, copy line, cut line -------------------
@@ -554,16 +575,19 @@ const char *con_get_keyboard(void)             { return hid_layout_code(); }
 int con_getkey(void) {
     uint32_t last_blink = TIMER_CLO;
     for (;;) {
+        uint64_t it0 = con_micros();        // each polling iteration is idle time
         int c = term_pollchar();
-        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
+        if (c) { g_idle_us += con_micros() - it0; pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
             pointer_hide();                 // hide before drawing the blink cursor
             cursor_set(!cursor_visible);
         }
+        sysmon_tick();                      // refresh the F12 overlay while waiting
         pointer_tick();                     // move/repaint the pointer on top
         sound_pump();                       // keep queued notes playing while idle
+        g_idle_us += con_micros() - it0;    // credit this whole idle spin (incl. the poll)
     }
 }
 
@@ -580,10 +604,16 @@ int con_inkey(int centiseconds) {
     uint32_t t0 = TIMER_CLO;
     uint32_t limit = (centiseconds > 0) ? (uint32_t)centiseconds * 10000u : 0;
     uint32_t last_blink = TIMER_CLO;
+    // A 0-centisecond INKEY (limit==0) is a *non-blocking probe* - the interpreter
+    // fires one every statement to check for Ctrl+C etc. That is the overhead of a
+    // RUNNING program, not idle waiting, so only a genuine blocking wait (limit>0)
+    // credits idle time towards the CPU meter.
     for (;;) {
+        uint64_t it0 = con_micros();
         int c = term_pollchar();
-        if (c) { pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
-        if (TIMER_CLO - t0 >= limit) { pointer_hide(); return -1; }
+        if (c) { if (limit) g_idle_us += con_micros() - it0; pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
+        sysmon_tick();                      // refresh the overlay even on a 0-timeout poll
+        if (TIMER_CLO - t0 >= limit) { if (limit) g_idle_us += con_micros() - it0; pointer_hide(); return -1; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
@@ -592,6 +622,7 @@ int con_inkey(int centiseconds) {
         }
         pointer_tick();                     // move/repaint the pointer on top
         sound_pump();                       // keep queued notes playing while idle
+        g_idle_us += con_micros() - it0;    // credit this idle spin of a blocking wait
     }
 }
 
@@ -727,6 +758,219 @@ static void pointer_tick(void) {
     if (g_ptr_shown && g_ptr_x == g_mouse_x && g_ptr_y == g_mouse_y) return;
     pointer_hide();
     pointer_show();
+}
+
+// ---------------------------------------------------------------------------
+// System-monitor overlay (toggled by F12)
+// ---------------------------------------------------------------------------
+// A small always-on-top panel in the top-right corner showing CPU load, heap
+// used/free and uptime. It draws straight onto the VISIBLE front buffer
+// (gfx_front_*), so it shows through BUFFER ON / SPRITETARGET and survives a
+// program's own drawing; the pixels it covers are saved so it lifts cleanly when
+// toggled off. Painting is fully opaque (no read-back of its own pixels), so
+// repaints are stable; the only save-under is the true background captured when
+// it first appears and again right after each buffer flip. Refresh is throttled
+// and driven from the input-wait loops (and con_flip), so it is idle-cheap and
+// stays visible while a program runs (the interpreter polls keys between lines).
+
+#define OV_TXTPAD 5                         // left/right inset for the body
+#define OV_COLS   13                        // body width, in characters
+#define OV_ROWSB  6                         // body rows (CPU, MEM, VARS, USE, FRE, UP)
+#define OV_W      (OV_COLS * CHAR_W + 2 * OV_TXTPAD)
+#define OV_H      (CHAR_H + OV_ROWSB * CHAR_H + 8)   // title row + body + bottom pad
+#define OV_MARGIN 8                         // gap from the screen edges
+#define OV_CAP    (128 * 128)               // save-under capacity (>= OV_W*OV_H)
+
+static int      g_sysmon_drawn = 0;         // panel currently painted on-screen
+static int      g_ov_x = 0, g_ov_y = 0;     // panel top-left (front-buffer pixels)
+static uint32_t g_ov_save[OV_CAP];          // true background under the panel
+static uint64_t g_sysmon_last = 0;          // last repaint time (throttle)
+
+// CPU-load window and cached, formatted stat lines (recomputed ~2x/second).
+// The MEM/VARS gauges keep tenths of a percent (per-mille, 0..1000) so the small
+// figures typical of a BASIC session still read meaningfully (e.g. "0.5%").
+static uint64_t g_cpu_last_t = 0, g_cpu_last_idle = 0;
+static int      g_ov_cpu = 0;               // 0..100
+static int      g_ov_mem_pm = 0, g_ov_var_pm = 0;   // per-mille (0..1000)
+static char     g_ov_use[16], g_ov_fre[16], g_ov_up[16];
+static uint64_t g_ov_stat_t = 0;
+
+// --- little front-buffer draw helpers (opaque; ignore clip/target/buffering) --
+static void ov_fill(int x, int y, int w, int h, uint32_t c) {
+    for (int r = 0; r < h; r++)
+        for (int k = 0; k < w; k++) gfx_front_putpixel(x + k, y + r, c);
+}
+static void ov_hline(int x, int y, int w, uint32_t c) {
+    for (int k = 0; k < w; k++) gfx_front_putpixel(x + k, y, c);
+}
+static void ov_vline(int x, int y, int h, uint32_t c) {
+    for (int r = 0; r < h; r++) gfx_front_putpixel(x, y + r, c);
+}
+static void ov_char(char ch, int x, int y, uint32_t col) {
+    const unsigned char *g = &bbc_font[(unsigned char)ch * GLYPH_BYTES];
+    for (int row = 0; row < GLYPH_H; row++) {
+        unsigned char bits = g[row];
+        for (int c2 = 0; c2 < GLYPH_W; c2++)
+            if (bits & (0x80 >> c2)) {
+                if (FONT_SCALE == 1) gfx_front_putpixel(x + c2, y + row, col);
+                else for (int sy = 0; sy < FONT_SCALE; sy++)
+                    for (int sx = 0; sx < FONT_SCALE; sx++)
+                        gfx_front_putpixel(x + c2 * FONT_SCALE + sx,
+                                           y + row * FONT_SCALE + sy, col);
+            }
+    }
+}
+static int ov_slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static void ov_text(const char *s, int x, int y, uint32_t col) {
+    while (*s) { ov_char(*s++, x, y, col); x += CHAR_W; }
+}
+static void ov_text_right(const char *s, int rx, int y, uint32_t col) {
+    ov_text(s, rx - ov_slen(s) * CHAR_W, y, col);
+}
+static void ov_cat(char *d, const char *s) {
+    int i = 0; while (d[i]) i++; while (*s) d[i++] = *s++; d[i] = 0;
+}
+static void ov_cat_u(char *d, unsigned long v) {
+    char t[24]; int n = 0;
+    if (!v) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    char b[24]; int i = 0; while (n) b[i++] = t[--n]; b[i] = 0;
+    ov_cat(d, b);
+}
+
+static void sysmon_capture(void) {
+    for (int r = 0; r < OV_H; r++)
+        for (int c = 0; c < OV_W; c++)
+            g_ov_save[r * OV_W + c] = gfx_front_getpixel(g_ov_x + c, g_ov_y + r);
+}
+static void sysmon_erase(void) {
+    if (!g_sysmon_drawn) return;
+    for (int r = 0; r < OV_H; r++)
+        for (int c = 0; c < OV_W; c++)
+            gfx_front_putpixel(g_ov_x + c, g_ov_y + r, g_ov_save[r * OV_W + c]);
+    g_sysmon_drawn = 0;
+}
+
+static void sysmon_recompute(uint64_t now) {
+    if (g_cpu_last_t == 0) { g_cpu_last_t = now; g_cpu_last_idle = g_idle_us; }
+    uint64_t win = now - g_cpu_last_t;
+    uint64_t idl = g_idle_us - g_cpu_last_idle;
+    int pct = 0;
+    if (win > 1000) { if (idl > win) idl = win; pct = (int)(((win - idl) * 100) / win); }
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    g_ov_cpu = pct;
+    g_cpu_last_t = now; g_cpu_last_idle = g_idle_us;
+
+    sysmem_t m; sys_meminfo(&m);
+    // MEM = the big 48 MB seed/POD/collections heap (in per-mille for one decimal).
+    g_ov_mem_pm = m.heap_total ? (int)((unsigned long long)m.heap_used * 1000 / m.heap_total) : 0;
+    // VARS = BASIC's own dynamic pools: the GC'd string heap + the DIM byte arena.
+    unsigned long long vt = (unsigned long long)m.vars_total + m.dim_total;
+    unsigned long long vu = (unsigned long long)m.vars_used  + m.dim_used;
+    g_ov_var_pm = vt ? (int)(vu * 1000 / vt) : 0;
+    unsigned long useK = (m.heap_used + 1023) / 1024;
+    unsigned long freK = (m.heap_total - m.heap_used + 1023) / 1024;
+    g_ov_use[0] = 0; ov_cat(g_ov_use, "USE "); ov_cat_u(g_ov_use, useK); ov_cat(g_ov_use, "K");
+    g_ov_fre[0] = 0; ov_cat(g_ov_fre, "FRE "); ov_cat_u(g_ov_fre, freK); ov_cat(g_ov_fre, "K");
+
+    unsigned long sec = (unsigned long)(now / 1000000ull);
+    unsigned long mm = sec / 60, ss = sec % 60;
+    g_ov_up[0] = 0; ov_cat(g_ov_up, "UP "); ov_cat_u(g_ov_up, mm);
+    ov_cat(g_ov_up, ss < 10 ? ":0" : ":"); ov_cat_u(g_ov_up, ss);
+    g_ov_stat_t = now;
+}
+
+static uint32_t ov_gauge_col(int pct) {
+    if (pct >= 80) return rgb_pixel(220,  80,  70);   // red
+    if (pct >= 55) return rgb_pixel(220, 185,  60);   // amber
+    return                rgb_pixel( 70, 200, 110);   // green
+}
+static void ov_gauge(int gx, int gy, int gw, const char *label, int pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    int gh = CHAR_H - 2;
+    ov_fill(gx, gy + 1, gw, gh, rgb_pixel(38, 42, 58));          // track
+    int fw = gw * pct / 100;
+    if (fw > 0) ov_fill(gx, gy + 1, fw, gh, ov_gauge_col(pct));  // fill
+    ov_text(label, gx + 3, gy, rgb_pixel(255, 255, 255));        // label
+    char b[8]; b[0] = 0; ov_cat_u(b, (unsigned long)pct); ov_cat(b, "%");
+    ov_text_right(b, gx + gw - 3, gy, rgb_pixel(255, 255, 255)); // percentage
+}
+// Like ov_gauge, but `pm` is per-mille (0..1000) shown to one decimal ("N.N%").
+static void ov_gauge_d(int gx, int gy, int gw, const char *label, int pm) {
+    if (pm < 0) pm = 0;
+    if (pm > 1000) pm = 1000;
+    int gh = CHAR_H - 2;
+    ov_fill(gx, gy + 1, gw, gh, rgb_pixel(38, 42, 58));          // track
+    int fw = gw * pm / 1000;
+    if (fw > 0) ov_fill(gx, gy + 1, fw, gh, ov_gauge_col(pm / 10));  // fill
+    ov_text(label, gx + 3, gy, rgb_pixel(255, 255, 255));        // label
+    char b[12]; b[0] = 0;
+    ov_cat_u(b, (unsigned long)(pm / 10)); ov_cat(b, ".");
+    ov_cat_u(b, (unsigned long)(pm % 10)); ov_cat(b, "%");
+    ov_text_right(b, gx + gw - 3, gy, rgb_pixel(255, 255, 255)); // percentage
+}
+
+static void sysmon_render(uint64_t now) {
+    if (g_ov_stat_t == 0 || now - g_ov_stat_t >= 500000ull) sysmon_recompute(now);
+    uint32_t panel  = rgb_pixel(22, 24, 34);
+    uint32_t title  = rgb_pixel(46, 102, 180);
+    uint32_t border = rgb_pixel(90, 120, 170);
+    uint32_t dim    = rgb_pixel(178, 188, 208);
+
+    ov_fill(g_ov_x, g_ov_y, OV_W, OV_H, panel);              // body
+    ov_fill(g_ov_x, g_ov_y, OV_W, CHAR_H, title);           // title bar
+    { const char *t = "SYSTEM";
+      ov_text(t, g_ov_x + (OV_W - ov_slen(t) * CHAR_W) / 2, g_ov_y, rgb_pixel(255,255,255)); }
+    ov_hline(g_ov_x, g_ov_y, OV_W, border);                 // frame
+    ov_hline(g_ov_x, g_ov_y + OV_H - 1, OV_W, border);
+    ov_vline(g_ov_x, g_ov_y, OV_H, border);
+    ov_vline(g_ov_x + OV_W - 1, g_ov_y, OV_H, border);
+
+    int bx = g_ov_x + OV_TXTPAD;
+    int gw = OV_COLS * CHAR_W;
+    int by = g_ov_y + CHAR_H + 3;
+    ov_gauge  (bx, by + 0 * CHAR_H, gw, "CPU",  g_ov_cpu);
+    ov_gauge_d(bx, by + 1 * CHAR_H, gw, "MEM",  g_ov_mem_pm);   // 48 MB seed/POD heap
+    ov_gauge_d(bx, by + 2 * CHAR_H, gw, "VARS", g_ov_var_pm);   // BASIC string + DIM pools
+    ov_text(g_ov_use, bx, by + 3 * CHAR_H, dim);
+    ov_text(g_ov_fre, bx, by + 4 * CHAR_H, dim);
+    ov_text(g_ov_up,  bx, by + 5 * CHAR_H, dim);
+}
+
+static void sysmon_paint(uint64_t now) {
+    if (!fb_ready) return;
+    if (!g_sysmon_drawn) {
+        int fw = gfx_front_width();
+        g_ov_x = fw - OV_W - OV_MARGIN; if (g_ov_x < 0) g_ov_x = 0;
+        g_ov_y = OV_MARGIN;
+        pointer_hide();                     // don't fold the mouse arrow into the save
+        sysmon_capture();
+        g_sysmon_drawn = 1;
+    } else {
+        pointer_hide();
+    }
+    sysmon_render(now);
+}
+
+// Public hooks (forward-declared up by term_pollchar).
+static void sysmon_tick(void) {
+    if (!fb_ready) return;
+    if (!g_sysmon_on) { if (g_sysmon_drawn) sysmon_erase(); return; }
+    uint64_t now = con_micros();
+    if (g_sysmon_drawn && (now - g_sysmon_last) < 300000ull) return;   // throttle repaint
+    g_sysmon_last = now;
+    sysmon_paint(now);
+}
+static void sysmon_after_flip(void) {
+    if (!fb_ready || !g_sysmon_on || !g_sysmon_drawn) return;
+    // The flip overwrote our region with the back buffer's pixels - that IS the
+    // fresh true background, so recapture it and repaint the overlay on top.
+    pointer_hide();
+    sysmon_capture();
+    sysmon_render(con_micros());
+    g_sysmon_last = con_micros();
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,7 +1260,7 @@ int con_backbuffer(int on) {
     gfx_backbuffer(0);
     return 0;
 }
-void con_flip(void) { if (fb_ready) gfx_flip(); }
+void con_flip(void) { if (fb_ready) { gfx_flip(); sysmon_after_flip(); } }
 int  con_buffered(void) { return gfx_buffered(); }
 
 // --- high-level shape commands (BBC logical coordinates) --------------------

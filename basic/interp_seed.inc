@@ -89,6 +89,39 @@ static seed_blk *seed_sys_top;        // 0 until first use; else the persistent 
 
 static void seed_heap_reset(void) { seed_freep = 0; }     // lazily re-inited
 
+// Report the run heap's used/total bytes (for the F12 system overlay). Total is
+// the run-heap region [seed_heap, seed_sys_top); free is the sum of the K&R
+// free-list blocks (before first use the whole region is free). Sizes are in
+// header units; ×sizeof(seed_blk) gives bytes.
+static void seed_heap_stats(unsigned long *used, unsigned long *total) {
+    unsigned long tot = seed_sys_top
+        ? (unsigned long)(seed_sys_top - seed_heap)
+        : (unsigned long)(sizeof(seed_heap) / sizeof(seed_blk));
+    unsigned long freeu;
+    if (!seed_freep) {
+        freeu = tot;                                     // not yet used: all free
+    } else {
+        freeu = 0;
+        for (seed_blk *p = seed_freelist.s.next; p != &seed_freelist; p = p->s.next)
+            freeu += p->s.size;                          // sentinel size is 0, stops the walk
+    }
+    if (freeu > tot) freeu = tot;
+    if (total) *total = tot * (unsigned long)sizeof(seed_blk);
+    if (used)  *used  = (tot - freeu) * (unsigned long)sizeof(seed_blk);
+}
+
+// Exported (see console.h): fill the interpreter's memory-pool usage for the
+// kernel's F12 overlay. Non-static on purpose - this is the one symbol the
+// kernel reaches into the interpreter for. Harmless (unused) on the host build.
+void sys_meminfo(sysmem_t *m) {
+    if (!m) return;
+    seed_heap_stats(&m->heap_used, &m->heap_total);
+    m->vars_used  = (unsigned long)gcheap_top;
+    m->vars_total = (unsigned long)GCHEAP_SIZE;
+    m->dim_used   = (unsigned long)dim_top;
+    m->dim_total  = (unsigned long)DIM_HEAP_SIZE;
+}
+
 static void seed_heap_init(void) {
     if (!seed_sys_top) seed_sys_top = seed_heap + sizeof(seed_heap) / sizeof(seed_blk);
     seed_blk *base = seed_heap;

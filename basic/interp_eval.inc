@@ -143,13 +143,19 @@ static value_t eval_function(int fn) {
         // EXT/PTR family take a '#channel'.
         case KW_OPENIN:  { value_t s = need_str(); if (g_err) return v_num(0);
                            char nm[64]; copy_fname(s, nm, sizeof nm);
-                           return v_num((double)stg_open(nm, STG_M_READ)); }
+                           int ch = stg_open(nm, STG_M_READ);
+                           if (ch <= 0) { err("File not found"); return v_num(0); }
+                           return v_num((double)ch); }
         case KW_OPENOUT: { value_t s = need_str(); if (g_err) return v_num(0);
                            char nm[64]; copy_fname(s, nm, sizeof nm);
-                           return v_num((double)stg_open(nm, STG_M_WRITE)); }
+                           int ch = stg_open(nm, STG_M_WRITE);
+                           if (ch <= 0) { err("Can't create file"); return v_num(0); }
+                           return v_num((double)ch); }
         case KW_OPENUP:  { value_t s = need_str(); if (g_err) return v_num(0);
                            char nm[64]; copy_fname(s, nm, sizeof nm);
-                           return v_num((double)stg_open(nm, STG_M_UPDATE)); }
+                           int ch = stg_open(nm, STG_M_UPDATE);
+                           if (ch <= 0) { err("File not found"); return v_num(0); }
+                           return v_num((double)ch); }
         case KW_BGET: { int ch = read_channel(); if (g_err) return v_num(0);
                         return v_num((double)stg_getb(ch)); }   // -1 at end of file
         case KW_EOF:  { int ch = read_channel(); if (g_err) return v_num(0);

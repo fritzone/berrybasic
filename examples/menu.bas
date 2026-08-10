@@ -134,19 +134,25 @@
 5033 CAT% = ICAT%(SEL%)
 5034 RETURN
 5300 REM ==== restore the selection from the state file ==================
-5301 C = OPENIN STATE$
-5302 IF C = 0 THEN RETURN
-5303 IF EOF# C = 0 THEN SEL% = BGET# C
-5304 CLOSE# C
-5305 IF SEL% < 0 OR SEL% >= N% THEN SEL% = 0
-5306 CAT% = ICAT%(SEL%)
-5307 RETURN
+5301 TRY
+5302   C = OPENIN STATE$
+5303   IF EOF# C = 0 THEN SEL% = BGET# C
+5304   CLOSE# C
+5305 CATCH
+5306   REM no state file yet: keep the default selection
+5307 ENDTRY
+5308 IF SEL% < 0 OR SEL% >= N% THEN SEL% = 0
+5309 CAT% = ICAT%(SEL%)
+5310 RETURN
 5400 REM ==== save the current selection ================================
-5401 C = OPENOUT STATE$
-5402 IF C = 0 THEN RETURN
-5403 BPUT# C, SEL%
-5404 CLOSE# C
-5405 RETURN
+5401 TRY
+5402   C = OPENOUT STATE$
+5403   BPUT# C, SEL%
+5404   CLOSE# C
+5405 CATCH
+5406   REM couldn't save the state file: no harm, carry on
+5407 ENDTRY
+5408 RETURN
 6000 REM ==== the catalog: category, file, directory, description ========
 6001 DATA 0,"WELCOME.BAS","LANGUAGE","A gentle tour of BerryBasiC"
 6002 DATA 0,"FUNCS.BAS","LANGUAGE","User functions: DEF FN and PROC"

@@ -115,6 +115,7 @@ void basic_init(void) {
     call_sp = 0;
     local_sp = 0;
     try_sp = 0;
+    try_open = 0;
     g_errcode = 0;
     g_errmsg[0] = 0;
     def_n = 0;
