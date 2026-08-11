@@ -500,6 +500,11 @@ static void svc_gfx_flip(void)                    { con_flip(); }
 static int  svc_gfx_buffered(void)                { return con_buffered(); }
 // Modifier/lock state: not a key, so getkey/inkey can never carry it.
 static int  svc_keymods(void)                     { return con_keymods(); }
+static int  svc_keys_down(int *out, int max)      { return con_keys_down(out, max); }
+static int  svc_audio_open(int rate)              { return snd_pcm_open(rate); }
+static int  svc_audio_avail(void)                 { return snd_pcm_avail(); }
+static int  svc_audio_write(const short *s, int f){ return snd_pcm_write(s, f); }
+static void svc_audio_close(void)                 { snd_pcm_close(); }
 // The BASIC graphics mode (1 or 2). gfx_* drawing is always device pixels; this
 // lets a seed convert coordinates BASIC passed in its current mode.
 static int  svc_gfx_mode(void)                    { return con_gfx_mode(); }
@@ -637,10 +642,8 @@ static int svc_file_open(const char *name, int mode) {
 }
 static int svc_file_close(int fh) { return stg_close(fh); }
 static int svc_file_read(int fh, void *buf, int n) {
-    unsigned char *p = buf;
-    int i = 0;
-    for (; i < n; i++) { int b = stg_getb(fh); if (b < 0) break; p[i] = (unsigned char)b; }
-    return i;                                         // short count at EOF (stdio semantics)
+    int r = stg_readn(fh, buf, n);                    // bulk (sector-run) read
+    return r < 0 ? 0 : r;                             // short count at EOF (stdio semantics)
 }
 static int svc_file_write(int fh, const void *buf, int n) {
     const unsigned char *p = buf;
@@ -672,6 +675,7 @@ static void svc_gfx_putpixel(int x, int y, uint32_t rgb) { sgfx_putpixel(x, y, r
 static uint32_t svc_gfx_getpixel(int x, int y) { return sgfx_getpixel(x, y); }
 static void svc_gfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_line(x1, y1, x2, y2, rgb); }
 static void svc_gfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_fillrect(x1, y1, x2, y2, rgb); }
+static void svc_gfx_blit8(const unsigned char *idx, const unsigned int *pal, int w, int h, int dx, int dy, int scale) { sgfx_blit8(idx, pal, w, h, dx, dy, scale); }
 static void svc_gfx_circle(int cx, int cy, int r, uint32_t rgb) { sgfx_circle(cx, cy, r, rgb); }
 static void svc_gfx_fillcircle(int cx, int cy, int r, uint32_t rgb) { sgfx_fillcircle(cx, cy, r, rgb); }
 static void svc_gfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_ellipse(cx, cy, rx, ry, rgb); }
@@ -718,6 +722,9 @@ static const BerryServices g_svc = {
     svc_dir_open, svc_dir_read, svc_getcwd, svc_chdir,
     svc_clip_set, svc_clip_get, svc_clip_len,
     svc_icache_sync,
+    svc_gfx_blit8,
+    svc_keys_down,
+    svc_audio_open, svc_audio_avail, svc_audio_write, svc_audio_close,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma

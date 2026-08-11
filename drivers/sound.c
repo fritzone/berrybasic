@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include "sound.h"
+#include "mmu.h"        // dcache_clean_inval (flush ring/CB to RAM for the DMA)
 
 #define PERIPHERAL_BASE 0xFE000000UL
 #define GPIO_BASE       (PERIPHERAL_BASE + 0x200000)
@@ -120,4 +121,153 @@ void snd_set_tone(int freq_hz, int vol) {
     PWM_RNG1 = range; PWM_DAT1 = data;    // left  (GPIO40)
     PWM_RNG2 = range; PWM_DAT2 = data;    // right (GPIO41)
     PWM_CTL  = PWM_PWEN1 | PWM_MSEN1 | PWM_PWEN2 | PWM_MSEN2;
+}
+
+// ===========================================================================
+// Streamed PCM audio (for games): PWM1 in balanced mode fed continuously from a
+// ring buffer by a DMA channel, so the samples play with zero CPU involvement.
+// Each PWM output cycle emits one sample as a duty ratio over RANGE clocks; the
+// jack's analogue low-pass filter turns the pulse train back into audio. The
+// FIFO is only 16 words deep, far too small to keep fed from a 35 Hz game loop,
+// so a looping DMA does it. Real hardware only (QEMU models no PWM audio).
+// ===========================================================================
+
+// Extra PWM registers for FIFO/DMA streaming.
+#define PWM_DMAC   (*(volatile uint32_t *)(PWM1_BASE + 0x08))
+#define PWM_FIF1_BUS  0x7E20C818u          // FIFO, as the DMA (bus) addresses it
+#define PWM_USEF1  (1u << 5)               // channel 1 reads from the FIFO
+#define PWM_USEF2  (1u << 13)              // channel 2 reads from the FIFO
+#define PWM_DMAC_EN (1u << 31)
+
+// Clock-manager MASH for a fractional divisor (needed to hit the sample rate).
+#define CM_MASH1   (1u << 9)
+
+// Legacy DMA controller (channels 0..6). One channel drives the audio.
+#define DMA_BASE   0xFE007000UL
+#define DMA_CH     5                       // DMA channel used for audio
+#define DMA_REG(o) (*(volatile uint32_t *)(DMA_BASE + DMA_CH * 0x100 + (o)))
+#define DMA_CS         DMA_REG(0x00)
+#define DMA_CONBLK_AD  DMA_REG(0x04)
+#define DMA_SOURCE_AD  DMA_REG(0x0C)
+#define DMA_ENABLE (*(volatile uint32_t *)(DMA_BASE + 0xFF0))
+#define DMA_CS_ACTIVE  (1u << 0)
+#define DMA_CS_RESET   (1u << 31)
+// Transfer-info bits.
+#define TI_WAIT_RESP   (1u << 3)
+#define TI_DEST_DREQ   (1u << 6)
+#define TI_SRC_INC     (1u << 8)
+#define TI_PERMAP(d)   ((uint32_t)(d) << 16)
+#define DREQ_PWM       5                   // PWM peripheral DREQ line
+
+// SDRAM as the legacy DMA addresses it: the uncached 0xC0000000 alias (our
+// buffers live in the low 1 GB, so this is valid). We flush the CPU's writes
+// with dcache_clean_inval so the DMA reads what we wrote.
+#define BUS(p)     ((uint32_t)(uintptr_t)(p) | 0xC0000000u)
+
+// A DMA control block (32-byte aligned, read by the controller).
+typedef struct __attribute__((aligned(32))) {
+    uint32_t ti, source_ad, dest_ad, txfr_len, stride, nextconbk, pad0, pad1;
+} dma_cb_t;
+
+#define PCM_RANGE   1024                   // 10-bit samples (0..1023, mid = 512)
+#define RING_FRAMES 4096                   // stereo frames in the ring (~0.37 s @ 11 kHz)
+
+static dma_cb_t  g_cb __attribute__((aligned(32)));
+static uint32_t  g_ring[RING_FRAMES * 2];  // interleaved L,R PWM samples
+static uint32_t  g_write;                  // next frame index we will fill
+static int       g_pcm_open;
+static int       g_pcm_rate;
+
+// Program the PWM clock generator to `hz` from the 54 MHz crystal, with a
+// fractional (MASH) divisor so non-integer rates are hit closely.
+static void set_pwm_clock(uint32_t hz) {
+    uint32_t divi = OSC_HZ / hz;
+    uint32_t divf = (uint32_t)(((uint64_t)(OSC_HZ % hz) << 12) / hz);
+    if (divi < 2) divi = 2;
+    CM_PWMCTL = CM_PASSWD | (CM_PWMCTL & ~CM_CTL_ENAB);
+    while (CM_PWMCTL & CM_CTL_BUSY) { }
+    CM_PWMDIV = CM_PASSWD | (divi << 12) | (divf & 0xFFF);
+    CM_PWMCTL = CM_PASSWD | CM_SRC_OSC | CM_MASH1;
+    CM_PWMCTL = CM_PASSWD | CM_SRC_OSC | CM_MASH1 | CM_CTL_ENAB;
+    delay(150);
+}
+
+int snd_pcm_open(int rate) {
+    g_pcm_rate = rate;
+    g_write = 0;
+    if (!g_real_hw) { g_pcm_open = 1; return 0; }   // silent (discard) on QEMU
+    if (rate < 4000)  rate = 4000;
+    if (rate > 48000) rate = 48000;
+
+    // PWM base clock so one sample lasts RANGE clocks: clock = RANGE * rate.
+    set_pwm_clock((uint32_t)PCM_RANGE * (uint32_t)rate);
+
+    // Fill the ring with silence (mid-scale) and flush it to RAM for the DMA.
+    for (int i = 0; i < RING_FRAMES * 2; i++) g_ring[i] = PCM_RANGE / 2;
+    dcache_clean_inval(g_ring, sizeof g_ring);
+
+    // PWM1: both channels FIFO-fed, balanced (not mark/space), DMA requests on.
+    PWM_CTL  = PWM_CLRF1;
+    delay(150);
+    PWM_RNG1 = PCM_RANGE; PWM_RNG2 = PCM_RANGE;
+    PWM_DMAC = PWM_DMAC_EN | (7u << 8) | 7u;         // enable, panic=7, dreq=7
+    PWM_CTL  = PWM_PWEN1 | PWM_PWEN2 | PWM_USEF1 | PWM_USEF2;
+
+    // DMA control block: stream the ring to the FIFO, looping forever.
+    g_cb.ti        = TI_WAIT_RESP | TI_DEST_DREQ | TI_SRC_INC | TI_PERMAP(DREQ_PWM);
+    g_cb.source_ad = BUS(g_ring);
+    g_cb.dest_ad   = PWM_FIF1_BUS;
+    g_cb.txfr_len  = sizeof g_ring;                  // bytes
+    g_cb.stride    = 0;
+    g_cb.nextconbk = BUS(&g_cb);                     // loop back to itself
+    g_cb.pad0 = g_cb.pad1 = 0;
+    dcache_clean_inval(&g_cb, sizeof g_cb);
+
+    // Start the DMA channel.
+    DMA_ENABLE |= (1u << DMA_CH);
+    DMA_CS = DMA_CS_RESET;
+    delay(150);
+    DMA_CONBLK_AD = BUS(&g_cb);
+    DMA_CS = DMA_CS_ACTIVE;
+    g_pcm_open = 1;
+    return 0;
+}
+
+// Free stereo frames the producer may fill without overtaking the DMA read head.
+int snd_pcm_avail(void) {
+    if (!g_pcm_open) return 0;
+    if (!g_real_hw) return RING_FRAMES;              // discard everything on QEMU
+    uint32_t read_off = DMA_SOURCE_AD - BUS(g_ring); // bytes the DMA is at
+    uint32_t read_frame = (read_off / 4) / 2;        // -> frame index
+    if (read_frame >= RING_FRAMES) read_frame = 0;
+    int used = ((int)g_write - (int)read_frame + RING_FRAMES) % RING_FRAMES;
+    int freef = RING_FRAMES - used - 1;              // -1: never fully catch up
+    return freef < 0 ? 0 : freef;
+}
+
+// Write up to `frames` stereo 16-bit sample pairs; returns how many were taken.
+int snd_pcm_write(const short *stereo, int frames) {
+    if (!g_pcm_open || !g_real_hw) return frames;    // discard (silent) on QEMU
+    int avail = snd_pcm_avail();
+    if (frames > avail) frames = avail;
+    for (int i = 0; i < frames; i++) {
+        int l = (stereo[i * 2]     >> 6) + PCM_RANGE / 2;   // 16-bit signed -> 0..1023
+        int r = (stereo[i * 2 + 1] >> 6) + PCM_RANGE / 2;
+        if (l < 0) l = 0; else if (l > PCM_RANGE - 1) l = PCM_RANGE - 1;
+        if (r < 0) r = 0; else if (r > PCM_RANGE - 1) r = PCM_RANGE - 1;
+        g_ring[g_write * 2]     = (uint32_t)l;
+        g_ring[g_write * 2 + 1] = (uint32_t)r;
+        g_write = (g_write + 1) % RING_FRAMES;
+    }
+    dcache_clean_inval(g_ring, sizeof g_ring);        // flush for the DMA
+    return frames;
+}
+
+void snd_pcm_close(void) {
+    if (g_pcm_open && g_real_hw) {
+        DMA_CS = DMA_CS_RESET;                         // stop the DMA
+        PWM_CTL = 0;
+        snd_init();                                   // restore tone-mode clock + idle
+    }
+    g_pcm_open = 0;
 }

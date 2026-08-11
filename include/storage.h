@@ -51,6 +51,7 @@ int  stg_open(const char *name, int mode);   // -> channel (>0), or 0 if it fail
 int  stg_close(int ch);                       // 0 ok, <0 error (flushes writes)
 void stg_close_all(void);                     // CLOSE#0: close every open channel
 int  stg_getb(int ch);                        // next byte 0..255, or <0 at EOF/error
+int  stg_readn(int ch, void *buf, int n);     // bulk read up to n bytes -> count, <0 error
 int  stg_putb(int ch, int byte);              // 0 ok, <0 error
 long stg_size(int ch);                        // EXT#: length in bytes, <0 error
 long stg_tell(int ch);                        // PTR#: current position, <0 error

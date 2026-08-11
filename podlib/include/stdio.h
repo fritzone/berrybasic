@@ -49,6 +49,7 @@ int printf(const char *fmt, ...);
 int fprintf(FILE *fp, const char *fmt, ...);
 int sprintf(char *buf, const char *fmt, ...);
 int snprintf(char *buf, size_t n, const char *fmt, ...);
+void setbuf(FILE *fp, char *buf);
 int vprintf(const char *fmt, va_list ap);
 int vfprintf(FILE *fp, const char *fmt, va_list ap);
 int vsprintf(char *buf, const char *fmt, va_list ap);

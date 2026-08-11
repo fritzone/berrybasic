@@ -44,6 +44,11 @@ void     gfx_front_putpixel(int x, int y, uint32_t color);
 uint32_t gfx_front_getpixel(int x, int y);
 int      gfx_front_width(void);
 int      gfx_front_height(void);
+
+// Fast paletted blit onto the active surface (see graphics.c). `fbpal` is a
+// 256-entry palette already in framebuffer pixel format.
+void gfx_blit_indexed(const uint8_t *idx, const uint32_t *fbpal,
+                      int w, int h, int dx, int dy, int scale);
 void bar(int x1, int y1, int x2, int y2, uint32_t color);
 void cleardevice(void);
 

@@ -111,7 +111,16 @@ sdcard: $(SDIMG)
 
 # Build a bootable Raspberry Pi 4 SD-card image (firmware + kernel + config.txt)
 # that runs BerryBasic on real hardware. See tools/mksdimage.sh and README-realhw.md.
-sdimage: $(KERNEL) seeds pods
+# DOOM (third_party/DOOM/linuxdoom-1.10) built to a POD by tools/builddoom.sh and
+# shipped to /DOOM on the card (with DOOM1.WAD, if present) by mksdimage.sh.
+DOOM_DIR = third_party/DOOM/linuxdoom-1.10
+DOOM_POD = $(BUILD_DIR)/sys/DOOM.POD
+$(DOOM_POD): $(wildcard $(DOOM_DIR)/*.c) $(wildcard $(DOOM_DIR)/*.h) tools/builddoom.sh \
+             $(TCC_SVC_HDR) $(POD_TCC) $(wildcard podlib/src/*) | $(BUILD_DIR)
+	tools/builddoom.sh $@
+doom: $(DOOM_POD)
+
+sdimage: $(KERNEL) seeds pods doom
 	tools/mksdimage.sh
 
 # Interactively flash berrybasic-sd.img to a removable card (lists devices,
@@ -367,4 +376,4 @@ $(BUILD_DIR)/pods/%.POD: $(TCC_DIR)/examples/pod_%.c $(TCC_DIR)/include/pod.h $(
 	$(POD_TCC) -B$(TCC_DIR) -pod $< -o $@
 	@echo "  built pod $@"
 
-.PHONY: all clean config newseed sdcard sdimage flash run host seeds pods test coverage
+.PHONY: all clean config newseed sdcard sdimage flash run host seeds pods doom test coverage

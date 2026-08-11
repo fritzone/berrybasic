@@ -24,4 +24,15 @@ void snd_set_tone(int freq_hz, int vol);
 // Stop the voice (output goes quiet). Equivalent to snd_set_tone(0, 0).
 void snd_silence(void);
 
+// --- streamed PCM audio (for games / sampled sound) -------------------------
+// A continuous stereo sample stream, played by DMA into the PWM jack with no
+// ongoing CPU cost (real hardware only; a no-op that discards on QEMU/host).
+// snd_pcm_open sets the sample rate and starts playback of silence; the caller
+// keeps the stream fed by writing sample pairs. snd_pcm_avail reports how many
+// stereo frames of room there are so the caller mixes just enough each frame.
+int  snd_pcm_open(int rate);                      // 0 ok, <0 fail
+int  snd_pcm_avail(void);                         // free stereo frames (0 = full/closed)
+int  snd_pcm_write(const short *stereo, int frames);  // -> frames accepted
+void snd_pcm_close(void);
+
 #endif

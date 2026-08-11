@@ -186,3 +186,14 @@ float strtof(const char *s, char **endptr) { return (float)strtod(s, endptr); }
 // long double conversion is fine now: the quad helpers come from lib-arm64.c.
 long double strtold(const char *s, char **endptr) { return (long double)strtod(s, endptr); }
 double atof(const char *s) { return strtod(s, 0); }
+
+// access(): does the file exist / is it usable? We can only test existence on
+// the machine (open it for reading), which covers what programs use it for.
+int access(const char *path, int mode) {
+    extern int open(const char *, int, ...);
+    (void)mode;
+    int fd = open(path, 0 /*O_RDONLY*/);
+    if (fd < 0) return -1;
+    close(fd);
+    return 0;
+}

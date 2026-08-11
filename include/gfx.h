@@ -23,6 +23,11 @@ int      sgfx_height(void);                 // screen height in pixels
 void     sgfx_clear(uint32_t rgb);          // fill the whole surface
 void     sgfx_putpixel(int x, int y, uint32_t rgb);
 uint32_t sgfx_getpixel(int x, int y);       // 0xRRGGBB at (x,y), 0 if off-screen
+// Fast paletted blit: a w*h 8-bit indexed image through a 256-entry 0xRRGGBB
+// palette, nearest-neighbour scaled by `scale`, top-left at (dx,dy). One call
+// pushes a whole frame (a game's 320x200) - far faster than per-pixel plotting.
+void     sgfx_blit8(const unsigned char *idx, const unsigned int *pal,
+                    int w, int h, int dx, int dy, int scale);
 void     sgfx_line(int x1, int y1, int x2, int y2, uint32_t rgb);
 void     sgfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb);
 void     sgfx_circle(int cx, int cy, int r, uint32_t rgb);        // outline

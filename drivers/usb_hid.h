@@ -74,6 +74,11 @@ const char *hid_layout_code(void);
 // Updates prev[].
 int hid_report_key(const uint8_t report[8], uint8_t prev[8]);
 
+// The set of keys currently held down (BerryBasiC key codes), refreshed on each
+// report - so a game can distinguish a held movement key from a released one.
+#define HID_KEYS_MAX 6
+int hid_keys_down(int *out, int max);   // fills out[], returns count
+
 // Decode a HID boot-protocol mouse report (3 or 4 bytes):
 //   byte0 = buttons  (bit0=left, bit1=right, bit2=middle)
 //   byte1 = dX       (signed, +right)

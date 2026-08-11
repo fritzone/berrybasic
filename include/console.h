@@ -152,6 +152,12 @@ void con_gtext(int x, int y, const char *s, int len);
 // USB keyboard is present (a serial terminal sends characters, not modifiers).
 int  con_keymods(void);
 
+// Keys currently held down (BerryBasiC key codes), for games that need
+// hold-to-move rather than one-shot presses. Fills out[] (up to max) and returns
+// the count, or -1 when there is no USB keyboard (a serial terminal reports
+// presses, not held state). Poll a key first (con_inkey(0)) so the report is fresh.
+int  con_keys_down(int *out, int max);
+
 // --- system monitor (F12 overlay) -------------------------------------------
 // Memory usage across the interpreter's fixed pools, filled by the interpreter
 // (sys_meminfo, implemented in basic.c) and read by the kernel's F12 overlay.

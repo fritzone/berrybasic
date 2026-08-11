@@ -103,6 +103,33 @@ void gfx_flip(void) {
 
 int gfx_buffered(void) { return buffered; }
 
+// Fast nearest-neighbour blit of a w*h 8-bit indexed image (palette already in
+// framebuffer pixel format) onto the ACTIVE surface, scaled by `scale`, top-left
+// at (dx,dy), clipped to the surface. One call pushes a whole paletted frame (a
+// game's 320x200) instead of tens of thousands of putpixels. Honours the back
+// buffer (composes there when BUFFER is on), so a game double-buffers cleanly.
+void gfx_blit_indexed(const uint8_t *idx, const uint32_t *fbpal,
+                      int w, int h, int dx, int dy, int scale) {
+    if (scale < 1) scale = 1;
+    for (int sy = 0; sy < h; sy++) {
+        const uint8_t *srow = idx + (unsigned)sy * (unsigned)w;
+        int oy0 = dy + sy * scale;
+        for (int r = 0; r < scale; r++) {
+            int py = oy0 + r;
+            if ((unsigned)py >= fb_height) continue;
+            uint32_t *drow = fb_buf + (uint64_t)py * fb_pitch_words;
+            for (int sx = 0; sx < w; sx++) {
+                uint32_t c = fbpal[srow[sx]];
+                int ox0 = dx + sx * scale;
+                for (int k = 0; k < scale; k++) {
+                    int px = ox0 + k;
+                    if ((unsigned)px < fb_width) drow[px] = c;
+                }
+            }
+        }
+    }
+}
+
 // --- direct front-buffer access (F12 system overlay) ------------------------
 // These always target the real visible surface, ignoring the buffered/sprite
 // redirection of fb_buf, so the overlay shows on screen even mid-BUFFER.

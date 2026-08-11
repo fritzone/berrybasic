@@ -282,13 +282,21 @@ static int core_format(sbuf *s, const char *fmt, va_list ap) {
         } else if (c == '%') { sb_putc(s, '%'); continue; }
         else { sb_putc(s, '%'); if (c) sb_putc(s, c); continue; }
 
+        // Precision on an integer conversion is the MINIMUM digit count (zero-
+        // padded), e.g. "%.3d" of 33 -> "033". With an explicit precision the
+        // '0' flag is ignored (C99).
+        int is_int = (c == 'd' || c == 'i' || c == 'u' ||
+                      c == 'x' || c == 'X' || c == 'o' || c == 'p');
+        int zprec = (is_int && prec >= 0 && tn < prec) ? prec - tn : 0;
         int plen = (pfx[0] ? 2 : 0);
-        int total = tn + (sign ? 1 : 0) + plen;
+        int total = tn + zprec + (sign ? 1 : 0) + plen;
         int pad = width - total;
-        if (!left && !zero) sb_pad(s, ' ', pad);
+        int use_zero = zero && !left && !(is_int && prec >= 0);
+        if (!left && !use_zero) sb_pad(s, ' ', pad);
         if (sign) sb_putc(s, sign);
         for (int i = 0; pfx[i]; i++) sb_putc(s, pfx[i]);
-        if (!left && zero) sb_pad(s, '0', pad);
+        if (use_zero) sb_pad(s, '0', pad);
+        sb_pad(s, '0', zprec);                           // precision zeros
         while (tn > 0) sb_putc(s, tmp[--tn]);
         if (left) sb_pad(s, ' ', pad);
     }
@@ -482,3 +490,5 @@ int vscanf(const char *fmt, va_list ap) { return vfscanf(stdin, fmt, ap); }
 int scanf(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int r = vfscanf(stdin, fmt, ap); va_end(ap); return r;
 }
+
+void setbuf(FILE *fp, char *buf) { (void)fp; (void)buf; }

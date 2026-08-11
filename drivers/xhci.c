@@ -578,7 +578,7 @@ static int get_device_descriptor(uint8_t *buf, int speed) {
 // (the hub is already up) and the connection scan is brief.
 static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_speed,
                          uint32_t route, int tt_slot, int tt_port,
-                         int skip_port, int first_time,
+                         uint32_t skip_mask, int first_time,
                          int *dport, int *dspeed) {
     if (first_time) {
         // Hub must be configured before its ports work.
@@ -621,7 +621,7 @@ static int hub_enumerate(uint8_t *buf, int root_port, int hub_slot, int hub_spee
     int dp = 0;
     for (int tries = 0; tries < max_tries && !dp; tries++) {
         for (int p = 1; p <= nports; p++) {
-            if (p == skip_port) continue;
+            if (skip_mask & (1u << p)) continue;
             if (control_xfer(0xA3, 0, 0, p, 4, buf) < 0) continue;       // GET_STATUS
             uint32_t st = buf[0] | (buf[1] << 8);
             uint32_t ch = buf[2] | (buf[3] << 8);
@@ -837,6 +837,24 @@ static int key_pop(void) {
 // shared event ring, so this demux is what lets two HID devices coexist. Decoded
 // keys go to key_fifo; mouse movement accumulates in mou_*. Also re-rings idle
 // doorbells to survive the VL805 lost-doorbell race (see run_command).
+// Route one transfer-event completion to the keyboard or mouse interrupt
+// endpoint by (slot, DCI), decoding + re-arming it. Shared by xhci_pump and the
+// bulk-transfer wait, so a HID report that lands mid-bulk-transfer is not lost.
+static void handle_hid_event(int sid, int eid, int cc) {
+    if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
+        if (cc == 1 || cc == 13) key_push(hid_report_key(kbd_ep_st.buf, kbd_prev));
+        hid_rearm(&kbd_ep_st);
+    } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
+        if (cc == 1 || cc == 13) {
+            int b, dx, dy, w;
+            if (hid_mouse_decode(mou_ep_st.buf, mou_ep_st.len, &b, &dx, &dy, &w)) {
+                mou_btn = b; mou_dx += dx; mou_dy += dy; mou_wheel += w; mou_have = 1;
+            }
+        }
+        hid_rearm(&mou_ep_st);
+    }
+}
+
 static void xhci_pump(void) {
     static uint32_t idle = 0;
     trb_t ev;
@@ -847,18 +865,7 @@ static void xhci_pump(void) {
         int sid = (ev.control >> 24) & 0xff;
         int eid = (ev.control >> 16) & 0x1f;
         int cc  = COMP_CODE(ev.status);
-        if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
-            if (cc == 1 || cc == 13) key_push(hid_report_key(kbd_ep_st.buf, kbd_prev));
-            hid_rearm(&kbd_ep_st);
-        } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
-            if (cc == 1 || cc == 13) {
-                int b, dx, dy, w;
-                if (hid_mouse_decode(mou_ep_st.buf, mou_ep_st.len, &b, &dx, &dy, &w)) {
-                    mou_btn = b; mou_dx += dx; mou_dy += dy; mou_wheel += w; mou_have = 1;
-                }
-            }
-            hid_rearm(&mou_ep_st);
-        }
+        handle_hid_event(sid, eid, cc);
     }
     if (got) idle = 0;
     else if (++idle >= 64) {
@@ -868,9 +875,171 @@ static void xhci_pump(void) {
     }
 }
 
+// ===========================================================================
+// Generic device table + recursive enumeration (Phase 2). Every enumerated
+// device is recorded with its topology and first-interface class; each device's
+// EP0 pipe + contexts are snapshotted so control/bulk transfers can target it
+// later (the globals only ever describe the most-recently-addressed device).
+// ===========================================================================
+#define XHCI_MAX_DEV 8
+
+static xhci_dev g_devs[XHCI_MAX_DEV];
+static int      g_dev_n;
+
+// Per-device private pipe state, parallel to g_devs.
+typedef struct {
+    trb_t   *ep0_ring; uint32_t ep0_enq, ep0_cyc;
+    uint8_t *input_ctx, *dev_ctx;
+    trb_t   *in_ring;  uint32_t in_enq,  in_cyc;  int in_dci;
+    trb_t   *out_ring; uint32_t out_enq, out_cyc; int out_dci;
+} dev_priv;
+static dev_priv g_priv[XHCI_MAX_DEV];
+
+static int ep_addr_dci(int ep_addr) { return (ep_addr & 0x0f) * 2 + ((ep_addr & 0x80) ? 1 : 0); }
+
+// Record the currently-addressed device (globals describe it) with the given
+// topology + interface class. Snapshots its EP0 pipe and contexts.
+static int record_dev(int root_port, uint32_t route, int speed, int tt_slot, int tt_port,
+                      int ifnum, int cls, int subcls, int proto) {
+    if (g_dev_n >= XHCI_MAX_DEV) return -1;
+    int i = g_dev_n++;
+    xhci_dev *d = &g_devs[i];
+    d->slot = slot_id; d->speed = speed; d->root_port = root_port; d->route = route;
+    d->tt_slot = tt_slot; d->tt_port = tt_port; d->ifnum = ifnum;
+    d->cls = (uint8_t)cls; d->subcls = (uint8_t)subcls; d->proto = (uint8_t)proto;
+    d->valid = 1;
+    dev_priv *p = &g_priv[i];
+    p->ep0_ring = ep0_ring; p->ep0_enq = ep0_enq; p->ep0_cyc = ep0_cycle;
+    p->input_ctx = input_ctx; p->dev_ctx = dev_ctx;
+    p->in_ring = 0; p->out_ring = 0; p->in_dci = 0; p->out_dci = 0;
+    uart_dec("[USB] dev slot=", slot_id);
+    uart_hex("[USB]   class ", ((uint32_t)cls << 16) | ((uint32_t)subcls << 8) | proto);
+    return i;
+}
+
+static int find_priv(int slot) {
+    for (int i = 0; i < g_dev_n; i++) if (g_devs[i].valid && g_devs[i].slot == slot) return i;
+    return -1;
+}
+
+// Read the config descriptor of the currently-addressed device and extract its
+// FIRST interface's class/subclass/protocol + interface number. For a
+// mass-storage interface (class 8) also find the bulk IN/OUT endpoint addresses
+// and max packet size. Returns 0 on success (fields filled), <0 on error.
+static int probe_iface(int *cls, int *subcls, int *proto, int *ifnum,
+                       int *bulk_in, int *bulk_out, int *bulk_mps) {
+    uint8_t *buf = dma_alloc(256, 64);
+    if (control_xfer(0x80, 6, (2 << 8), 0, 9, buf) < 0) return -1;       // config desc header
+    int tlen = buf[2] | (buf[3] << 8);
+    if (tlen > 256) tlen = 256;
+    if (control_xfer(0x80, 6, (2 << 8), 0, tlen, buf) < 0) return -1;
+
+    int c = 0, s = 0, pr = 0, ifn = 0, have_if = 0;
+    int bi = 0, bo = 0, bm = 0, in_msc = 0;
+    for (int p = 0; p + 2 <= tlen; ) {
+        int blen = buf[p], btype = buf[p + 1];
+        if (blen < 2) break;
+        if (btype == 4) {                              // interface descriptor
+            if (!have_if) {                            // first interface wins
+                ifn = buf[p + 2]; c = buf[p + 5]; s = buf[p + 6]; pr = buf[p + 7];
+                have_if = 1;
+            }
+            in_msc = (buf[p + 5] == 0x08);             // scan THIS interface's bulk eps
+        } else if (btype == 5 && in_msc) {             // endpoint descriptor
+            int eaddr = buf[p + 2];
+            int etype = buf[p + 3] & 3;                // 2 = bulk
+            int emps  = (buf[p + 4] | (buf[p + 5] << 8)) & 0x7ff;
+            if (etype == 2) {
+                if (eaddr & 0x80) bi = eaddr; else bo = eaddr;
+                if (!bm) bm = emps;
+            }
+        }
+        p += blen;
+    }
+    if (!have_if) return -1;
+    if (cls)      *cls = c;
+    if (subcls)   *subcls = s;
+    if (proto)    *proto = pr;
+    if (ifnum)    *ifnum = ifn;
+    if (bulk_in)  *bulk_in = bi;
+    if (bulk_out) *bulk_out = bo;
+    if (bulk_mps) *bulk_mps = bm;
+    return 0;
+}
+
+// Handle a just-addressed leaf device (globals describe it). Record it, and if it
+// is a HID boot device set up + claim its interrupt endpoint (keyboard/mouse), as
+// before. Mass storage is left addressed for the MSC layer (Phase 3).
+static void handle_leaf(int root_port, uint32_t route, int speed, int tt_slot, int tt_port) {
+    int cls = 0, subcls = 0, proto = 0, ifn = 0, bi = 0, bo = 0, bm = 0;
+    if (probe_iface(&cls, &subcls, &proto, &ifn, &bi, &bo, &bm) < 0) {
+        uart_puts("[USB] probe_iface failed\n"); return;
+    }
+    record_dev(root_port, route, speed, tt_slot, tt_port, ifn, cls, subcls, proto);
+    if (cls == 0x08) {
+        uart_hex("[USB]   MSC subcls/proto ", ((uint32_t)subcls << 8) | proto);
+        uart_dec("[USB]   bulk IN  ", bi);
+        uart_dec("[USB]   bulk OUT ", bo);
+        uart_dec("[USB]   bulk MPS ", bm);
+    }
+    if (cls == 3) {                                    // HID: keyboard / mouse
+        hid_ep_t ep; int hproto = 0;
+        if (setup_int_endpoint(speed, route, root_port, tt_slot, tt_port, &ep, &hproto))
+            claim_hid(&ep, hproto);
+    }
+}
+
+static void scan_hub(int hub_slot, int hub_speed, uint32_t hub_route,
+                     int hub_tt_slot, int hub_tt_port, int root_port, int depth,
+                     uint8_t *buf);
+
+// Address + descend into the device the globals point at (buf holds its device
+// descriptor). A hub is scanned recursively; a leaf is handled.
+static void handle_device(int root_port, uint32_t route, int speed,
+                          int tt_slot, int tt_port, int depth, uint8_t *buf) {
+    if (buf[4] == 0x09) {                              // hub
+        record_dev(root_port, route, speed, tt_slot, tt_port, 0, 0x09, 0, 0);
+        scan_hub(slot_id, speed, route, tt_slot, tt_port, root_port, depth, buf);
+    } else {
+        handle_leaf(root_port, route, speed, tt_slot, tt_port);
+    }
+}
+
+// Enumerate every connected downstream port of a hub (globals point at the hub).
+static void scan_hub(int hub_slot, int hub_speed, uint32_t hub_route,
+                     int hub_tt_slot, int hub_tt_port, int root_port, int depth,
+                     uint8_t *buf) {
+    if (depth >= 5) { uart_puts("[USB] hub chain too deep\n"); return; }
+    uint32_t skip = 0;
+    int first_time = 1;
+    for (;;) {
+        int dp = 0, dspeed = 0;
+        if (!hub_enumerate(buf, root_port, hub_slot, hub_speed, hub_route,
+                           hub_tt_slot, hub_tt_port, skip, first_time, &dp, &dspeed))
+            break;                                     // no more connected ports
+        first_time = 0;
+        skip |= (1u << dp);
+        // The hub's EP0 is selected now (hub_enumerate used it). Snapshot so we can
+        // re-select it after addressing/handling the child (which moves the globals).
+        trb_t   *hub_ring = ep0_ring; uint32_t he = ep0_enq, hc = ep0_cycle;
+        int      hslot = slot_id;
+
+        uint32_t croute = hub_route | ((uint32_t)(dp & 0xf) << (4 * depth));
+        int ctt_slot = hub_tt_slot, ctt_port = hub_tt_port;
+        if (dspeed < 3) { ctt_slot = hub_slot; ctt_port = dp; }   // FS/LS -> parent is TT
+
+        int cslot = address_device_on(root_port, croute, dspeed, ctt_slot, ctt_port);
+        if (cslot && get_device_descriptor(buf, dspeed) >= 0)
+            handle_device(root_port, croute, dspeed, ctt_slot, ctt_port, depth + 1, buf);
+
+        ep0_ring = hub_ring; ep0_enq = he; ep0_cycle = hc; slot_id = hslot;  // re-select hub
+    }
+}
+
 int xhci_kbd_init(uintptr_t mmio_base) {
     cap_base = mmio_base;
     arena_off = 0;
+    g_dev_n = 0;
     kbd_ep_st.ready = 0;
     mou_ep_st.ready = 0;
     key_head = key_tail = 0;
@@ -882,139 +1051,32 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     int maxports = xhci_start();
     if (maxports < 0) return 0;
 
-    // Log every port's PORTSC and find a connected one.
-    int port = 0;
+    // Enumerate EVERY connected root port (not just the first). On the Pi 4 the
+    // USB-A ports hang off the onboard hub on one root port; handle_device
+    // descends it recursively, recording every device (keyboard, mouse, and a
+    // mass-storage stick) into g_devs. HID boot devices are set up + claimed;
+    // mass storage is left addressed for the MSC layer to configure.
+    uint8_t *buf = dma_alloc(256, 64);
     for (int p = 1; p <= maxports; p++) {
         uint32_t sc = RD32(op_base + OP_PORTSC(p));
         uart_dec("[XHCI] port ", p);
-        uart_hex("[XHCI]   PORTSC: ", sc);          // speed = bits [13:10]
-        if ((sc & PORTSC_CCS) && !port) port = p;   // first connected port
-    }
-    if (!port) { uart_puts("[XHCI] no device on any port\n"); return 0; }
-    uart_dec("[XHCI] using port ", port);
-    if (!port_reset(port)) { uart_puts("[XHCI] port reset failed\n"); return 0; }
-
-    // Address whatever is on this root port. On the Pi 4 this is the onboard USB
-    // hub; on other hardware it could be the keyboard directly.
-    int speed = (RD32(op_base + OP_PORTSC(port)) >> 10) & 0xf;
-    uart_dec("[XHCI] dev speed ", speed);
-    int hub_slot = address_device_on(port, 0, speed, 0, 0);
-    if (!hub_slot) return 0;
-
-    // Topology of the device we will finally run the keyboard endpoint on. For a
-    // device directly on a root port these stay default; behind the Pi 4 hub
-    // they are updated. They are needed again when we reconfigure the slot to add
-    // the interrupt endpoint.
-    int dev_route = 0, dev_speed = speed, dev_tt_slot = 0, dev_tt_port = 0;
-
-    // Get the device descriptor (18 bytes), correcting EP0 MPS if needed.
-    uint8_t *buf = dma_alloc(256, 64);
-    if (get_device_descriptor(buf, speed) < 0) {
-        uart_puts("[XHCI] GET_DESCRIPTOR failed\n"); return 0;
-    }
-    uart_hex("[XHCI] VID ", buf[8] | (buf[9] << 8));
-    uart_hex("[XHCI] PID ", buf[10] | (buf[11] << 8));
-    uart_hex("[XHCI] bDeviceClass ", buf[4]);   // 0x09 = hub, 0x00 = per-interface
-
-    // Walk down a chain of hubs until we reach the actual keyboard. On a bare Pi
-    // there is one hub (the onboard one); with a monitor/dock that has its own
-    // hub (e.g. CrowView) the keyboard is two hubs deep, and so on. Each hub tier
-    // contributes its downstream port number to the route string (one nibble per
-    // tier), and a full/low-speed device uses its immediate (high-speed) parent
-    // hub as its Transaction Translator.
-    int cur_slot = hub_slot;             // slot of the device we last addressed
-    int depth = 0;                       // number of hubs descended so far
-    // Remember the immediate parent hub of the leaf device, so we can rescan it
-    // afterwards for a second HID device (the mouse next to the keyboard). All
-    // USB-A ports on a Pi 4 share the onboard hub, so keyboard and mouse land on
-    // two of its downstream ports.
-    int leaf_hub_slot = 0, leaf_hub_speed = 0, leaf_hub_tt_slot = 0, leaf_hub_tt_port = 0;
-    uint32_t leaf_hub_route = 0;
-    int leaf_dport = 0;
-    // The rescan below issues hub-class control transfers, but control_xfer talks
-    // to whatever device address_device_on last selected (ep0_ring/enq/cycle +
-    // slot_id). After we descend to the leaf device those globals point at the
-    // leaf, not the hub, so we snapshot the hub's control pipe here and restore it
-    // before rescanning - otherwise the hub request goes to the keyboard and STALLs.
-    trb_t   *leaf_hub_ep0_ring  = 0;
-    uint32_t leaf_hub_ep0_enq   = 0, leaf_hub_ep0_cycle = 0;
-    int      leaf_hub_slot_id   = 0;
-    while (buf[4] == 0x09) {             // current device is a hub
-        if (depth >= 5) { uart_puts("[XHCI] hub chain too deep\n"); return 0; }
-        // Snapshot this hub (cur_slot) as the potential leaf parent before we
-        // descend and overwrite dev_* with the child's topology.
-        leaf_hub_slot = cur_slot; leaf_hub_speed = dev_speed; leaf_hub_route = dev_route;
-        leaf_hub_tt_slot = dev_tt_slot; leaf_hub_tt_port = dev_tt_port;
-        int dport = 0, dspeed = 0;
-        // Configure cur_slot as a hub (preserving its own route/TT) and find the
-        // next device down.
-        if (!hub_enumerate(buf, port, cur_slot, dev_speed, dev_route,
-                           dev_tt_slot, dev_tt_port, 0 /*skip*/, 1 /*first_time*/,
-                           &dport, &dspeed)) return 0;
-        leaf_dport = dport;
-        // Freeze the hub's control pipe now (still selected) so the post-descent
-        // rescan can re-target the hub after the leaf device is addressed.
-        leaf_hub_ep0_ring  = ep0_ring;
-        leaf_hub_ep0_enq   = ep0_enq;
-        leaf_hub_ep0_cycle = ep0_cycle;
-        leaf_hub_slot_id   = slot_id;
-        dev_route |= (uint32_t)(dport & 0xf) << (4 * depth);   // append this hub's port
-        depth++;
-        if (dspeed < 3) { dev_tt_slot = cur_slot; dev_tt_port = dport; }  // FS/LS -> TT
-        else            { dev_tt_slot = 0;        dev_tt_port = 0;     }  // HS -> none
-        cur_slot = address_device_on(port, dev_route, dspeed, dev_tt_slot, dev_tt_port);
-        if (!cur_slot) return 0;
-        dev_speed = dspeed;
-        if (get_device_descriptor(buf, dspeed) < 0) {
-            uart_puts("[XHCI] downstream GET_DESCRIPTOR failed\n"); return 0;
+        uart_hex("[XHCI]   PORTSC: ", sc);              // speed = bits [13:10]
+        if (!(sc & PORTSC_CCS)) continue;               // nothing connected
+        if (!port_reset(p)) { uart_puts("[XHCI] port reset failed\n"); continue; }
+        int speed = (RD32(op_base + OP_PORTSC(p)) >> 10) & 0xf;
+        uart_dec("[XHCI] dev speed ", speed);
+        int rslot = address_device_on(p, 0, speed, 0, 0);
+        if (!rslot) continue;
+        if (get_device_descriptor(buf, speed) < 0) {
+            uart_puts("[XHCI] GET_DESCRIPTOR failed\n"); continue;
         }
-        uart_dec("[XHCI] tier ", depth);
-        uart_hex("[XHCI]   route ", dev_route);
-        uart_hex("[XHCI]   VID ", buf[8] | (buf[9] << 8));
-        uart_hex("[XHCI]   PID ", buf[10] | (buf[11] << 8));
-        uart_hex("[XHCI]   class ", buf[4]);
+        uart_hex("[XHCI] VID ", buf[8] | (buf[9] << 8));
+        uart_hex("[XHCI] PID ", buf[10] | (buf[11] << 8));
+        uart_hex("[XHCI] bDeviceClass ", buf[4]);       // 0x09 = hub, 0x00 = per-interface
+        handle_device(p, 0, speed, 0, 0, 0, buf);
     }
 
-    // Configure the leaf device's interrupt endpoint and classify it (a keyboard
-    // reports boot protocol 1, a mouse 2). Priming is deferred (see below).
-    int proto = 0;
-    hid_ep_t first;
-    if (!setup_int_endpoint(dev_speed, dev_route, port, dev_tt_slot, dev_tt_port,
-                            &first, &proto)) return 0;
-    claim_hid(&first, proto);
-
-    // Look for a SECOND HID device on the same (leaf's parent) hub: the mouse
-    // that sits next to the keyboard (or vice versa). All Pi 4 USB-A ports share
-    // the onboard hub, so both devices are two of its downstream ports.
-    if (leaf_hub_slot) {
-        // Re-select the hub's control pipe: the leaf device is currently selected,
-        // so hub-class requests would otherwise be sent to it (and STALL).
-        ep0_ring  = leaf_hub_ep0_ring;
-        ep0_enq   = leaf_hub_ep0_enq;
-        ep0_cycle = leaf_hub_ep0_cycle;
-        slot_id   = leaf_hub_slot_id;
-        uart_puts("[XHCI] rescanning hub for 2nd HID device\n");
-        int dport2 = 0, dspeed2 = 0;
-        if (hub_enumerate(buf, port, leaf_hub_slot, leaf_hub_speed, leaf_hub_route,
-                          leaf_hub_tt_slot, leaf_hub_tt_port,
-                          leaf_dport /*skip the first device's port*/, 0 /*rescan*/,
-                          &dport2, &dspeed2)) {
-            int child_nibble = depth - 1;                     // last hub's children tier
-            uint32_t route2 = leaf_hub_route | ((uint32_t)(dport2 & 0xf) << (4 * child_nibble));
-            int tt2_slot = leaf_hub_tt_slot, tt2_port = leaf_hub_tt_port;
-            if (dspeed2 < 3) { tt2_slot = leaf_hub_slot; tt2_port = dport2; }  // FS/LS -> TT
-            int s2 = address_device_on(port, route2, dspeed2, tt2_slot, tt2_port);
-            if (s2 && get_device_descriptor(buf, dspeed2) >= 0) {
-                int proto2 = 0;
-                hid_ep_t second;
-                if (setup_int_endpoint(dspeed2, route2, port, tt2_slot, tt2_port,
-                                       &second, &proto2))
-                    claim_hid(&second, proto2);
-            }
-        }
-    }
-
-    // All devices are configured; NOW arm their interrupt endpoints. Priming
+    // All devices are configured; NOW arm the HID interrupt endpoints. Priming
     // earlier would let an interrupt completion land on the shared event ring
     // mid-enumeration and be mistaken for a control-transfer completion.
     if (kbd_ep_st.ready) hid_prime(&kbd_ep_st);
@@ -1045,4 +1107,147 @@ int xhci_mouse_poll(int *btn, int *dx, int *dy, int *wheel) {
     if (wheel) *wheel = mou_wheel;
     mou_have = 0; mou_dx = 0; mou_dy = 0; mou_wheel = 0;
     return 1;
+}
+
+// ===========================================================================
+// Generic control + bulk transport (Phase 2). See xhci.h.
+// ===========================================================================
+#define TRB_RESET_ENDPOINT   14
+#define TRB_SET_TR_DEQUEUE   16
+
+void *xhci_dma_alloc(unsigned size, unsigned align) { return dma_alloc(size, align); }
+
+int       xhci_dev_count(void)  { return g_dev_n; }
+xhci_dev *xhci_dev_get(int i)   { if (i < 0 || i >= g_dev_n) return 0; return &g_devs[i]; }
+
+// Control transfer to an arbitrary device: swap its EP0 pipe into the globals,
+// run control_xfer, save the advanced enqueue pointer back.
+int xhci_control(int slot, unsigned char bmReqType, unsigned char bReq,
+                 unsigned short wValue, unsigned short wIndex,
+                 unsigned short wLength, void *buf) {
+    int i = find_priv(slot);
+    if (i < 0) return -1;
+    dev_priv *p = &g_priv[i];
+    trb_t *sr = ep0_ring; uint32_t se = ep0_enq, sc = ep0_cycle; int ss = slot_id;
+    ep0_ring = p->ep0_ring; ep0_enq = p->ep0_enq; ep0_cycle = p->ep0_cyc; slot_id = slot;
+    int r = control_xfer(bmReqType, bReq, wValue, wIndex, wLength, buf);
+    p->ep0_enq = ep0_enq; p->ep0_cyc = ep0_cycle;              // carry the ring forward
+    ep0_ring = sr; ep0_enq = se; ep0_cycle = sc; slot_id = ss;
+    return r;
+}
+
+int xhci_bulk_config(int slot, int ep_in, int ep_out, int mps) {
+    int i = find_priv(slot);
+    if (i < 0) return -1;
+    xhci_dev *d = &g_devs[i];
+    dev_priv *p = &g_priv[i];
+    int in_dci  = ep_addr_dci(ep_in);
+    int out_dci = ep_addr_dci(ep_out);
+    int max_dci = in_dci > out_dci ? in_dci : out_dci;
+
+    p->in_ring  = dma_alloc(RING_TRBS * sizeof(trb_t), 64);
+    p->out_ring = dma_alloc(RING_TRBS * sizeof(trb_t), 64);
+    p->in_enq = 0;  p->in_cyc = TRB_CYCLE;  p->in_dci = in_dci;
+    p->out_enq = 0; p->out_cyc = TRB_CYCLE; p->out_dci = out_dci;
+
+    uint8_t *ic = p->input_ctx;
+    for (int k = 0; k < 33 * ctx_size; k++) ic[k] = 0;
+    uint32_t *icc = (uint32_t *)ic;
+    icc[1] = (1u << 0) | (1u << in_dci) | (1u << out_dci);     // slot + both endpoints
+    uint32_t *slotc = slot_ctx(ic + ctx_size);
+    slotc[0] = ((uint32_t)max_dci << 27) | ((uint32_t)d->speed << 20) | (d->route & 0xfffff);
+    slotc[1] = ((uint32_t)d->root_port << 16);
+    if (d->tt_slot) slotc[2] = (d->tt_slot & 0xff) | ((d->tt_port & 0xff) << 8);
+    // Bulk IN endpoint: EP Type 6. Bulk OUT: EP Type 2. Interval irrelevant (0).
+    uint32_t *epi = ep_ctx(ic + ctx_size, in_dci);
+    epi[1] = (6u << 3) | ((uint32_t)mps << 16) | (3u << 1);    // EP type + MPS + CErr=3
+    { uint64_t r = pa(p->in_ring) | 1; epi[2] = (uint32_t)r; epi[3] = (uint32_t)(r >> 32); }
+    epi[4] = mps;                                             // average TRB length
+    uint32_t *epo = ep_ctx(ic + ctx_size, out_dci);
+    epo[1] = (2u << 3) | ((uint32_t)mps << 16) | (3u << 1);
+    { uint64_t r = pa(p->out_ring) | 1; epo[2] = (uint32_t)r; epo[3] = (uint32_t)(r >> 32); }
+    epo[4] = mps;
+
+    if (run_command(pa(ic), TRB_TYPE(TRB_CONFIGURE_EP) | (slot << 24)) < 0) {
+        uart_puts("[XHCI] bulk configure EP failed\n"); return -1;
+    }
+    return 0;
+}
+
+// Wait for the Transfer Event on (slot, dci), routing HID completions so a report
+// arriving mid-transfer is not lost. Returns the completion code and fills
+// *residue (bytes NOT transferred); -1 on timeout.
+static int bulk_wait(int slot, int dci, int *residue, int timeout_ms) {
+    trb_t ev;
+    int slices = timeout_ms / 50 + 1;
+    for (int t = 0; t < slices; t++) {
+        if (!next_event(&ev, 50)) { ring_db(slot, dci); continue; }
+        if (TRB_GET_TYPE(ev.control) != TRB_TRANSFER_EVENT) continue;
+        int sid = (ev.control >> 24) & 0xff;
+        int eid = (ev.control >> 16) & 0x1f;
+        int cc  = COMP_CODE(ev.status);
+        if (sid == slot && eid == dci) {
+            if (residue) *residue = ev.status & 0xffffff;
+            return cc;
+        }
+        handle_hid_event(sid, eid, cc);                      // not ours: keep HID alive
+    }
+    return -1;
+}
+
+// One Normal-TRB TD. Caps at 64 KiB (the SCSI layer loops for more). Completion
+// codes: 1 Success, 13 Short Packet (success, shorter), 6 Stall. -> bytes, or
+// <0: -1 timeout/error, -2 stall.
+static int bulk_xfer(int slot, void *buf, int len, int in, int timeout_ms) {
+    int i = find_priv(slot);
+    if (i < 0) return -1;
+    dev_priv *p = &g_priv[i];
+    trb_t *ring; uint32_t *enq; uint32_t *cyc; int dci;
+    if (in)  { ring = p->in_ring;  enq = &p->in_enq;  cyc = &p->in_cyc;  dci = p->in_dci;  }
+    else     { ring = p->out_ring; enq = &p->out_enq; cyc = &p->out_cyc; dci = p->out_dci; }
+    if (!ring) return -1;
+
+    ring_push(ring, enq, cyc, pa(buf), (uint32_t)len, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+    dsb();
+    ring_db(slot, dci);
+
+    int resid = 0;
+    int cc = bulk_wait(slot, dci, &resid, timeout_ms);
+    if (cc < 0) return -1;                                    // timeout
+    if (cc == 6) return -2;                                   // stall
+    if (cc != 1 && cc != 13) { uart_hex("[XHCI] bulk cc ", cc); return -1; }
+    return len - resid;                                       // short packet -> fewer bytes
+}
+
+int xhci_bulk_in (int slot, void *buf, int len, int timeout_ms)       { return bulk_xfer(slot, buf, len, 1, timeout_ms); }
+int xhci_bulk_out(int slot, const void *buf, int len, int timeout_ms) { return bulk_xfer(slot, (void *)buf, len, 0, timeout_ms); }
+
+int xhci_ep_reset(int slot, int ep_addr) {
+    int i = find_priv(slot);
+    if (i < 0) return -1;
+    dev_priv *p = &g_priv[i];
+    int dci = ep_addr_dci(ep_addr);
+    trb_t *ring; uint32_t enq, cyc;
+    if      (dci == p->in_dci)  { ring = p->in_ring;  enq = p->in_enq;  cyc = p->in_cyc;  }
+    else if (dci == p->out_dci) { ring = p->out_ring; enq = p->out_enq; cyc = p->out_cyc; }
+    else return -1;
+    // Reset Endpoint (Halted -> Stopped), reset the ring dequeue to where we are,
+    // then clear the device-side HALT feature.
+    run_command(0, TRB_TYPE(TRB_RESET_ENDPOINT) | (dci << 16) | (slot << 24));
+    uint64_t dq = pa(&ring[enq]) | ((cyc & TRB_CYCLE) ? 1 : 0);
+    run_command(dq, TRB_TYPE(TRB_SET_TR_DEQUEUE) | (dci << 16) | (slot << 24));
+    xhci_control(slot, 0x02, 1 /*CLEAR_FEATURE*/, 0 /*ENDPOINT_HALT*/, (uint16_t)ep_addr, 0, 0);
+    return 0;
+}
+
+void xhci_selftest(void) {
+    uart_dec("[USB] selftest: devices ", g_dev_n);
+    for (int i = 0; i < g_dev_n; i++) {
+        xhci_dev *d = &g_devs[i];
+        if (!d->valid) continue;
+        uart_dec("[USB] dev slot=", d->slot);
+        uart_hex("[USB]   class ", ((uint32_t)d->cls << 16) | ((uint32_t)d->subcls << 8) | d->proto);
+        if (d->cls == 0x08 && d->subcls == 0x06 && d->proto == 0x50)
+            uart_puts("[USB]   -> BOT/SCSI mass storage (ready for MSC)\n");
+    }
 }

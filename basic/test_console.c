@@ -146,3 +146,4 @@ void con_mouse(int *x, int *y, int *b) { if (x) *x = 0; if (y) *y = 0; if (b) *b
 
 // No USB keyboard in the harness: input is fed as characters, never key state.
 int con_keymods(void) { return 0; }
+int con_keys_down(int *out, int max) { (void)out; (void)max; return -1; }

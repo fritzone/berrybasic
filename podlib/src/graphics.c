@@ -77,6 +77,10 @@ void setrgbfillcolor(int r, int g, int b) { fill_pat = SOLID_FILL; fill_color = 
 
 // --- pixels and the current position ---------------------------------------
 void putpixel(int x, int y, int c) { berry_svc->gfx_putpixel(x, y, pal(c)); }
+void blitindexed(const unsigned char *idx, const unsigned int *palette,
+                 int w, int h, int dx, int dy, int scale) {
+    if (berry_svc->gfx_blit8) berry_svc->gfx_blit8(idx, palette, w, h, dx, dy, scale);
+}
 int  getpixel(int x, int y)        { return (int)berry_svc->gfx_getpixel(x, y); }
 void moveto(int x, int y)          { cp_x = x; cp_y = y; }
 void moverel(int dx, int dy)       { cp_x += dx; cp_y += dy; }

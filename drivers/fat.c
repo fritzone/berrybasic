@@ -1,38 +1,29 @@
 #include <stdint.h>
 #include "storage.h"
 #include "sd.h"
+#include "blockdev.h"
+#include "fs.h"
 #include "console.h"
 #include "uart.h"
 
 // ---------------------------------------------------------------------------
-// Minimal FAT16 / FAT32 driver with subdirectory support (8.3 names). Handles
-// paths ("DIR/SUB/FILE.EXT", absolute or relative to a current directory),
+// FAT16 / FAT32 driver with subdirectory support (8.3 + VFAT long names).
+// Handles paths ("DIR/SUB/FILE.EXT", absolute or relative to a current dir),
 // MKDIR / RMDIR / CD. All multi-byte fields are read byte-wise to stay
 // alignment-safe (-mstrict-align).
+//
+// It is a per-volume driver: every function takes a `fat_vol *V` and reaches
+// the storage through the block layer (blk_read/blk_write on V->blkdev), so the
+// SD card and a USB stick can each carry their own FAT volume. It registers an
+// fs_driver ("fat"); the single-volume stg_* surface below drives the boot
+// volume, and Phase 4 routes stg_* per volume through the same driver ops.
 // ---------------------------------------------------------------------------
-
-static int      fat_ok;
-static int      is_fat32;
-static uint32_t part_lba;             // LBA where the volume (BPB) starts
-static uint32_t sec_per_clus;
-static uint32_t fat_begin;            // first FAT sector (absolute LBA)
-static uint32_t fat_sectors;          // sectors per FAT
-static uint32_t num_fats;
-static uint32_t data_begin;           // sector of cluster 2 (absolute LBA)
-static uint32_t root_dir_lba;         // FAT16 root directory start (absolute)
-static uint32_t root_dir_sectors;     // FAT16 root directory size
-static uint32_t root_cluster;         // FAT32 root cluster
-static uint32_t total_clusters;
-
-// Current working directory: cluster of its start (0 == root), plus a display
-// path kept in sync for PWD / CAT. Subdirectories are supported via paths like
-// "SPRITES/CAT.PNG"; a leading '/' means absolute from the root.
-static uint32_t cwd_clus = 0;
-static char     cwd_path[128] = "/";
 
 #define EOC32 0x0FFFFFF8u
 #define EOC16 0xFFF8u
 #define SECSZ 512
+#define NAME_MAX 256
+#define STG_MAX_FILES 4
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t rd32(const uint8_t *p) {
@@ -45,148 +36,189 @@ static void wr32(uint8_t *p, uint32_t v) {
 }
 static void bzero512(uint8_t *p) { for (int i = 0; i < SECSZ; i++) p[i] = 0; }
 
-// Parse the BPB at the given absolute LBA into the layout globals.
-static int parse_bpb(uint32_t lba) {
+// Accumulates VFAT long-name fragments as a directory is scanned in order.
+typedef struct {
+    char    name[NAME_MAX];   // reconstructed name, forward order, NUL-terminated
+    int     want;             // fragment count promised by the "last" (0x40) entry
+    int     seen;             // fragments actually gathered
+    uint8_t cksum;            // short-name checksum they must all carry
+    int     started;          // a 0x40 entry has opened a run
+    int     ok;               // the run is still consistent
+} lfn_acc;
+
+// One open file channel: a 512-byte sector cache streaming to the volume.
+typedef struct {
+    int      used, writable;
+    char     n83[11];
+    uint32_t dir_lba;  int dir_off;   // directory entry location
+    uint32_t first_clus, size, pos;
+    uint32_t cur_clus, cur_cidx;      // last cluster walked to and its chain index
+    uint32_t cache_lba; int cache_dirty;
+    uint8_t  cache[SECSZ];            // cache_lba 0 == nothing cached (LBA 0 = MBR)
+} stg_file;
+
+// A mounted FAT volume: layout geometry, current directory, channel table and
+// the single active directory-enumeration cursor.
+typedef struct {
+    int      blkdev;
+    int      mounted;
+    int      is_fat32;
+    uint32_t part_lba;             // LBA where the volume (BPB) starts
+    uint32_t sec_per_clus;
+    uint32_t fat_begin;            // first FAT sector (absolute LBA)
+    uint32_t fat_sectors;          // sectors per FAT
+    uint32_t num_fats;
+    uint32_t data_begin;           // sector of cluster 2 (absolute LBA)
+    uint32_t root_dir_lba;         // FAT16 root directory start (absolute)
+    uint32_t root_dir_sectors;     // FAT16 root directory size
+    uint32_t root_cluster;         // FAT32 root cluster
+    uint32_t total_clusters;
+    // One-sector FAT cache: walking a cluster chain touches the same FAT sector
+    // for many consecutive clusters (128 FAT32 entries per 512-byte sector), so
+    // caching it turns a chain walk from one SD read per cluster into ~one per
+    // 128 - the difference between a fast and a glacial multi-MB file read.
+    uint32_t fatcache_lba;
+    int      fatcache_valid;
+    uint8_t  fatcache[SECSZ];
+    uint32_t cwd_clus;             // current dir first cluster (0 == root)
+    char     cwd_path[128];
+    stg_file files[STG_MAX_FILES];
+    // single active directory scan (DIROPEN / DIRNEXT)
+    uint32_t enum_clus, enum_n;
+    int      enum_e, enum_active;
+    lfn_acc  enum_lfn;
+} fat_vol;
+
+static fat_vol fat_vols[FS_MAX_VOL];
+static fat_vol *boot;                  // the boot volume backing the stg_* surface
+
+// Parse and VALIDATE the BPB at the given absolute LBA into V. A corrupt boot
+// sector must fail to mount rather than steer cluster arithmetic into nonsense.
+static int fat_parse_bpb(fat_vol *V, uint32_t lba) {
     uint8_t s[SECSZ];
-    if (sd_read(lba, 1, s)) return STG_EIO;
+    if (blk_read(V->blkdev, lba, 1, s)) return STG_EIO;
     if (rd16(s + 510) != 0xAA55) return STG_ENOFS;
 
     uint16_t bytes_per_sec = rd16(s + 11);
     if (bytes_per_sec != SECSZ) return STG_ENOFS;
-    sec_per_clus     = s[13];
+    uint32_t spc      = s[13];
+    if (spc == 0 || spc > 128 || (spc & (spc - 1)) != 0) return STG_ENOFS;  // power of two 1..128
     uint16_t reserved = rd16(s + 14);
-    num_fats         = s[16];
+    uint32_t nfats    = s[16];
+    if (nfats < 1 || nfats > 2) return STG_ENOFS;
     uint16_t root_ent = rd16(s + 17);
     uint16_t tot16    = rd16(s + 19);
     uint16_t fatsz16  = rd16(s + 22);
     uint32_t tot32    = rd32(s + 32);
     uint32_t fatsz32  = rd32(s + 36);
 
-    part_lba    = lba;
-    fat_sectors = fatsz16 ? fatsz16 : fatsz32;
-    fat_begin   = lba + reserved;
-    root_dir_sectors = ((uint32_t)root_ent * 32 + (SECSZ - 1)) / SECSZ;
-    root_dir_lba     = fat_begin + num_fats * fat_sectors;
-    data_begin       = root_dir_lba + root_dir_sectors;
-
+    uint32_t fat_sectors = fatsz16 ? fatsz16 : fatsz32;
+    if (fat_sectors == 0) return STG_ENOFS;
+    uint32_t root_dir_sectors = ((uint32_t)root_ent * 32 + (SECSZ - 1)) / SECSZ;
+    uint32_t meta = reserved + nfats * fat_sectors + root_dir_sectors;
     uint32_t tot_sectors = tot16 ? tot16 : tot32;
-    uint32_t data_sectors = tot_sectors - (reserved + num_fats * fat_sectors + root_dir_sectors);
-    total_clusters = sec_per_clus ? data_sectors / sec_per_clus : 0;
+    if (tot_sectors <= meta) return STG_ENOFS;              // would underflow
 
-    is_fat32   = (total_clusters >= 65525);
-    root_cluster = is_fat32 ? rd32(s + 44) : 0;
+    V->part_lba         = lba;
+    V->sec_per_clus     = spc;
+    V->num_fats         = nfats;
+    V->fat_sectors      = fat_sectors;
+    V->fat_begin        = lba + reserved;
+    V->root_dir_sectors = root_dir_sectors;
+    V->root_dir_lba     = V->fat_begin + nfats * fat_sectors;
+    V->data_begin       = V->root_dir_lba + root_dir_sectors;
+    V->total_clusters   = (tot_sectors - meta) / spc;
+    V->is_fat32         = (V->total_clusters >= 65525);
+    V->root_cluster     = V->is_fat32 ? rd32(s + 44) : 0;
+    if (V->is_fat32 && V->root_cluster < 2) return STG_ENOFS;
     return 0;
 }
 
-int stg_init(void) {
-    fat_ok = 0;
-    if (sd_init()) { uart_puts("[FAT] SD init failed\n"); return STG_EIO; }
-
-    // Decide superfloppy (BPB at LBA 0) vs MBR-partitioned.
-    uint8_t s[SECSZ];
-    if (sd_read(0, 1, s)) return STG_EIO;
-    uint32_t base = 0;
-    if (s[0] != 0xEB && s[0] != 0xE9) {       // not a BPB jump -> assume MBR
-        // The BerryBasic card has two partitions: #1 is the boot/system volume
-        // (firmware + kernel), #2 holds the user's BASIC programs. Mount #2 so
-        // CAT/LOAD/SAVE only ever see user files. Fall back to #1 for old
-        // single-partition cards. MBR entries are 16 bytes from 0x1BE; the
-        // start-LBA field is at +8, so entry 1 -> 454, entry 2 -> 470.
-        uint32_t p2 = rd32(s + 470);          // partition 2: start LBA
-        uint32_t p1 = rd32(s + 454);          // partition 1: start LBA
-        base = p2 ? p2 : p1;
-    }
-    int r = parse_bpb(base);
-    if (r) { uart_puts("[FAT] no FAT filesystem\n"); return r; }
-
-    fat_ok = 1;
-    uart_puts(is_fat32 ? "[FAT] mounted (FAT32)\n" : "[FAT] mounted (FAT16)\n");
-    return 0;
+static uint32_t clus_to_lba(fat_vol *V, uint32_t c) {
+    return V->data_begin + (c - 2) * V->sec_per_clus;
 }
 
-static uint32_t clus_to_lba(uint32_t c) { return data_begin + (c - 2) * sec_per_clus; }
-
-// Read FAT entry for cluster `c` (the next-cluster link).
-static uint32_t fat_get(uint32_t c) {
-    uint32_t es = is_fat32 ? 4 : 2;
+// Read the FAT entry for cluster `c` (the next-cluster link).
+static uint32_t fat_get(fat_vol *V, uint32_t c) {
+    uint32_t es = V->is_fat32 ? 4 : 2;
     uint32_t off = c * es;
-    uint32_t lba = fat_begin + off / SECSZ;
+    uint32_t lba = V->fat_begin + off / SECSZ;
     uint32_t idx = off % SECSZ;
-    uint8_t s[SECSZ];
-    if (sd_read(lba, 1, s)) return EOC32;
-    return is_fat32 ? (rd32(s + idx) & 0x0FFFFFFFu) : rd16(s + idx);
+    if (!V->fatcache_valid || V->fatcache_lba != lba) {
+        if (blk_read(V->blkdev, lba, 1, V->fatcache)) return EOC32;
+        V->fatcache_lba = lba; V->fatcache_valid = 1;
+    }
+    return V->is_fat32 ? (rd32(V->fatcache + idx) & 0x0FFFFFFFu) : rd16(V->fatcache + idx);
 }
 
-// Write FAT entry for cluster `c` to every FAT copy.
-static int fat_set(uint32_t c, uint32_t val) {
-    uint32_t es = is_fat32 ? 4 : 2;
+// Write the FAT entry for cluster `c` to every FAT copy.
+static int fat_set(fat_vol *V, uint32_t c, uint32_t val) {
+    uint32_t es = V->is_fat32 ? 4 : 2;
     uint32_t off = c * es;
     uint32_t idx = off % SECSZ;
     uint8_t s[SECSZ];
-    for (uint32_t f = 0; f < num_fats; f++) {
-        uint32_t lba = fat_begin + f * fat_sectors + off / SECSZ;
-        if (sd_read(lba, 1, s)) return STG_EIO;
-        if (is_fat32) wr32(s + idx, (rd32(s + idx) & 0xF0000000u) | (val & 0x0FFFFFFFu));
-        else          wr16(s + idx, (uint16_t)val);
-        if (sd_write(lba, 1, s)) return STG_EIO;
+    for (uint32_t f = 0; f < V->num_fats; f++) {
+        uint32_t lba = V->fat_begin + f * V->fat_sectors + off / SECSZ;
+        if (blk_read(V->blkdev, lba, 1, s)) return STG_EIO;
+        if (V->is_fat32) wr32(s + idx, (rd32(s + idx) & 0xF0000000u) | (val & 0x0FFFFFFFu));
+        else             wr16(s + idx, (uint16_t)val);
+        if (blk_write(V->blkdev, lba, 1, s)) return STG_EIO;
     }
+    V->fatcache_valid = 0;              // FAT changed: drop the read cache
     return 0;
 }
 
-static int is_eoc(uint32_t v) { return is_fat32 ? (v >= EOC32) : (v >= EOC16); }
+static int is_eoc(fat_vol *V, uint32_t v) { return V->is_fat32 ? (v >= EOC32) : (v >= EOC16); }
 
 // Find a free cluster, mark it end-of-chain, return its number (0 = disk full).
-static uint32_t fat_alloc(void) {
-    for (uint32_t c = 2; c < total_clusters + 2; c++) {
-        if (fat_get(c) == 0) {
-            fat_set(c, is_fat32 ? EOC32 : EOC16);
+static uint32_t fat_alloc(fat_vol *V) {
+    for (uint32_t c = 2; c < V->total_clusters + 2; c++) {
+        if (fat_get(V, c) == 0) {
+            fat_set(V, c, V->is_fat32 ? EOC32 : EOC16);
             return c;
         }
     }
     return 0;
 }
 
-static void free_chain(uint32_t c) {
-    while (c >= 2 && !is_eoc(c)) {
-        uint32_t next = fat_get(c);
-        fat_set(c, 0);
+static void free_chain(fat_vol *V, uint32_t c) {
+    while (c >= 2 && !is_eoc(V, c)) {
+        uint32_t next = fat_get(V, c);
+        fat_set(V, c, 0);
         c = next;
     }
 }
 
 // Absolute LBA of the n-th root-directory sector, or 0 past the end.
-static uint32_t root_dir_sector(uint32_t n) {
-    if (!is_fat32) return (n < root_dir_sectors) ? root_dir_lba + n : 0;
-    // FAT32: walk the root cluster chain.
-    uint32_t want_clus = n / sec_per_clus;
-    uint32_t within    = n % sec_per_clus;
-    uint32_t c = root_cluster;
+static uint32_t root_dir_sector(fat_vol *V, uint32_t n) {
+    if (!V->is_fat32) return (n < V->root_dir_sectors) ? V->root_dir_lba + n : 0;
+    uint32_t want_clus = n / V->sec_per_clus;
+    uint32_t within    = n % V->sec_per_clus;
+    uint32_t c = V->root_cluster;
     for (uint32_t i = 0; i < want_clus; i++) {
-        c = fat_get(c);
-        if (c < 2 || is_eoc(c)) return 0;
+        c = fat_get(V, c);
+        if (c < 2 || is_eoc(V, c)) return 0;
     }
-    return clus_to_lba(c) + within;
+    return clus_to_lba(V, c) + within;
 }
 
-// Absolute LBA of the n-th sector of directory `dir_clus` (0 == root, which may
-// be the FAT16 fixed area or the FAT32 root cluster chain), or 0 past the end.
-static uint32_t dir_sector(uint32_t dir_clus, uint32_t n) {
-    if (dir_clus == 0) return root_dir_sector(n);
-    uint32_t want_clus = n / sec_per_clus;
-    uint32_t within    = n % sec_per_clus;
+// Absolute LBA of the n-th sector of directory `dir_clus` (0 == root), or 0.
+static uint32_t dir_sector(fat_vol *V, uint32_t dir_clus, uint32_t n) {
+    if (dir_clus == 0) return root_dir_sector(V, n);
+    uint32_t want_clus = n / V->sec_per_clus;
+    uint32_t within    = n % V->sec_per_clus;
     uint32_t c = dir_clus;
     for (uint32_t i = 0; i < want_clus; i++) {
-        c = fat_get(c);
-        if (c < 2 || is_eoc(c)) return 0;
+        c = fat_get(V, c);
+        if (c < 2 || is_eoc(V, c)) return 0;
     }
-    return clus_to_lba(c) + within;
+    return clus_to_lba(V, c) + within;
 }
 
 // Convert a BASIC filename ("PROG" or "PROG.BAS") to a padded 8.3 entry name.
 static void name_to_83(const char *src, char out[11]) {
     for (int i = 0; i < 11; i++) out[i] = ' ';
     int i = 0;
-    // base name
     while (*src && *src != '.' && i < 8) {
         char c = *src++;
         if (c >= 'a' && c <= 'z') c -= 32;
@@ -215,16 +247,10 @@ static uint32_t ent_cluster(const uint8_t *e) {
 }
 
 // --- VFAT long file names (read side) ---------------------------------------
-// A long name is stored as a run of 32-byte entries (attr 0x0F) placed directly
-// *before* the file's 8.3 entry, in reverse order. Each fragment carries 13
-// UCS-2 characters and a checksum of the 8.3 name, so an orphaned run (short
-// entry rewritten by a non-LFN tool) can be detected and ignored. We rebuild the
-// name while scanning a directory forward, narrowing UCS-2 to the console's
-// 8-bit character set (code points >= 256, which the font can't render, become
-// '_'). Phase 1 is read-only: names are decoded for enumeration and matching,
-// but creating/deleting long names is not done here (see stg_write/stg_delete,
-// which stay 8.3-only, so no orphaned fragments are ever produced).
-#define NAME_MAX 256
+// A long name is a run of 32-byte entries (attr 0x0F) placed directly *before*
+// the file's 8.3 entry, in reverse order. Each fragment carries 13 UCS-2 chars
+// and a checksum of the 8.3 name. We rebuild the name while scanning a directory
+// forward, narrowing UCS-2 to the console's 8-bit set (code points >= 256 -> '_').
 
 // Checksum of the 11-byte short name that every LFN fragment stores (byte 13).
 static uint8_t lfn_checksum(const uint8_t n83[11]) {
@@ -232,16 +258,6 @@ static uint8_t lfn_checksum(const uint8_t n83[11]) {
     for (int i = 0; i < 11; i++) sum = ((sum & 1) << 7) + (sum >> 1) + n83[i];
     return sum;
 }
-
-// Accumulates LFN fragments as a directory is scanned in order.
-typedef struct {
-    char    name[NAME_MAX];   // reconstructed name, forward order, NUL-terminated
-    int     want;             // fragment count promised by the "last" (0x40) entry
-    int     seen;             // fragments actually gathered
-    uint8_t cksum;            // short-name checksum they must all carry
-    int     started;          // a 0x40 entry has opened a run
-    int     ok;               // the run is still consistent
-} lfn_acc;
 
 static void lfn_reset(lfn_acc *a) {
     a->started = 0; a->ok = 0; a->seen = 0; a->want = 0; a->name[0] = 0;
@@ -297,8 +313,7 @@ static int name_ci_eq(const char *a, const char *b) {
 }
 
 // Build the printable 8.3 name of an entry into out (>= 13 bytes), honouring the
-// VFAT lowercase flags (byte 12: 0x08 = lowercase base, 0x10 = lowercase ext) so
-// a PC-written "readme.txt" that fits 8.3 still reads back lower case.
+// VFAT lowercase flags (byte 12).
 static void short_name(const uint8_t *d, char *out) {
     int k = 0;
     int lc_base = d[12] & 0x08, lc_ext = d[12] & 0x10;
@@ -322,14 +337,14 @@ static void short_name(const uint8_t *d, char *out) {
 // name `n83` (fast path) or, when `want` is non-NULL, a VFAT long name compared
 // case-insensitively against `want`. On success fills *lba/*off with the 8.3
 // entry's location and copies the 32-byte entry into ent. Returns 0, else <0.
-static int dir_find_in(uint32_t dir_clus, const char n83[11], const char *want,
+static int dir_find_in(fat_vol *V, uint32_t dir_clus, const char n83[11], const char *want,
                        uint32_t *lba, int *off, uint8_t *ent) {
     uint8_t s[SECSZ];
     lfn_acc acc; lfn_reset(&acc);
     for (uint32_t n = 0; ; n++) {
-        uint32_t l = dir_sector(dir_clus, n);
+        uint32_t l = dir_sector(V, dir_clus, n);
         if (!l) return STG_ENOTFOUND;
-        if (sd_read(l, 1, s)) return STG_EIO;
+        if (blk_read(V->blkdev, l, 1, s)) return STG_EIO;
         for (int e = 0; e < SECSZ; e += 32) {
             uint8_t *d = s + e;
             if (d[0] == 0x00) return STG_ENOTFOUND;     // end of directory
@@ -352,46 +367,44 @@ static int dir_find_in(uint32_t dir_clus, const char n83[11], const char *want,
 }
 
 // Append a fresh, zeroed cluster to a directory's chain and return the LBA/off
-// of its first (empty) slot. `dir_clus` 0 means the root: the FAT16 fixed root
-// cannot grow, but the FAT32 root is a normal chain. Returns 0, else <0.
-static int grow_dir(uint32_t dir_clus, uint32_t *lba, int *off) {
+// of its first (empty) slot. Returns 0, else <0.
+static int grow_dir(fat_vol *V, uint32_t dir_clus, uint32_t *lba, int *off) {
     uint32_t chain = dir_clus;
     if (dir_clus == 0) {
-        if (!is_fat32) return STG_EFULL;                // FAT16 root is fixed size
-        chain = root_cluster;
+        if (!V->is_fat32) return STG_EFULL;             // FAT16 root is fixed size
+        chain = V->root_cluster;
     }
     uint32_t c = chain;                                 // walk to the last cluster
-    for (;;) { uint32_t nx = fat_get(c); if (nx < 2 || is_eoc(nx)) break; c = nx; }
-    uint32_t nc = fat_alloc();
+    for (;;) { uint32_t nx = fat_get(V, c); if (nx < 2 || is_eoc(V, nx)) break; c = nx; }
+    uint32_t nc = fat_alloc(V);
     if (!nc) return STG_EFULL;
-    if (fat_set(c, nc)) return STG_EIO;
+    if (fat_set(V, c, nc)) return STG_EIO;
     uint8_t z[SECSZ]; bzero512(z);
-    uint32_t base = clus_to_lba(nc);
-    for (uint32_t sc = 0; sc < sec_per_clus; sc++)
-        if (sd_write(base + sc, 1, z)) return STG_EIO;
+    uint32_t base = clus_to_lba(V, nc);
+    for (uint32_t sc = 0; sc < V->sec_per_clus; sc++)
+        if (blk_write(V->blkdev, base + sc, 1, z)) return STG_EIO;
     *lba = base; *off = 0;
     return 0;
 }
 
-// Find a free directory slot in `dir_clus` (deleted or never-used), growing the
-// directory if it is full. Returns 0, else <0.
-static int dir_find_free_in(uint32_t dir_clus, uint32_t *lba, int *off) {
+// Find a free directory slot in `dir_clus`, growing the directory if it is full.
+static int dir_find_free_in(fat_vol *V, uint32_t dir_clus, uint32_t *lba, int *off) {
     uint8_t s[SECSZ];
     for (uint32_t n = 0; ; n++) {
-        uint32_t l = dir_sector(dir_clus, n);
-        if (!l) return grow_dir(dir_clus, lba, off);    // ran off the end -> extend
-        if (sd_read(l, 1, s)) return STG_EIO;
+        uint32_t l = dir_sector(V, dir_clus, n);
+        if (!l) return grow_dir(V, dir_clus, lba, off); // ran off the end -> extend
+        if (blk_read(V->blkdev, l, 1, s)) return STG_EIO;
         for (int e = 0; e < SECSZ; e += 32)
             if (s[e] == 0x00 || s[e] == 0xE5) { *lba = l; *off = e; return 0; }
     }
 }
 
-// Write a fresh 32-byte directory entry (name/attr/first-cluster/size) into the
-// slot at (lba, off). Uses a fixed 2026-01-01 timestamp (no RTC). Returns 0/err.
-static int write_dir_entry(uint32_t lba, int off, const char n83[11],
+// Write a fresh 32-byte directory entry into the slot at (lba, off). Uses a
+// fixed 2026-01-01 timestamp (no RTC). Returns 0/err.
+static int write_dir_entry(fat_vol *V, uint32_t lba, int off, const char n83[11],
                            uint8_t attr, uint32_t clus, uint32_t size) {
     uint8_t s[SECSZ];
-    if (sd_read(lba, 1, s)) return STG_EIO;
+    if (blk_read(V->blkdev, lba, 1, s)) return STG_EIO;
     uint8_t *e = s + off;
     for (int i = 0; i < 32; i++) e[i] = 0;
     for (int i = 0; i < 11; i++) e[i] = (uint8_t)n83[i];
@@ -402,17 +415,10 @@ static int write_dir_entry(uint32_t lba, int off, const char n83[11],
     wr16(e + 26, (uint16_t)(clus & 0xFFFF));
     wr16(e + 20, (uint16_t)((clus >> 16) & 0xFFFF));
     wr32(e + 28, size);
-    return sd_write(lba, 1, s) ? STG_EIO : 0;
+    return blk_write(V->blkdev, lba, 1, s) ? STG_EIO : 0;
 }
 
 // --- VFAT long file names (write side) --------------------------------------
-// Creating a long name means writing the run of 0x0F fragment entries followed
-// by a normal 8.3 entry whose short name is a unique NAME~n alias. Deleting one
-// means clearing that whole run, not just the 8.3 entry (or a PC would see
-// orphaned fragments). A name that already fits 8.3 skips all of this and gets a
-// single plain entry, exactly as before.
-
-// Is `c` (assumed already upper-cased) legal in a FAT short (8.3) name?
 static int sfc_ok(char c) {
     if (c >= 'A' && c <= 'Z') return 1;
     if (c >= '0' && c <= '9') return 1;
@@ -420,9 +426,7 @@ static int sfc_ok(char c) {
     return 0;
 }
 
-// True if `name` can be stored as a plain 8.3 entry with no loss (<=8 base, <=3
-// ext, one dot, every character legal case-insensitively). Otherwise it needs a
-// long-name entry. Spaces, extra dots and non-ASCII all force a long name.
+// True if `name` fits a plain 8.3 entry with no loss.
 static int name_is_83(const char *name) {
     int base = 0, ext = 0, seen_dot = 0, i = 0;
     for (i = 0; name[i]; i++) {
@@ -438,9 +442,7 @@ static int name_is_83(const char *name) {
     return 1;
 }
 
-// Build the basis (up to 8 chars) and extension (up to 3) for a short alias from
-// a long name: drop spaces and interior dots, upper-case, map anything illegal to
-// '_'. The extension is taken from the last dot.
+// Build the basis + extension for a short alias from a long name.
 static void short_basis(const char *name, char *basis, int *blen, char *ext, int *elen) {
     int n = 0; while (name[n]) n++;
     int last_dot = -1;
@@ -464,9 +466,8 @@ static void short_basis(const char *name, char *basis, int *blen, char *ext, int
     *blen = bl; *elen = el;
 }
 
-// Choose a unique short alias "BASIS~n.EXT" for `name` within `parent`, into the
-// padded 11-byte form. Returns 0, or STG_EFULL if a million names collide.
-static int make_alias(uint32_t parent, const char *name, char out83[11]) {
+// Choose a unique short alias "BASIS~n.EXT" for `name` within `parent`.
+static int make_alias(fat_vol *V, uint32_t parent, const char *name, char out83[11]) {
     char basis[8], ext[3]; int bl, el;
     short_basis(name, basis, &bl, ext, &el);
     for (uint32_t seq = 1; seq < 1000000u; seq++) {
@@ -484,7 +485,7 @@ static int make_alias(uint32_t parent, const char *name, char out83[11]) {
         e[k++] = '~';
         for (int i = 0; i < nl; i++) e[k++] = num[i];
         for (int i = 0; i < el; i++) e[8 + i] = ext[i];
-        if (dir_find_in(parent, e, 0, 0, 0, 0) == STG_ENOTFOUND) {
+        if (dir_find_in(V, parent, e, 0, 0, 0, 0) == STG_ENOTFOUND) {
             for (int i = 0; i < 11; i++) out83[i] = e[i];
             return 0;
         }
@@ -493,27 +494,27 @@ static int make_alias(uint32_t parent, const char *name, char out83[11]) {
 }
 
 // Read-modify-write one raw 32-byte directory entry into (lba, off).
-static int put_raw_entry(uint32_t lba, int off, const uint8_t e[32]) {
+static int put_raw_entry(fat_vol *V, uint32_t lba, int off, const uint8_t e[32]) {
     uint8_t s[SECSZ];
-    if (sd_read(lba, 1, s)) return STG_EIO;
+    if (blk_read(V->blkdev, lba, 1, s)) return STG_EIO;
     for (int i = 0; i < 32; i++) s[off + i] = e[i];
-    return sd_write(lba, 1, s) ? STG_EIO : 0;
+    return blk_write(V->blkdev, lba, 1, s) ? STG_EIO : 0;
 }
 
-// Find `count` consecutive free slots in `dir_clus` (growing the directory when
-// it runs out), returning each slot's (lba, off). `count` is small (<= 21).
-static int dir_find_run(uint32_t dir_clus, int count, uint32_t *lbas, int *offs) {
+// Find `count` consecutive free slots in `dir_clus`, growing the directory as
+// needed. `count` is small (<= 21).
+static int dir_find_run(fat_vol *V, uint32_t dir_clus, int count, uint32_t *lbas, int *offs) {
     int run = 0;
     uint8_t s[SECSZ];
     for (uint32_t n = 0; ; n++) {
-        uint32_t l = dir_sector(dir_clus, n);
+        uint32_t l = dir_sector(V, dir_clus, n);
         if (!l) {
             uint32_t glba; int goff;                    // ran off the end: extend
-            int r = grow_dir(dir_clus, &glba, &goff);
+            int r = grow_dir(V, dir_clus, &glba, &goff);
             if (r) return r;
-            n--; continue;                              // retry: dir_sector(n) now resolves
+            n--; continue;
         }
-        if (sd_read(l, 1, s)) return STG_EIO;
+        if (blk_read(V->blkdev, l, 1, s)) return STG_EIO;
         for (int e = 0; e < SECSZ; e += 32) {
             if (s[e] == 0x00 || s[e] == 0xE5) {         // free slot
                 lbas[run] = l; offs[run] = e;
@@ -525,36 +526,32 @@ static int dir_find_run(uint32_t dir_clus, int count, uint32_t *lbas, int *offs)
     }
 }
 
-// LFN fragments carry 13 UCS-2 chars at these byte offsets within the entry.
 static const int lfn_pos[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
 
-// Create a directory entry for `name` (attr/cluster/size), writing an LFN run +
-// short alias when the name doesn't fit 8.3, else a single plain 8.3 entry. On
-// success returns the 8.3 entry's location in *lba/*off and its short name in
-// n83 (so the caller can update the size later).
-static int dir_create_entry(uint32_t parent, const char *name, uint8_t attr,
+// Create a directory entry for `name`, writing an LFN run + short alias when the
+// name doesn't fit 8.3, else a single plain 8.3 entry.
+static int dir_create_entry(fat_vol *V, uint32_t parent, const char *name, uint8_t attr,
                             uint32_t clus, uint32_t size,
                             uint32_t *lba, int *off, char n83[11]) {
     if (name_is_83(name)) {
         name_to_83(name, n83);
         uint32_t dlba; int doff;
-        int r = dir_find_free_in(parent, &dlba, &doff);
+        int r = dir_find_free_in(V, parent, &dlba, &doff);
         if (r) return r;
-        if ((r = write_dir_entry(dlba, doff, n83, attr, clus, size))) return r;
+        if ((r = write_dir_entry(V, dlba, doff, n83, attr, clus, size))) return r;
         if (lba) *lba = dlba;
         if (off) *off = doff;
         return 0;
     }
 
-    // Long name: alias + a run of (nfrag LFN entries + 1 short entry).
-    int r = make_alias(parent, name, n83);
+    int r = make_alias(V, parent, name, n83);
     if (r) return r;
     int len = 0; while (name[len]) len++;
     if (len > 255) len = 255;
     int nfrag = (len + 12) / 13;                        // 13 UCS-2 chars per entry
     int count = nfrag + 1;
     uint32_t lbas[21]; int offs[21];
-    if ((r = dir_find_run(parent, count, lbas, offs))) return r;
+    if ((r = dir_find_run(V, parent, count, lbas, offs))) return r;
 
     uint8_t cksum = lfn_checksum((const uint8_t *)n83);
     for (int i = 0; i < nfrag; i++) {                   // physical order = reverse seq
@@ -570,24 +567,22 @@ static int dir_create_entry(uint32_t parent, const char *name, uint8_t attr,
             f[lfn_pos[j]] = (uint8_t)(u & 0xFF);
             f[lfn_pos[j] + 1] = (uint8_t)(u >> 8);
         }
-        if ((r = put_raw_entry(lbas[i], offs[i], f))) return r;
+        if ((r = put_raw_entry(V, lbas[i], offs[i], f))) return r;
     }
-    if ((r = write_dir_entry(lbas[nfrag], offs[nfrag], n83, attr, clus, size))) return r;
+    if ((r = write_dir_entry(V, lbas[nfrag], offs[nfrag], n83, attr, clus, size))) return r;
     if (lba) *lba = lbas[nfrag];
     if (off) *off = offs[nfrag];
     return 0;
 }
 
-// Erase the 8.3 entry at (tgt_lba, tgt_off) together with the run of LFN
-// fragments immediately preceding it. Re-scans so the fragment slots (which may
-// live in earlier sectors) are located precisely.
-static int dir_erase(uint32_t dir_clus, uint32_t tgt_lba, int tgt_off) {
+// Erase the 8.3 entry at (tgt_lba, tgt_off) together with its preceding LFN run.
+static int dir_erase(fat_vol *V, uint32_t dir_clus, uint32_t tgt_lba, int tgt_off) {
     uint8_t s[SECSZ];
     uint32_t run_lba[20]; int run_off[20]; int run = 0;
     for (uint32_t n = 0; ; n++) {
-        uint32_t l = dir_sector(dir_clus, n);
+        uint32_t l = dir_sector(V, dir_clus, n);
         if (!l) return STG_ENOTFOUND;
-        if (sd_read(l, 1, s)) return STG_EIO;
+        if (blk_read(V->blkdev, l, 1, s)) return STG_EIO;
         for (int e = 0; e < SECSZ; e += 32) {
             uint8_t *d = s + e;
             if (d[0] == 0x00) return STG_ENOTFOUND;
@@ -600,13 +595,13 @@ static int dir_erase(uint32_t dir_clus, uint32_t tgt_lba, int tgt_off) {
             if (l == tgt_lba && e == tgt_off) {         // the entry to erase
                 for (int i = 0; i < run; i++) {
                     uint8_t t[SECSZ];
-                    if (sd_read(run_lba[i], 1, t)) return STG_EIO;
+                    if (blk_read(V->blkdev, run_lba[i], 1, t)) return STG_EIO;
                     t[run_off[i]] = 0xE5;
-                    if (sd_write(run_lba[i], 1, t)) return STG_EIO;
+                    if (blk_write(V->blkdev, run_lba[i], 1, t)) return STG_EIO;
                 }
-                if (sd_read(l, 1, s)) return STG_EIO;   // re-read (a fragment may share it)
+                if (blk_read(V->blkdev, l, 1, s)) return STG_EIO;   // re-read (fragment may share)
                 s[e] = 0xE5;
-                return sd_write(l, 1, s) ? STG_EIO : 0;
+                return blk_write(V->blkdev, l, 1, s) ? STG_EIO : 0;
             }
             run = 0;
         }
@@ -614,12 +609,12 @@ static int dir_erase(uint32_t dir_clus, uint32_t tgt_lba, int tgt_off) {
 }
 
 // A directory holds no files (only "."/".." and free slots). Returns 1 if empty.
-static int dir_is_empty(uint32_t dir_clus) {
+static int dir_is_empty(fat_vol *V, uint32_t dir_clus) {
     uint8_t s[SECSZ];
     for (uint32_t n = 0; ; n++) {
-        uint32_t l = dir_sector(dir_clus, n);
+        uint32_t l = dir_sector(V, dir_clus, n);
         if (!l) return 1;                               // reached the end
-        if (sd_read(l, 1, s)) return 0;                 // on error, refuse to remove
+        if (blk_read(V->blkdev, l, 1, s)) return 0;     // on error, refuse to remove
         for (int e = 0; e < SECSZ; e += 32) {
             uint8_t *d = s + e;
             if (d[0] == 0x00) return 1;                 // end of directory
@@ -632,9 +627,6 @@ static int dir_is_empty(uint32_t dir_clus) {
 }
 
 // --- path resolution --------------------------------------------------------
-// Copy the next '/'-separated component of *pp into comp (up to NAME_MAX-1
-// chars, so long names fit), advance *pp past it. Returns 1 if a component was
-// read, 0 at end of the path.
 static int next_comp(const char **pp, char comp[NAME_MAX]) {
     const char *p = *pp;
     while (*p == '/') p++;
@@ -646,24 +638,22 @@ static int next_comp(const char **pp, char comp[NAME_MAX]) {
     return 1;
 }
 
-// Move from directory `cur` into the child named by the raw component `comp`
-// (handling "." and ".."). Sets *out to the child directory cluster (0 = root).
-// Returns 0, or an error if the component is missing or is not a directory.
-static int descend(uint32_t cur, const char *comp, uint32_t *out) {
+// Move from directory `cur` into the child named by `comp` ("." / ".." handled).
+static int descend(fat_vol *V, uint32_t cur, const char *comp, uint32_t *out) {
     if (comp[0] == '.' && comp[1] == 0) { *out = cur; return 0; }        // "."
     if (comp[0] == '.' && comp[1] == '.' && comp[2] == 0) {              // ".."
         if (cur == 0) { *out = 0; return 0; }                           // root's parent
         char dd[11]; for (int i = 0; i < 11; i++) dd[i] = ' ';
         dd[0] = '.'; dd[1] = '.';
         uint8_t ent[32];
-        int r = dir_find_in(cur, dd, 0, 0, 0, ent);
+        int r = dir_find_in(V, cur, dd, 0, 0, 0, ent);
         if (r) return r;
         *out = ent_cluster(ent);                                        // 0 => root
         return 0;
     }
     char n83[11]; name_to_83(comp, n83);
     uint8_t ent[32];
-    int r = dir_find_in(cur, n83, comp, 0, 0, ent);                     // match long names too
+    int r = dir_find_in(V, cur, n83, comp, 0, 0, ent);                  // match long names too
     if (r) return r;
     if (!(ent[11] & 0x10)) return STG_ENOTFOUND;                        // not a directory
     *out = ent_cluster(ent);
@@ -671,20 +661,17 @@ static int descend(uint32_t cur, const char *comp, uint32_t *out) {
 }
 
 // Resolve a path to its parent directory cluster and the final component's 8.3
-// name (the leaf need not exist; the intermediate directories must). When
-// `leaf_orig` is non-NULL it also receives the leaf's original (long, cased)
-// spelling, so callers can match it against VFAT long names. Returns 0/err;
-// STG_ENOTFOUND if the path has no final component (e.g. "" or "/").
-static int resolve_parent(const char *path, uint32_t *parent, char leaf83[11],
+// name (the leaf need not exist; the intermediates must).
+static int resolve_parent(fat_vol *V, const char *path, uint32_t *parent, char leaf83[11],
                           char *leaf_orig) {
-    uint32_t cur = (path[0] == '/') ? 0 : cwd_clus;
+    uint32_t cur = (path[0] == '/') ? 0 : V->cwd_clus;
     const char *p = path;
     char comp[NAME_MAX], pending[NAME_MAX];
     int have = 0;
     while (next_comp(&p, comp)) {
         if (have) {
             uint32_t nxt;
-            int r = descend(cur, pending, &nxt);
+            int r = descend(V, cur, pending, &nxt);
             if (r) return r;
             cur = nxt;
         }
@@ -698,13 +685,14 @@ static int resolve_parent(const char *path, uint32_t *parent, char leaf83[11],
     return 0;
 }
 
-int stg_read(const char *name, char *buf, int maxlen) {
-    if (!fat_ok) return STG_ENOFS;
+// --- whole-file read/write/delete -------------------------------------------
+static int fatv_read(fat_vol *V, const char *name, char *buf, int maxlen) {
+    if (!V->mounted) return STG_ENOFS;
     uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
-    int r = resolve_parent(name, &parent, leaf, leaf_orig);
+    int r = resolve_parent(V, name, &parent, leaf, leaf_orig);
     if (r) return r;
     uint8_t ent[32];
-    r = dir_find_in(parent, leaf, leaf_orig, 0, 0, ent);
+    r = dir_find_in(V, parent, leaf, leaf_orig, 0, 0, ent);
     if (r) return r;
     if (ent[11] & 0x10) return STG_ENOTFOUND;           // it's a directory
 
@@ -714,112 +702,88 @@ int stg_read(const char *name, char *buf, int maxlen) {
 
     uint8_t s[SECSZ];
     uint32_t got = 0;
-    while (clus >= 2 && !is_eoc(clus) && got < size) {
-        uint32_t base = clus_to_lba(clus);
-        for (uint32_t sc = 0; sc < sec_per_clus && got < size; sc++) {
-            if (sd_read(base + sc, 1, s)) return STG_EIO;
+    while (clus >= 2 && !is_eoc(V, clus) && got < size) {
+        uint32_t base = clus_to_lba(V, clus);
+        for (uint32_t sc = 0; sc < V->sec_per_clus && got < size; sc++) {
+            if (blk_read(V->blkdev, base + sc, 1, s)) return STG_EIO;
             for (int i = 0; i < SECSZ && got < size; i++) buf[got++] = (char)s[i];
         }
-        clus = fat_get(clus);
+        clus = fat_get(V, clus);
     }
     return (int)got;
 }
 
-int stg_delete(const char *name) {
-    if (!fat_ok) return STG_ENOFS;
+static int fatv_delete(fat_vol *V, const char *name) {
+    if (!V->mounted) return STG_ENOFS;
     uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
-    int r = resolve_parent(name, &parent, leaf, leaf_orig);
+    int r = resolve_parent(V, name, &parent, leaf, leaf_orig);
     if (r) return r;
     uint32_t lba; int off; uint8_t ent[32];
-    r = dir_find_in(parent, leaf, leaf_orig, &lba, &off, ent);
+    r = dir_find_in(V, parent, leaf, leaf_orig, &lba, &off, ent);
     if (r) return r;
     if (ent[11] & 0x10) return STG_ENOTFOUND;           // use RMDIR for directories
 
     uint32_t clus = ent_cluster(ent);
-    if (clus >= 2) free_chain(clus);
-    return dir_erase(parent, lba, off);                 // 8.3 entry + any LFN run
+    if (clus >= 2) free_chain(V, clus);
+    return dir_erase(V, parent, lba, off);
 }
 
-int stg_write(const char *name, const char *data, int len) {
-    if (!fat_ok) return STG_ENOFS;
+static int fatv_write(fat_vol *V, const char *name, const char *data, int len) {
+    if (!V->mounted) return STG_ENOFS;
     uint32_t parent; char n83[11]; char leaf_orig[NAME_MAX];
-    int pr = resolve_parent(name, &parent, n83, leaf_orig);
+    int pr = resolve_parent(V, name, &parent, n83, leaf_orig);
     if (pr) return pr;
 
-    // Overwrite: drop any existing file of the same name first (refuse a dir).
     uint32_t old_lba; int old_off; uint8_t old[32];
-    if (dir_find_in(parent, n83, leaf_orig, &old_lba, &old_off, old) == 0) {
+    if (dir_find_in(V, parent, n83, leaf_orig, &old_lba, &old_off, old) == 0) {
         if (old[11] & 0x10) return STG_EIO;             // a directory of that name
         uint32_t oc = ent_cluster(old);
-        if (oc >= 2) free_chain(oc);
-        dir_erase(parent, old_lba, old_off);            // 8.3 entry + any LFN run
+        if (oc >= 2) free_chain(V, oc);
+        dir_erase(V, parent, old_lba, old_off);
     }
 
-    // Allocate and fill the cluster chain.
     uint32_t first = 0, prev = 0;
     uint32_t written = 0;
     uint8_t s[SECSZ];
 
     while (written < (uint32_t)len) {
-        uint32_t c = fat_alloc();
-        if (!c) { if (first) free_chain(first); return STG_EFULL; }
+        uint32_t c = fat_alloc(V);
+        if (!c) { if (first) free_chain(V, first); return STG_EFULL; }
         if (!first) first = c;
-        if (prev)   fat_set(prev, c);
+        if (prev)   fat_set(V, prev, c);
         prev = c;
 
-        uint32_t base = clus_to_lba(c);
-        for (uint32_t sc = 0; sc < sec_per_clus; sc++) {
+        uint32_t base = clus_to_lba(V, c);
+        for (uint32_t sc = 0; sc < V->sec_per_clus; sc++) {
             bzero512(s);
             for (int i = 0; i < SECSZ && written < (uint32_t)len; i++)
                 s[i] = (uint8_t)data[written++];
-            if (sd_write(base + sc, 1, s)) { free_chain(first); return STG_EIO; }
+            if (blk_write(V->blkdev, base + sc, 1, s)) { free_chain(V, first); return STG_EIO; }
         }
     }
 
-    // Create the directory entry (a long-name run when `name` needs it).
-    int r = dir_create_entry(parent, leaf_orig, 0x20, first, (uint32_t)len, 0, 0, n83);
-    if (r) { if (first) free_chain(first); return r; }
+    int r = dir_create_entry(V, parent, leaf_orig, 0x20, first, (uint32_t)len, 0, 0, n83);
+    if (r) { if (first) free_chain(V, first); return r; }
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Byte-level channel (file-handle) I/O. Each open channel keeps one 512-byte
-// sector cache and streams straight to the SD card: writes grow the cluster
-// chain live and the directory size is written back on close. Sequential access
-// is O(n) thanks to the cur_clus/cur_cidx forward-walk cache.
-// ---------------------------------------------------------------------------
-#define STG_MAX_FILES 4
-
-typedef struct {
-    int      used, writable;
-    char     n83[11];
-    uint32_t dir_lba;  int dir_off;   // directory entry location
-    uint32_t first_clus, size, pos;
-    uint32_t cur_clus, cur_cidx;      // last cluster walked to and its chain index
-    uint32_t cache_lba; int cache_dirty;
-    uint8_t  cache[SECSZ];            // 0 in cache_lba == nothing cached (LBA 0 = MBR)
-} stg_file;
-
-static stg_file files[STG_MAX_FILES];
-
-static stg_file *handle(int ch) {
+// --- byte-level channel I/O -------------------------------------------------
+static stg_file *handle(fat_vol *V, int ch) {
     if (ch < 1 || ch > STG_MAX_FILES) return 0;
-    return files[ch - 1].used ? &files[ch - 1] : 0;
+    return V->files[ch - 1].used ? &V->files[ch - 1] : 0;
 }
 
-static int flush_cache(stg_file *f) {
+static int flush_cache(fat_vol *V, stg_file *f) {
     if (f->cache_lba && f->cache_dirty) {
-        if (sd_write(f->cache_lba, 1, f->cache)) return STG_EIO;
+        if (blk_write(V->blkdev, f->cache_lba, 1, f->cache)) return STG_EIO;
         f->cache_dirty = 0;
     }
     return 0;
 }
 
-// Load the sector holding byte f->pos into f->cache and return the byte offset
-// (0..511) within it. When for_write, missing clusters are allocated (growing
-// the file); otherwise reading past the allocated chain is an error.
-static int cache_seek(stg_file *f, int for_write) {
-    uint32_t bpc = sec_per_clus * SECSZ;
+// Load the sector holding byte f->pos into f->cache and return the byte offset.
+static int cache_seek(fat_vol *V, stg_file *f, int for_write) {
+    uint32_t bpc = V->sec_per_clus * SECSZ;
     uint32_t cidx = f->pos / bpc;
     uint32_t within = f->pos - cidx * bpc;
     uint32_t sec_in_clus = within / SECSZ;
@@ -828,7 +792,7 @@ static int cache_seek(stg_file *f, int for_write) {
     uint32_t c, start_idx;
     if (f->first_clus < 2) {
         if (!for_write) return STG_EIO;
-        c = fat_alloc();
+        c = fat_alloc(V);
         if (!c) return STG_EFULL;
         f->first_clus = c; f->cur_clus = c; f->cur_cidx = 0;
         start_idx = 0;
@@ -838,53 +802,52 @@ static int cache_seek(stg_file *f, int for_write) {
         c = f->first_clus; start_idx = 0;           // seek backwards: restart
     }
     for (uint32_t i = start_idx; i < cidx; i++) {
-        uint32_t nxt = fat_get(c);
-        if (nxt < 2 || is_eoc(nxt)) {
+        uint32_t nxt = fat_get(V, c);
+        if (nxt < 2 || is_eoc(V, nxt)) {
             if (!for_write) return STG_EIO;
-            nxt = fat_alloc();
+            nxt = fat_alloc(V);
             if (!nxt) return STG_EFULL;
-            fat_set(c, nxt);
+            fat_set(V, c, nxt);
         }
         c = nxt;
     }
     f->cur_clus = c; f->cur_cidx = cidx;
 
-    uint32_t lba = clus_to_lba(c) + sec_in_clus;
+    uint32_t lba = clus_to_lba(V, c) + sec_in_clus;
     if (f->cache_lba != lba) {
-        int r = flush_cache(f);
+        int r = flush_cache(V, f);
         if (r) return r;
-        if (sd_read(lba, 1, f->cache)) return STG_EIO;
+        if (blk_read(V->blkdev, lba, 1, f->cache)) return STG_EIO;
         f->cache_lba = lba;
         f->cache_dirty = 0;
     }
     return (int)off;
 }
 
-// Write the file's current first cluster + size back into its directory entry.
-static int update_dir_entry(stg_file *f) {
+static int update_dir_entry(fat_vol *V, stg_file *f) {
     uint8_t s[SECSZ];
-    if (sd_read(f->dir_lba, 1, s)) return STG_EIO;
+    if (blk_read(V->blkdev, f->dir_lba, 1, s)) return STG_EIO;
     uint8_t *e = s + f->dir_off;
     wr16(e + 26, (uint16_t)(f->first_clus & 0xFFFF));
     wr16(e + 20, (uint16_t)((f->first_clus >> 16) & 0xFFFF));
     wr32(e + 28, f->size);
-    if (sd_write(f->dir_lba, 1, s)) return STG_EIO;
+    if (blk_write(V->blkdev, f->dir_lba, 1, s)) return STG_EIO;
     return 0;
 }
 
-int stg_open(const char *name, int mode) {
-    if (!fat_ok) return 0;
+static int fatv_open(fat_vol *V, const char *name, int mode) {
+    if (!V->mounted) return 0;
     int idx = -1;
-    for (int i = 0; i < STG_MAX_FILES; i++) if (!files[i].used) { idx = i; break; }
+    for (int i = 0; i < STG_MAX_FILES; i++) if (!V->files[i].used) { idx = i; break; }
     if (idx < 0) return 0;                              // too many open channels
-    stg_file *f = &files[idx];
+    stg_file *f = &V->files[idx];
     for (int i = 0; i < (int)sizeof(*f); i++) ((uint8_t *)f)[i] = 0;
 
     uint32_t parent; char n83[11]; char leaf_orig[NAME_MAX];
-    if (resolve_parent(name, &parent, n83, leaf_orig)) return 0;  // bad path
+    if (resolve_parent(V, name, &parent, n83, leaf_orig)) return 0;  // bad path
 
     uint32_t lba; int off; uint8_t ent[32];
-    int found = (dir_find_in(parent, n83, leaf_orig, &lba, &off, ent) == 0);
+    int found = (dir_find_in(V, parent, n83, leaf_orig, &lba, &off, ent) == 0);
     if (found && (ent[11] & 0x10)) return 0;           // can't open a directory
 
     if (mode == STG_M_READ || mode == STG_M_UPDATE) {
@@ -897,11 +860,11 @@ int stg_open(const char *name, int mode) {
     } else {                                           // STG_M_WRITE: create/truncate
         if (found) {                                   // drop old chain + entry (LFN run too)
             uint32_t oc = ent_cluster(ent);
-            if (oc >= 2) free_chain(oc);
-            dir_erase(parent, lba, off);
+            if (oc >= 2) free_chain(V, oc);
+            dir_erase(V, parent, lba, off);
         }
         uint32_t dlba; int doff;
-        if (dir_create_entry(parent, leaf_orig, 0x20, 0, 0, &dlba, &doff, n83)) return 0;
+        if (dir_create_entry(V, parent, leaf_orig, 0x20, 0, 0, &dlba, &doff, n83)) return 0;
         for (int i = 0; i < 11; i++) f->n83[i] = n83[i];
         f->dir_lba = dlba; f->dir_off = doff;
         f->first_clus = 0; f->size = 0; f->writable = 1;
@@ -910,39 +873,62 @@ int stg_open(const char *name, int mode) {
     return idx + 1;
 }
 
-int stg_close(int ch) {
-    stg_file *f = handle(ch);
+static int fatv_close(fat_vol *V, int ch) {
+    stg_file *f = handle(V, ch);
     if (!f) return STG_EBADF;
     int r = 0;
     if (f->writable) {
-        if (flush_cache(f)) r = STG_EIO;
-        if (update_dir_entry(f)) r = STG_EIO;
+        if (flush_cache(V, f)) r = STG_EIO;
+        if (update_dir_entry(V, f)) r = STG_EIO;
     }
     f->used = 0;
     return r;
 }
 
-void stg_close_all(void) {
+static void fatv_close_all(fat_vol *V) {
     for (int i = 0; i < STG_MAX_FILES; i++)
-        if (files[i].used) stg_close(i + 1);
+        if (V->files[i].used) fatv_close(V, i + 1);
 }
 
-int stg_getb(int ch) {
-    stg_file *f = handle(ch);
+static int fatv_getb(fat_vol *V, int ch) {
+    stg_file *f = handle(V, ch);
     if (!f) return STG_EBADF;
     if (f->pos >= f->size) return -1;                  // EOF
-    int off = cache_seek(f, 0);
+    int off = cache_seek(V, f, 0);
     if (off < 0) return off;
     int b = f->cache[off];
     f->pos++;
     return b;
 }
 
-int stg_putb(int ch, int byte) {
-    stg_file *f = handle(ch);
+// Bulk read: copy up to `n` bytes from the channel into buf, a whole sector-cache
+// run at a time (far faster than one fatv_getb per byte for big reads like a WAD
+// lump). Returns bytes read (short at EOF), or <0 on error.
+static int fatv_readn(fat_vol *V, int ch, void *buf, int n) {
+    stg_file *f = handle(V, ch);
+    if (!f) return STG_EBADF;
+    if (n < 0) return 0;
+    uint8_t *out = (uint8_t *)buf;
+    int got = 0;
+    while (got < n && f->pos < f->size) {
+        int off = cache_seek(V, f, 0);                 // load the sector for f->pos
+        if (off < 0) return got > 0 ? got : off;
+        int chunk = SECSZ - off;                       // rest of this cached sector
+        if (chunk > n - got) chunk = n - got;
+        uint32_t remain = f->size - f->pos;
+        if ((uint32_t)chunk > remain) chunk = (int)remain;
+        for (int i = 0; i < chunk; i++) out[got + i] = f->cache[off + i];
+        got += chunk;
+        f->pos += chunk;
+    }
+    return got;
+}
+
+static int fatv_putb(fat_vol *V, int ch, int byte) {
+    stg_file *f = handle(V, ch);
     if (!f) return STG_EBADF;
     if (!f->writable) return STG_EBADF;
-    int off = cache_seek(f, 1);
+    int off = cache_seek(V, f, 1);
     if (off < 0) return off;
     f->cache[off] = (uint8_t)byte;
     f->cache_dirty = 1;
@@ -951,12 +937,12 @@ int stg_putb(int ch, int byte) {
     return 0;
 }
 
-long stg_size(int ch) { stg_file *f = handle(ch); return f ? (long)f->size : STG_EBADF; }
-long stg_tell(int ch) { stg_file *f = handle(ch); return f ? (long)f->pos  : STG_EBADF; }
-int  stg_eof(int ch)  { stg_file *f = handle(ch); return f ? (f->pos >= f->size) : 1; }
+static long fatv_size(fat_vol *V, int ch) { stg_file *f = handle(V, ch); return f ? (long)f->size : STG_EBADF; }
+static long fatv_tell(fat_vol *V, int ch) { stg_file *f = handle(V, ch); return f ? (long)f->pos  : STG_EBADF; }
+static int  fatv_eof (fat_vol *V, int ch) { stg_file *f = handle(V, ch); return f ? (f->pos >= f->size) : 1; }
 
-int stg_seek(int ch, long pos) {
-    stg_file *f = handle(ch);
+static int fatv_seek(fat_vol *V, int ch, long pos) {
+    stg_file *f = handle(V, ch);
     if (!f) return STG_EBADF;
     if (pos < 0) pos = 0;
     if (pos > (long)f->size) pos = (long)f->size;      // can seek to EOF to append
@@ -965,14 +951,14 @@ int stg_seek(int ch, long pos) {
 }
 
 // List the current directory, marking subdirectories with "  <DIR>".
-void stg_dir(void) {
-    if (!fat_ok) { con_puts("No disk\n"); return; }
+static void fatv_dir(fat_vol *V) {
+    if (!V->mounted) { con_puts("No disk\n"); return; }
     uint8_t s[SECSZ];
     lfn_acc acc; lfn_reset(&acc);
     for (uint32_t n = 0; ; n++) {
-        uint32_t l = dir_sector(cwd_clus, n);
+        uint32_t l = dir_sector(V, V->cwd_clus, n);
         if (!l) return;
-        if (sd_read(l, 1, s)) { con_puts("Disk error\n"); return; }
+        if (blk_read(V->blkdev, l, 1, s)) { con_puts("Disk error\n"); return; }
         for (int e = 0; e < SECSZ; e += 32) {
             uint8_t *d = s + e;
             if (d[0] == 0x00) return;                    // end of directory
@@ -990,51 +976,48 @@ void stg_dir(void) {
     }
 }
 
-const char *stg_cwd(void) { return cwd_path; }
+static const char *fatv_cwd(fat_vol *V) { return V->cwd_path; }
 
-int stg_mkdir(const char *path) {
-    if (!fat_ok) return STG_ENOFS;
+static int fatv_mkdir(fat_vol *V, const char *path) {
+    if (!V->mounted) return STG_ENOFS;
     uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
-    int r = resolve_parent(path, &parent, leaf, leaf_orig);
+    int r = resolve_parent(V, path, &parent, leaf, leaf_orig);
     if (r) return r;
-    if (dir_find_in(parent, leaf, leaf_orig, 0, 0, 0) == 0) return STG_EEXIST;
+    if (dir_find_in(V, parent, leaf, leaf_orig, 0, 0, 0) == 0) return STG_EEXIST;
 
-    // Allocate and zero the new directory's first cluster.
-    uint32_t nc = fat_alloc();
+    uint32_t nc = fat_alloc(V);
     if (!nc) return STG_EFULL;
     uint8_t z[SECSZ]; bzero512(z);
-    uint32_t base = clus_to_lba(nc);
-    for (uint32_t sc = 0; sc < sec_per_clus; sc++)
-        if (sd_write(base + sc, 1, z)) { free_chain(nc); return STG_EIO; }
+    uint32_t base = clus_to_lba(V, nc);
+    for (uint32_t sc = 0; sc < V->sec_per_clus; sc++)
+        if (blk_write(V->blkdev, base + sc, 1, z)) { free_chain(V, nc); return STG_EIO; }
 
-    // Seed it with "." (self) and ".." (parent; 0 when parent is the root).
     char dot[11], dd[11];
     for (int i = 0; i < 11; i++) { dot[i] = ' '; dd[i] = ' '; }
     dot[0] = '.'; dd[0] = '.'; dd[1] = '.';
-    if (write_dir_entry(base, 0,  dot, 0x10, nc, 0) ||
-        write_dir_entry(base, 32, dd,  0x10, parent, 0)) { free_chain(nc); return STG_EIO; }
+    if (write_dir_entry(V, base, 0,  dot, 0x10, nc, 0) ||
+        write_dir_entry(V, base, 32, dd,  0x10, parent, 0)) { free_chain(V, nc); return STG_EIO; }
 
-    // Link it into the parent directory (a long-name run when the name needs it).
     char used83[11];
-    if ((r = dir_create_entry(parent, leaf_orig, 0x10, nc, 0, 0, 0, used83))) {
-        free_chain(nc); return r;
+    if ((r = dir_create_entry(V, parent, leaf_orig, 0x10, nc, 0, 0, 0, used83))) {
+        free_chain(V, nc); return r;
     }
     return 0;
 }
 
-int stg_rmdir(const char *path) {
-    if (!fat_ok) return STG_ENOFS;
+static int fatv_rmdir(fat_vol *V, const char *path) {
+    if (!V->mounted) return STG_ENOFS;
     uint32_t parent; char leaf[11]; char leaf_orig[NAME_MAX];
-    int r = resolve_parent(path, &parent, leaf, leaf_orig);
+    int r = resolve_parent(V, path, &parent, leaf, leaf_orig);
     if (r) return r;
     uint32_t lba; int off; uint8_t ent[32];
-    r = dir_find_in(parent, leaf, leaf_orig, &lba, &off, ent);
+    r = dir_find_in(V, parent, leaf, leaf_orig, &lba, &off, ent);
     if (r) return r;
     if (!(ent[11] & 0x10)) return STG_ENOTFOUND;         // not a directory
     uint32_t clus = ent_cluster(ent);
-    if (!dir_is_empty(clus)) return STG_ENOTEMPTY;
-    if (clus >= 2) free_chain(clus);
-    return dir_erase(parent, lba, off);                  // 8.3 entry + any LFN run
+    if (!dir_is_empty(V, clus)) return STG_ENOTEMPTY;
+    if (clus >= 2) free_chain(V, clus);
+    return dir_erase(V, parent, lba, off);
 }
 
 // Adjust the display path for a "/COMP" push or a ".." pop.
@@ -1055,17 +1038,17 @@ static void path_push(char *p, const char *comp) {
     p[n] = 0;
 }
 
-int stg_chdir(const char *path) {
-    if (!fat_ok) return STG_ENOFS;
-    uint32_t cur = (path[0] == '/') ? 0 : cwd_clus;
+static int fatv_chdir(fat_vol *V, const char *path) {
+    if (!V->mounted) return STG_ENOFS;
+    uint32_t cur = (path[0] == '/') ? 0 : V->cwd_clus;
     char newpath[128];
     if (path[0] == '/') { newpath[0] = '/'; newpath[1] = 0; }
-    else { int i = 0; for (; cwd_path[i]; i++) newpath[i] = cwd_path[i]; newpath[i] = 0; }
+    else { int i = 0; for (; V->cwd_path[i]; i++) newpath[i] = V->cwd_path[i]; newpath[i] = 0; }
 
     const char *p = path; char comp[NAME_MAX];
     while (next_comp(&p, comp)) {
         uint32_t nxt;
-        int r = descend(cur, comp, &nxt);
+        int r = descend(V, cur, comp, &nxt);
         if (r) return r;                                 // invalid: leave cwd unchanged
         cur = nxt;
         if (comp[0] == '.' && comp[1] == 0) { /* stay */ }
@@ -1073,21 +1056,19 @@ int stg_chdir(const char *path) {
         else path_push(newpath, comp);
         if (cur == 0) { newpath[0] = '/'; newpath[1] = 0; }   // landed back at root
     }
-    cwd_clus = cur;
-    int i = 0; for (; newpath[i] && i < 127; i++) cwd_path[i] = newpath[i];
-    cwd_path[i] = 0;
+    V->cwd_clus = cur;
+    int i = 0; for (; newpath[i] && i < 127; i++) V->cwd_path[i] = newpath[i];
+    V->cwd_path[i] = 0;
     return 0;
 }
 
-// Resolve a whole path to a directory's first cluster (0 = root). Unlike
-// resolve_parent this descends into the final component too. "" / "/" / "." => the
-// starting directory (root for a leading '/', otherwise the current directory).
-static int resolve_dir(const char *path, uint32_t *out) {
-    uint32_t cur = (path[0] == '/') ? 0 : cwd_clus;
+// Resolve a whole path to a directory's first cluster (0 = root).
+static int resolve_dir(fat_vol *V, const char *path, uint32_t *out) {
+    uint32_t cur = (path[0] == '/') ? 0 : V->cwd_clus;
     const char *p = path; char comp[NAME_MAX];
     while (next_comp(&p, comp)) {
         uint32_t nxt;
-        int r = descend(cur, comp, &nxt);
+        int r = descend(V, cur, comp, &nxt);
         if (r) return r;
         cur = nxt;
     }
@@ -1095,42 +1076,34 @@ static int resolve_dir(const char *path, uint32_t *out) {
     return 0;
 }
 
-// --- directory enumeration (single active scan) -----------------------------
-static uint32_t enum_clus;      // directory being scanned (0 = root)
-static uint32_t enum_n;         // current sector index within that directory
-static int      enum_e;         // current byte offset within the sector
-static int      enum_active;
-static lfn_acc  enum_lfn;       // long-name fragments gathered so far this scan
-
-int stg_diropen(const char *path) {
-    if (!fat_ok) return STG_ENOFS;
+static int fatv_diropen(fat_vol *V, const char *path) {
+    if (!V->mounted) return STG_ENOFS;
     uint32_t clus;
-    int r = resolve_dir(path, &clus);
+    int r = resolve_dir(V, path, &clus);
     if (r) return r;
-    enum_clus = clus; enum_n = 0; enum_e = 0; enum_active = 1;
-    lfn_reset(&enum_lfn);
+    V->enum_clus = clus; V->enum_n = 0; V->enum_e = 0; V->enum_active = 1;
+    lfn_reset(&V->enum_lfn);
     return 0;
 }
 
-int stg_dirnext(stg_dirent *out) {
-    if (!fat_ok) return STG_ENOFS;
-    if (!enum_active) return STG_EBADF;
+static int fatv_dirnext(fat_vol *V, stg_dirent *out) {
+    if (!V->mounted) return STG_ENOFS;
+    if (!V->enum_active) return STG_EBADF;
     uint8_t s[SECSZ];
     for (;;) {
-        uint32_t l = dir_sector(enum_clus, enum_n);
-        if (!l) { enum_active = 0; return 0; }              // ran off the end
-        if (sd_read(l, 1, s)) return STG_EIO;
-        while (enum_e < SECSZ) {
-            uint8_t *d = s + enum_e;
-            enum_e += 32;
-            if (d[0] == 0x00) { enum_active = 0; return 0; } // end-of-directory marker
-            if (d[0] == 0xE5) { lfn_reset(&enum_lfn); continue; }   // deleted
-            if (d[11] == 0x0F) { lfn_feed(&enum_lfn, d); continue; } // LFN fragment
-            if (d[11] & 0x08) { lfn_reset(&enum_lfn); continue; }    // volume label
-            if (d[0] == '.')  { lfn_reset(&enum_lfn); continue; }    // "." / ".."
-            // Prefer the reconstructed long name; fall back to the 8.3 name.
-            if (!lfn_take(&enum_lfn, d, out->name)) short_name(d, out->name);
-            lfn_reset(&enum_lfn);
+        uint32_t l = dir_sector(V, V->enum_clus, V->enum_n);
+        if (!l) { V->enum_active = 0; return 0; }              // ran off the end
+        if (blk_read(V->blkdev, l, 1, s)) return STG_EIO;
+        while (V->enum_e < SECSZ) {
+            uint8_t *d = s + V->enum_e;
+            V->enum_e += 32;
+            if (d[0] == 0x00) { V->enum_active = 0; return 0; } // end-of-directory marker
+            if (d[0] == 0xE5) { lfn_reset(&V->enum_lfn); continue; }   // deleted
+            if (d[11] == 0x0F) { lfn_feed(&V->enum_lfn, d); continue; } // LFN fragment
+            if (d[11] & 0x08) { lfn_reset(&V->enum_lfn); continue; }    // volume label
+            if (d[0] == '.')  { lfn_reset(&V->enum_lfn); continue; }    // "." / ".."
+            if (!lfn_take(&V->enum_lfn, d, out->name)) short_name(d, out->name);
+            lfn_reset(&V->enum_lfn);
             out->is_dir = (d[11] & 0x10) ? 1 : 0;
             out->size   = (long)rd32(d + 28);
             uint16_t wt = rd16(d + 22), wd = rd16(d + 24);   // write time / date
@@ -1141,6 +1114,129 @@ int stg_dirnext(stg_dirent *out) {
             out->minute = (wt >> 5) & 0x3F;
             return 1;
         }
-        enum_n++; enum_e = 0;
+        V->enum_n++; V->enum_e = 0;
     }
 }
+
+// ---------------------------------------------------------------------------
+// fs_driver registration
+// ---------------------------------------------------------------------------
+static int fat_probe(int blkdev, uint64_t start) {
+    fsid id = fs_identify(blkdev, start);
+    return id == FSID_FAT12 || id == FSID_FAT16 || id == FSID_FAT32;
+}
+
+static int fat_mount(fs_vol *v, int blkdev, uint64_t start) {
+    fat_vol *V = 0;                                     // grab a free volume slot
+    for (int i = 0; i < FS_MAX_VOL; i++) if (!fat_vols[i].mounted) { V = &fat_vols[i]; break; }
+    if (!V) return STG_ENOFS;
+    for (int i = 0; i < (int)sizeof(*V); i++) ((uint8_t *)V)[i] = 0;
+    V->blkdev = blkdev;
+    int r = fat_parse_bpb(V, (uint32_t)start);
+    if (r) return r;
+    V->cwd_clus = 0;
+    V->cwd_path[0] = '/'; V->cwd_path[1] = 0;
+    V->mounted = 1;
+    v->priv = V;
+    uart_puts(V->is_fat32 ? "[FAT] mounted (FAT32)\n" : "[FAT] mounted (FAT16)\n");
+    return 0;
+}
+
+static void fat_unmount(fs_vol *v) {
+    fat_vol *V = (fat_vol *)v->priv;
+    if (!V) return;
+    fatv_close_all(V);
+    V->mounted = 0;
+    if (boot == V) boot = 0;
+}
+
+// fs_driver op adapters: cast the volume handle's private state to fat_vol*.
+static int  op_read_all (fs_vol *v, const char *n, char *b, int m) { return fatv_read((fat_vol *)v->priv, n, b, m); }
+static int  op_write_all(fs_vol *v, const char *n, const char *d, int l) { return fatv_write((fat_vol *)v->priv, n, d, l); }
+static int  op_remove (fs_vol *v, const char *p) { return fatv_delete((fat_vol *)v->priv, p); }
+static int  op_mkdir  (fs_vol *v, const char *p) { return fatv_mkdir((fat_vol *)v->priv, p); }
+static int  op_rmdir  (fs_vol *v, const char *p) { return fatv_rmdir((fat_vol *)v->priv, p); }
+static int  op_chdir  (fs_vol *v, const char *p) { return fatv_chdir((fat_vol *)v->priv, p); }
+static const char *op_cwd(fs_vol *v) { return fatv_cwd((fat_vol *)v->priv); }
+static void op_dir    (fs_vol *v) { fatv_dir((fat_vol *)v->priv); }
+static int  op_diropen(fs_vol *v, const char *p) { return fatv_diropen((fat_vol *)v->priv, p); }
+static int  op_dirnext(fs_vol *v, stg_dirent *o) { return fatv_dirnext((fat_vol *)v->priv, o); }
+static int  op_open   (fs_vol *v, const char *n, int m) { return fatv_open((fat_vol *)v->priv, n, m); }
+static int  op_close  (fs_vol *v, int ch) { return fatv_close((fat_vol *)v->priv, ch); }
+static int  op_getb   (fs_vol *v, int ch) { return fatv_getb((fat_vol *)v->priv, ch); }
+static int  op_putb   (fs_vol *v, int ch, int b) { return fatv_putb((fat_vol *)v->priv, ch, b); }
+static long op_size   (fs_vol *v, int ch) { return fatv_size((fat_vol *)v->priv, ch); }
+static long op_tell   (fs_vol *v, int ch) { return fatv_tell((fat_vol *)v->priv, ch); }
+static int  op_seek   (fs_vol *v, int ch, long p) { return fatv_seek((fat_vol *)v->priv, ch, p); }
+static int  op_eof    (fs_vol *v, int ch) { return fatv_eof((fat_vol *)v->priv, ch); }
+
+static const fs_driver fat_driver = {
+    .name = "fat",
+    .probe = fat_probe, .mount = fat_mount, .unmount = fat_unmount,
+    .read_all = op_read_all, .write_all = op_write_all, .remove = op_remove,
+    .mkdir = op_mkdir, .rmdir = op_rmdir, .chdir = op_chdir, .cwd = op_cwd,
+    .dir = op_dir, .diropen = op_diropen, .dirnext = op_dirnext,
+    .open = op_open, .close = op_close, .getb = op_getb, .putb = op_putb,
+    .size = op_size, .tell = op_tell, .seek = op_seek, .eof = op_eof,
+};
+
+void fat_register(void) { fs_register(&fat_driver); }
+
+// ---------------------------------------------------------------------------
+// SD card as blockdev 0, and stg_init: scan the card, log every partition, and
+// mount the boot volume. The BerryBasiC card has two partitions and the user
+// volume is #2, so "boot device: last mountable FAT" chooses it (and #1 on an
+// old single-partition card). See partition.c / fs.c for the general machinery.
+// ---------------------------------------------------------------------------
+static int sd_blk_read (void *ctx, uint32_t lba, uint32_t n, void *buf) { (void)ctx; return sd_read (lba, n, buf); }
+static int sd_blk_write(void *ctx, uint32_t lba, uint32_t n, const void *buf) { (void)ctx; return sd_write(lba, n, buf); }
+static const blockdev sd_blockdev = { "sd0", sd_blk_read, sd_blk_write, 0, 0, 0 };
+
+int stg_init(void) {
+    boot = 0;
+    if (sd_init()) { uart_puts("[FAT] SD init failed\n"); return STG_EIO; }
+    fat_register();                                     /* and later exfat_register() */
+
+    int b = blk_register(&sd_blockdev);
+    if (b < 0) { uart_puts("[BLK] register failed\n"); return STG_EIO; }
+
+    partition p[PART_MAX];
+    int n = part_scan(b, p, PART_MAX);
+    int chosen = -1;
+    for (int i = 0; i < n; i++) {                        // boot device: last mountable
+        fsid id = fs_identify(b, p[i].start_lba);
+        blk_log_partition(b, i, id, &p[i]);
+        if (fs_mountable(id)) chosen = i;
+    }
+    if (chosen < 0) { uart_puts("[FAT] no mountable filesystem\n"); return STG_ENOFS; }
+
+    int vol = fs_mount(b, p[chosen].start_lba, "sd");
+    if (vol < 0) { uart_puts("[FAT] mount failed\n"); return STG_ENOFS; }
+    boot = (fat_vol *)fs_vol_get(vol)->priv;
+    uart_puts("[BLK] sd0p"); uart_putc((char)('1' + chosen)); uart_puts(": mounted as sd\n");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// storage.h surface: single boot volume in Phase 1 (Phase 4 routes per volume).
+// ---------------------------------------------------------------------------
+int  stg_read (const char *name, char *buf, int maxlen) { return boot ? fatv_read(boot, name, buf, maxlen) : STG_ENOFS; }
+int  stg_write(const char *name, const char *data, int len) { return boot ? fatv_write(boot, name, data, len) : STG_ENOFS; }
+int  stg_delete(const char *name) { return boot ? fatv_delete(boot, name) : STG_ENOFS; }
+void stg_dir(void) { if (boot) fatv_dir(boot); else con_puts("No disk\n"); }
+int  stg_mkdir(const char *path) { return boot ? fatv_mkdir(boot, path) : STG_ENOFS; }
+int  stg_rmdir(const char *path) { return boot ? fatv_rmdir(boot, path) : STG_ENOFS; }
+int  stg_chdir(const char *path) { return boot ? fatv_chdir(boot, path) : STG_ENOFS; }
+const char *stg_cwd(void) { return boot ? fatv_cwd(boot) : "/"; }
+int  stg_diropen(const char *path) { return boot ? fatv_diropen(boot, path) : STG_ENOFS; }
+int  stg_dirnext(stg_dirent *out) { return boot ? fatv_dirnext(boot, out) : STG_ENOFS; }
+int  stg_open(const char *name, int mode) { return boot ? fatv_open(boot, name, mode) : 0; }
+int  stg_close(int ch) { return boot ? fatv_close(boot, ch) : STG_EBADF; }
+void stg_close_all(void) { if (boot) fatv_close_all(boot); }
+int  stg_getb(int ch) { return boot ? fatv_getb(boot, ch) : STG_EBADF; }
+int  stg_readn(int ch, void *buf, int n) { return boot ? fatv_readn(boot, ch, buf, n) : STG_EBADF; }
+int  stg_putb(int ch, int byte) { return boot ? fatv_putb(boot, ch, byte) : STG_EBADF; }
+long stg_size(int ch) { return boot ? fatv_size(boot, ch) : STG_EBADF; }
+long stg_tell(int ch) { return boot ? fatv_tell(boot, ch) : STG_EBADF; }
+int  stg_seek(int ch, long pos) { return boot ? fatv_seek(boot, ch, pos) : STG_EBADF; }
+int  stg_eof(int ch) { return boot ? fatv_eof(boot, ch) : 1; }

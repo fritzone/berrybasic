@@ -679,6 +679,15 @@ int con_keymods(void) {
     return hid_modifiers();
 }
 
+// Keys currently held down (for games that need hold-to-move, not just presses).
+// Returns the count and fills out[], or -1 when there is no USB keyboard (a
+// serial terminal reports presses, not held state). Poll a key first (inkey(0))
+// so the underlying HID report is fresh.
+int con_keys_down(int *out, int max) {
+    if (!g_kbd_ok && !g_xhci_ok) return -1;
+    return hid_keys_down(out, max);
+}
+
 void con_mouse(int *x, int *y, int *buttons) {
     mouse_service();
     if (x)       *x = g_mouse_x;
@@ -1554,6 +1563,16 @@ void sgfx_clear(uint32_t rgb) {
 void sgfx_putpixel(int x, int y, uint32_t rgb) { if (fb_ready) putpixel(x, y, rgb_to_fb(rgb)); }
 uint32_t sgfx_getpixel(int x, int y) { return fb_ready ? fb_to_rgb(getpixel(x, y)) : 0; }
 
+// Fast paletted blit: convert the 256-entry 0xRRGGBB palette to framebuffer
+// pixel format once, then blit the w*h indexed image scaled + placed at (dx,dy).
+void sgfx_blit8(const unsigned char *idx, const unsigned int *pal,
+                int w, int h, int dx, int dy, int scale) {
+    if (!fb_ready || !idx || !pal) return;
+    uint32_t fbpal[256];
+    for (int i = 0; i < 256; i++) fbpal[i] = rgb_to_fb(pal[i]);
+    gfx_blit_indexed(idx, fbpal, w, h, dx, dy, scale);
+}
+
 // The seed's own line pen (device pixels) is declared with the other gfx state
 // up top so reset_colours() can reset it. Set via sgfx_line_style; honoured by
 // sgfx_line / sgfx_circle / sgfx_ellipse / sgfx_polyline.
@@ -2176,7 +2195,7 @@ void kernel_main(void) {
     if (!g_kbd_ok && real_hw) {
         boot_msg("[USB] trying USB-A (PCIe/VL805 xHCI)...\n");
         uintptr_t xhci_mmio = pcie_init();
-        if (xhci_mmio) g_xhci_ok = xhci_kbd_init(xhci_mmio);
+        if (xhci_mmio) { g_xhci_ok = xhci_kbd_init(xhci_mmio); xhci_selftest(); }  /* Phase 2 self-test */
         boot_msg(g_xhci_ok ? "[USB] USB-A keyboard ready\n"
                            : "[USB] no USB-A keyboard\n");
         g_mouse_xhci = xhci_mouse_present();

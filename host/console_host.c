@@ -158,3 +158,4 @@ void con_mouse(int *x, int *y, int *buttons) {
 
 // No USB keyboard on the host: stdin gives characters, never key state.
 int con_keymods(void) { return 0; }
+int con_keys_down(int *out, int max) { (void)out; (void)max; return -1; }

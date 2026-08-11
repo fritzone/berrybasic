@@ -66,6 +66,14 @@ void setrgbfillcolor(int r, int g, int b);
 // --- pixels and the current position ---------------------------------------
 void putpixel(int x, int y, int color);  // plot one pixel, palette index
 int  getpixel(int x, int y);             // read a pixel as 0xRRGGBB
+
+// Fast paletted blit: draw a w*h 8-bit indexed image through a 256-entry palette
+// (each entry a 0xRRGGBB value), nearest-neighbour scaled by `scale`, with its
+// top-left at device pixel (dx,dy). One call pushes a whole frame - a game keeps
+// its own 320x200 indexed buffer and blits it here each tick. Composes on the
+// double buffer, so setdoublebuffer(1) + blit + flippage() shows a clean frame.
+void blitindexed(const unsigned char *idx, const unsigned int *palette,
+                 int w, int h, int dx, int dy, int scale);
 void moveto(int x, int y);
 void moverel(int dx, int dy);
 void lineto(int x, int y);               // line from CP to (x,y); CP moves there

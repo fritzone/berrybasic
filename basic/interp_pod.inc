@@ -86,6 +86,7 @@ static void     pod_dn_free(void *a)                           { (void)a; }
 static void    *pod_dn_realloc(void *a, unsigned b)            { (void)a; (void)b; return 0; }
 static void    *pod_dn_alloca(unsigned a, unsigned b)          { (void)a; (void)b; return 0; }
 static void     pod_dn_icache(const void *a, unsigned long b)  { (void)a; (void)b; }
+static void     pod_dn_blit8(const unsigned char *i, const unsigned int *p, int w, int h, int dx, int dy, int s) { (void)i; (void)p; (void)w; (void)h; (void)dx; (void)dy; (void)s; }
 static int      pod_dn_remove(const char *a)                   { (void)a; return -1; }
 static int      pod_dn_spawn(const char *a, int b, const char *const *c) { (void)a; (void)b; (void)c; return -1; }
 static int      pod_dn_mkdir(const char *a)                    { (void)a; return -1; }
@@ -103,6 +104,11 @@ static void     pod_dn_recset(const char *a, int b, const char *c, const char *d
 static long     pod_dn_longi(int a)                            { (void)a; return -1; }
 static int      pod_dn_ii(int a, int b)                        { (void)a; (void)b; return -1; }
 static void     pod_dn_mouse(int *a, int *b, int *c)           { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
+static int      pod_dn_keysdown(int *a, int b)                 { (void)a; (void)b; return -1; }
+static int      pod_dn_aopen(int r)                           { (void)r; return -1; }
+static int      pod_dn_geti0(void)                            { return 0; }
+static int      pod_dn_awrite(const short *s, int f)          { (void)s; return f; }
+static void     pod_dn_aclose(void)                          { }
 static void     pod_dn_scrsz(int *a, int *b)                   { if (a) *a = 0; if (b) *b = 0; }
 static void     pod_dn_glyph(int a, int b, int c, uint32_t d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
 static uint32_t pod_dn_getpix(int a, int b)                    { (void)a; (void)b; return 0; }
@@ -126,6 +132,7 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->file_read = pod_dn_fread; s->file_write = pod_dn_fwrite; s->file_seek = pod_dn_fseek;
     s->gfx_width = pod_dn_geti; s->gfx_height = pod_dn_geti; s->gfx_clear = pod_dn_clear;
     s->gfx_putpixel = pod_dn_pixel; s->gfx_line = pod_dn_rect; s->gfx_fillrect = pod_dn_rect;
+    s->gfx_blit8 = pod_dn_blit8;
     s->gpio_mode = pod_dn_gmode; s->gpio_write = pod_dn_gwrite; s->gpio_read = pod_dn_int_i;
     s->time_cs = pod_dn_timecs;
     s->alloc = pod_dn_alloc; s->free = pod_dn_free;
@@ -141,7 +148,9 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->file_size = pod_dn_longi; s->file_eof = pod_dn_int_i;
     s->gpio_avail = pod_dn_geti; s->gpio_pull = pod_dn_ii; s->gpio_set = pod_dn_clear;
     s->gpio_clr = pod_dn_clear; s->gpio_level = pod_dn_timecs; s->gpio_wait = pod_dn_gmode;
-    s->mouse = pod_dn_mouse; s->keymods = pod_dn_geti;
+    s->mouse = pod_dn_mouse; s->keymods = pod_dn_geti; s->keys_down = pod_dn_keysdown;
+    s->audio_open = pod_dn_aopen; s->audio_avail = pod_dn_geti0;
+    s->audio_write = pod_dn_awrite; s->audio_close = pod_dn_aclose;
     s->gfx_avail = pod_dn_geti; s->gfx_getpixel = pod_dn_getpix;
     s->gfx_circle = pod_dn_circ; s->gfx_fillcircle = pod_dn_circ;
     s->gfx_ellipse = pod_dn_rect; s->gfx_fillellipse = pod_dn_rect;
@@ -162,7 +171,9 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
 
     if (caps & POD_CAP_CONSOLE) {
         s->puts = svc_puts; s->putc = svc_putc; s->getkey = svc_getkey; s->inkey = svc_inkey;
-        s->mouse = svc_mouse; s->keymods = svc_keymods; s->vdu = svc_vdu;
+        s->mouse = svc_mouse; s->keymods = svc_keymods; s->keys_down = svc_keys_down; s->vdu = svc_vdu;
+        s->audio_open = svc_audio_open; s->audio_avail = svc_audio_avail;
+        s->audio_write = svc_audio_write; s->audio_close = svc_audio_close;
         s->screen_size = svc_screen_size;
         s->clip_set = svc_clip_set; s->clip_get = svc_clip_get; s->clip_len = svc_clip_len;
     }
@@ -181,6 +192,7 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     if (caps & POD_CAP_GRAPHICS) {
         s->gfx_width = svc_gfx_width; s->gfx_height = svc_gfx_height; s->gfx_clear = svc_gfx_clear;
         s->gfx_putpixel = svc_gfx_putpixel; s->gfx_line = svc_gfx_line; s->gfx_fillrect = svc_gfx_fillrect;
+        s->gfx_blit8 = svc_gfx_blit8;
         s->gfx_avail = svc_gfx_avail; s->gfx_getpixel = svc_gfx_getpixel;
         s->gfx_circle = svc_gfx_circle; s->gfx_fillcircle = svc_gfx_fillcircle;
         s->gfx_ellipse = svc_gfx_ellipse; s->gfx_fillellipse = svc_gfx_fillellipse;

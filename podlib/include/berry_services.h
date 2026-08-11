@@ -20,7 +20,7 @@
 // `screen_size`; v17 appended `con_font`/`con_glyph`; v18 appended the directory
 // browsing set (dir_open/dir_read/getcwd/chdir); v19 appended the clipboard
 // (clip_set/clip_get/clip_len); v20 appended icache_sync.
-#define BERRY_ABI_VERSION 20u
+#define BERRY_ABI_VERSION 23u
 
 // Modes for the file_open service.
 #define BERRY_FOPEN_READ   0
@@ -240,6 +240,31 @@ typedef struct BerryServices {
     // them, since the D- and I-caches are not coherent on ARM. (Under CAP_HEAP,
     // the companion of the aligned allocation the code lands in.)
     void (*icache_sync)(const void *addr, unsigned long size);
+
+    // v21: fast paletted blit (CAP_GRAPHICS). Blit a w*h 8-bit indexed image
+    // through a 256-entry 0xRRGGBB palette to the graphics surface, nearest-
+    // neighbour scaled by `scale`, top-left at (dx,dy), clipped to the screen.
+    // One call pushes a whole frame (a game's 320x200) instead of tens of
+    // thousands of putpixels; it composes on the back buffer like the other gfx_*.
+    void (*gfx_blit8)(const unsigned char *idx, const unsigned int *pal,
+                      int w, int h, int dx, int dy, int scale);
+
+    // v22: keys currently held down (CAP_CONSOLE), for games that need hold-to-
+    // move rather than one-shot presses. Fills out[] (up to max) with BerryBasiC
+    // key codes and returns the count, or -1 when there is no USB keyboard (a
+    // serial terminal reports presses, not held state). Poll a key first (inkey)
+    // so the underlying HID report is fresh.
+    int (*keys_down)(int *out, int max);
+
+    // v23: streamed PCM audio (CAP_CONSOLE), for sampled sound / games. A stereo
+    // sample stream played by DMA into the analogue jack with no ongoing CPU
+    // cost (real hardware only; discards silently on QEMU/host). audio_open sets
+    // the sample rate and starts; audio_avail reports free stereo frames so the
+    // caller mixes just enough each frame; audio_write feeds 16-bit sample pairs.
+    int  (*audio_open)(int rate);                     // 0 ok, <0 fail
+    int  (*audio_avail)(void);                        // free stereo frames
+    int  (*audio_write)(const short *stereo, int frames);  // -> frames accepted
+    void (*audio_close)(void);
 } BerryServices;
 
 // The one services pointer the berry-libc reads. A POD's crt0 sets it before

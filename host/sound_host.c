@@ -18,3 +18,8 @@ void snd_set_tone(int freq_hz, int vol) {
 }
 
 void snd_silence(void) { host_snd_freq = 0; host_snd_vol = 0; }
+
+int  snd_pcm_open(int rate) { (void)rate; return 0; }
+int  snd_pcm_avail(void) { return 0; }
+int  snd_pcm_write(const short *stereo, int frames) { (void)stereo; return frames; }
+void snd_pcm_close(void) { }

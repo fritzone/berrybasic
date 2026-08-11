@@ -16,6 +16,10 @@
 # Usage:  tools/mksdimage.sh [output.img] [size_MB]
 set -euo pipefail
 
+# Debug tracing: run with MKSD_DEBUG=1 (or `make flash MKSD_DEBUG=1`) to print a
+# timestamped marker before every stage, so a hang shows exactly where it stalls.
+dbg(){ [ -n "${MKSD_DEBUG:-}" ] && printf '[mksdimage %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; return 0; }
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/berrybasic-sd.img}"
 SIZE_MB="${2:-256}"
@@ -43,20 +47,36 @@ FW_BASE="https://github.com/raspberrypi/firmware/raw/master/boot"
 # kernel handoff expects a DTB to be present. Without it the firmware loads the
 # GPU firmware (shows the splash) but never starts kernel8.img. Our bare-metal
 # kernel ignores the DTB pointer passed in x0.
+dbg "start: OUT=$OUT SIZE_MB=$SIZE_MB"
 mkdir -p "$FW_DIR"
 for f in start4.elf fixup4.dat bcm2711-rpi-4-b.dtb; do
     if [ ! -f "$FW_DIR/$f" ]; then
         echo "downloading $f ..."
+        dbg "curl $f (network - can hang if offline)"
         curl -fsSL "$FW_BASE/$f" -o "$FW_DIR/$f"
     fi
 done
+dbg "firmware present"
 
 # --- Build the boot (system) partition --------------------------------------
 BOOTPART="$(mktemp)"
 DATAPART="$(mktemp)"
 trap 'rm -f "$BOOTPART" "$DATAPART"' EXIT
 export MTOOLS_SKIP_CHECK=1
+# Some mtools builds PROMPT when 'mmd' is asked to create a directory that
+# already exists ("directory ... exists, overwrite?"). We deliberately re-create
+# dirs in several places (guarded with '|| true'), so on those builds mmd blocks
+# forever waiting for a keypress - and it reads that prompt from the controlling
+# terminal (/dev/tty), so redirecting stdin does NOT suppress it. The only sure
+# fix is to never call mmd on a directory that already exists: shadow mmd with a
+# wrapper that checks first with mdir (read-only, never prompts) and only creates
+# when the directory is genuinely missing. 'command mmd' calls the real binary
+# (no recursion). All our mmd calls create a single directory, so a single mdir
+# existence check is exact.
+exec </dev/null                      # belt-and-braces: this script never reads stdin
+mmd(){ mdir "$@" >/dev/null 2>&1 || command mmd "$@"; }
 
+dbg "building boot partition ($BOOT_MB MiB)"
 dd if=/dev/zero of="$BOOTPART" bs=1M count="$BOOT_MB" status=none
 mkfs.fat -F 32 -n BERRYBOOT "$BOOTPART" >/dev/null
 mcopy -i "$BOOTPART" "$FW_DIR/start4.elf"            ::start4.elf
@@ -66,8 +86,10 @@ mcopy -i "$BOOTPART" "$CONFIG"                       ::config.txt
 mcopy -i "$BOOTPART" "$KERNEL"                       ::kernel8.img
 
 # --- Build the data (BASIC programs) partition ------------------------------
+dbg "building data partition ($DATA_MB MiB)"
 dd if=/dev/zero of="$DATAPART" bs=1M count="$DATA_MB" status=none
 mkfs.fat -F 32 -n BERRYDATA "$DATAPART" >/dev/null
+dbg "shipping /EXAMPLES groups"
 # Example programs live under /EXAMPLES, grouped by what they show (graphics,
 # files, hardware, language, modules, seeds, pods). Each group directory is
 # self-contained: an example that loads an asset carries its own copy, so you
@@ -105,6 +127,7 @@ fi
 # Native seeds (built by 'make seeds') go in their own /seed directory: SEED/CALL
 # resolve a bare "NAME.SED" to /seed/NAME.SED, and keeping them out of the root
 # leaves CAT's default listing uncluttered with user programs.
+dbg "shipping /SEED (*.sed)"
 if compgen -G "$ROOT/build/seeds/*.sed" >/dev/null; then
     mmd -i "$DATAPART" ::SEED
     for sed in "$ROOT"/build/seeds/*.sed; do
@@ -116,15 +139,27 @@ fi
 # source, a GROW and a README, with a collecting GROW at the top. So on the
 # machine you can `cd EXAMPLES/SEEDS`, `grow` to build them all (grow links the
 # berry-libc from SEEDCORE.PKT), or `grow NAME` for one. See examples/seeds/.
+dbg "shipping /EXAMPLES/SEEDS (seed examples)"
 if [ -d "$ROOT/examples/seeds" ]; then
-    mmd -i "$DATAPART" ::EXAMPLES ::EXAMPLES/SEEDS 2>/dev/null || true
+    # Two separate mmd calls: ::EXAMPLES already exists (made above), and some
+    # mtools versions abort a multi-target mmd on the first arg's "already exists"
+    # failure, leaving ::EXAMPLES/SEEDS uncreated -> the mcopy below then fails
+    # with "no match for target / Bad target ::EXAMPLES/SEEDS/...".
+    dbg "  mmd ::EXAMPLES"
+    mmd -i "$DATAPART" ::EXAMPLES 2>/dev/null || true
+    dbg "  mmd ::EXAMPLES/SEEDS"
+    mmd -i "$DATAPART" ::EXAMPLES/SEEDS 2>/dev/null || true
+    dbg "  copying top-level seed files"
     for f in "$ROOT"/examples/seeds/*; do          # the collecting GROW, any .bas
         [ -f "$f" ] || continue
+        dbg "    mcopy $(basename "$f")"
         mcopy -o -i "$DATAPART" "$f" "::EXAMPLES/SEEDS/$(basename "$f" | tr '[:lower:]' '[:upper:]')"
     done
+    dbg "  top-level seed files done; entering per-seed dirs"
     for d in "$ROOT"/examples/seeds/*/; do          # each seed's own directory
         [ -d "$d" ] || continue
         sub="$(basename "$d" | tr '[:lower:]' '[:upper:]')"
+        dbg "  seed dir $sub"
         mmd -i "$DATAPART" "::EXAMPLES/SEEDS/$sub" 2>/dev/null || true
         for f in "$d"*; do
             [ -f "$f" ] || continue
@@ -141,13 +176,29 @@ fi
 # whose name matches /sys/WORD.POD runs it with the rest of the line as its
 # arguments: this is how the machine becomes command-driven ('echo', 'sum',
 # 'tcc', ...). tcc.POD is the self-hosted C compiler.
+dbg "shipping /SYS PODs"
 if compgen -G "$ROOT/build/sys/*.POD" >/dev/null; then
     mmd -i "$DATAPART" ::SYS || true
     for pod in "$ROOT"/build/sys/*.POD; do
         [ -e "$pod" ] || break
+        dbg "  POD $(basename "$pod")"
         mcopy -i "$DATAPART" "$pod" "::SYS/$(basename "$pod" | tr '[:lower:]' '[:upper:]')"
     done
 fi
+
+# DOOM: the game POD is shipped to /SYS above (so `DOOM` is a command anywhere);
+# its data file (DOOM1.WAD, id's freely-distributable shareware) goes to /DOOM,
+# alongside a copy of the POD. Play it with `CD "/DOOM"` then `DOOM`.
+dbg "shipping /DOOM (WAD ~4 MiB + POD - slowest mcopy)"
+if [ -e "$ROOT/third_party/DOOM/DOOM1.WAD" ]; then
+    mmd -i "$DATAPART" ::DOOM 2>/dev/null || true
+    dbg "  DOOM1.WAD"
+    mcopy -o -i "$DATAPART" "$ROOT/third_party/DOOM/DOOM1.WAD" "::DOOM/DOOM1.WAD"
+    dbg "  DOOM.POD"
+    [ -e "$ROOT/build/sys/DOOM.POD" ] && \
+        mcopy -o -i "$DATAPART" "$ROOT/build/sys/DOOM.POD" "::DOOM/DOOM.POD"
+fi
+dbg "shipping /SYS/INCLUDE headers"
 
 # Headers for the on-machine compiler: /sys/include is tcc's default include
 # path, so `tcc -pod prog.c` finds <pod.h> (and the pod-libc headers) with no
@@ -196,6 +247,7 @@ fi
 # searches (after the program's own directory), so any program finds a font by a
 # bare name. Long names are preserved via VFAT; a short PHILO.TTF alias of the
 # bundled Philosopher font gives examples a tidy 8.3 name to load.
+dbg "shipping /SYS/FONTS"
 mmd -i "$DATAPART" ::SYS/FONTS 2>/dev/null || true
 for ttf in "$ROOT"/fonts/*.ttf "$ROOT"/fonts/*.ttc; do
     [ -e "$ttf" ] || continue
@@ -205,6 +257,7 @@ done
     mcopy -o -i "$DATAPART" "$ROOT/fonts/Philosopher-Regular.ttf" ::SYS/FONTS/PHILO.TTF
 
 # --- Assemble the final image with a 2-partition MBR ------------------------
+dbg "assembling final image + MBR (dd/sfdisk)"
 dd if=/dev/zero of="$OUT" bs=1M count="$SIZE_MB" status=none
 # #1 bootable FAT32-LBA system partition, #2 FAT32-LBA data partition.
 sfdisk --quiet "$OUT" <<EOF
@@ -213,6 +266,7 @@ ${DATA_START},${DATA_SECTORS},0c
 EOF
 dd if="$BOOTPART" of="$OUT" bs=512 seek="$BOOT_START" conv=notrunc status=none
 dd if="$DATAPART" of="$OUT" bs=512 seek="$DATA_START" conv=notrunc status=none
+dbg "image assembled - mksdimage done"
 
 echo
 echo "Created $OUT (${SIZE_MB} MiB): boot partition ${BOOT_MB} MiB + data partition ${DATA_MB} MiB."

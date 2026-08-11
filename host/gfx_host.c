@@ -10,6 +10,7 @@ int      sgfx_width(void)  { return 0; }
 int      sgfx_height(void) { return 0; }
 void     sgfx_clear(uint32_t rgb) { (void)rgb; }
 void     sgfx_putpixel(int x, int y, uint32_t rgb) { (void)x; (void)y; (void)rgb; }
+void     sgfx_blit8(const unsigned char *idx, const unsigned int *pal, int w, int h, int dx, int dy, int scale) { (void)idx; (void)pal; (void)w; (void)h; (void)dx; (void)dy; (void)scale; }
 uint32_t sgfx_getpixel(int x, int y) { (void)x; (void)y; return 0; }
 void     sgfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) { (void)x1; (void)y1; (void)x2; (void)y2; (void)rgb; }
 void     sgfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) { (void)x1; (void)y1; (void)x2; (void)y2; (void)rgb; }

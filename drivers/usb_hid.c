@@ -279,12 +279,21 @@ static int lock_key(uint8_t kc) {
     return 1;
 }
 
+// The set of keys currently held down, refreshed on every report. Unlike the
+// newly-pressed key hid_report_key returns (for typing), this is the whole
+// current state, so a game can tell a held movement key from a released one.
+static int g_keys_down[HID_KEYS_MAX];
+static int g_keys_n;
+
 int hid_report_key(const uint8_t report[8], uint8_t prev[8]) {
     int out = 0;
     g_mod = report[0];                           // refresh the modifier snapshot
+    g_keys_n = 0;
     for (int i = 2; i < 8; i++) {
         uint8_t kc = report[i];
         if (kc == 0) continue;
+        int k = hid_to_key(kc, g_mod);           // full current key set (held state)
+        if (k && g_keys_n < HID_KEYS_MAX) g_keys_down[g_keys_n++] = k;
         int held = 0;
         for (int j = 2; j < 8; j++)
             if (prev[j] == kc) { held = 1; break; }
@@ -294,6 +303,13 @@ int hid_report_key(const uint8_t report[8], uint8_t prev[8]) {
     }
     for (int k = 0; k < 8; k++) prev[k] = report[k];
     return out;
+}
+
+// Copy the currently-held keys (BerryBasiC key codes) into out; returns count.
+int hid_keys_down(int *out, int max) {
+    int n = g_keys_n < max ? g_keys_n : max;
+    for (int i = 0; i < n; i++) out[i] = g_keys_down[i];
+    return n;
 }
 
 int hid_mouse_decode(const uint8_t *report, int len,

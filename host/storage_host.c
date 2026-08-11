@@ -75,6 +75,13 @@ int stg_getb(int ch) {
     return (c == EOF) ? -1 : c;
 }
 
+int stg_readn(int ch, void *buf, int n) {
+    FILE *f = hnd(ch);
+    if (!f) return STG_EBADF;
+    if (n < 0) return 0;
+    return (int)fread(buf, 1, (size_t)n, f);
+}
+
 int stg_putb(int ch, int byte) {
     FILE *f = hnd(ch);
     if (!f) return STG_EBADF;
