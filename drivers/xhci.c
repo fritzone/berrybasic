@@ -713,9 +713,12 @@ static int setup_int_endpoint(int dev_speed, uint32_t dev_route, int root_port,
     uart_dec("[XHCI] HID EP ", ep_addr);
     uart_dec("[XHCI] HID proto ", proto);
 
-    // SET_CONFIGURATION 1, SET_PROTOCOL boot(0).
+    // SET_CONFIGURATION 1, SET_PROTOCOL boot(0), SET_IDLE(0) = report only on
+    // change (indefinite). Boot keyboards need SET_IDLE(0) or they may follow a
+    // default idle rate that suppresses key-change interrupt reports.
     if (control_xfer(0x00, 9, 1, 0, 0, buf) < 0) { uart_puts("[XHCI] SET_CONFIG failed\n"); return 0; }
     control_xfer(0x21, 0x0b, 0, 0, 0, buf);                    // SET_PROTOCOL (boot)
+    control_xfer(0x21, 0x0a, 0, (uint16_t)hid_ifnum, 0, buf);  // SET_IDLE 0 (report on change)
 
     int dci  = ep_addr * 2 + 1;                                // IN endpoint DCI
     int rlen = ep_mps < 8 ? ep_mps : 8;                        // report size (kbd=8, mouse 3/4)
@@ -734,14 +737,28 @@ static int setup_int_endpoint(int dev_speed, uint32_t dev_route, int root_port,
     if (dev_tt_slot)
         slot[2] = (dev_tt_slot & 0xff) | ((dev_tt_port & 0xff) << 8);
     uint32_t *epi = ep_ctx(input_ctx + ctx_size, dci);
-    int interval = 6;                                          // ~8ms for FS HID
-    if (ep_interval > 0) interval = 3;                         // leave conservative
-    epi[0] = (interval << 16);
+    // xHCI endpoint Interval: the endpoint is serviced every 2^Interval
+    // microframes (125us each). For FULL/LOW-speed interrupt endpoints bInterval
+    // is in 1ms frames (= 8 microframes), so Interval = floor(log2(bInterval*8)),
+    // clamped to [3,10] (1ms..~16ms). The old code forced 1ms (interval=3) for
+    // EVERY HID device; a full-speed mouse tolerates that, but a LOW-speed keyboard
+    // behind the hub's transaction translator cannot be periodic-split-polled that
+    // fast - it delivered exactly one report then went silent. Honour bInterval.
+    int bint = ep_interval > 0 ? ep_interval : 8;             // frames; ~8ms default
+    int microframes = bint * 8;
+    int interval = 3;
+    while (interval < 10 && (1 << (interval + 1)) <= microframes) interval++;
+    epi[0] = ((uint32_t)interval << 16);
     epi[1] = (7u << 3) | (ep_mps << 16) | (3u << 1);          // EP type 7 = interrupt IN
     uint64_t itrp = pa(epint_ring) | 1;
     epi[2] = (uint32_t)itrp;
     epi[3] = (uint32_t)(itrp >> 32);
-    epi[4] = ep_mps;                                          // average TRB length
+    // Low 16 bits = Average TRB Length; high 16 bits = Max ESIT Payload (Lo). The
+    // Max ESIT Payload tells the scheduler how much bus time to RESERVE for this
+    // periodic endpoint each interval; left at 0 the controller reserves nothing,
+    // so a low-speed keyboard behind the hub TT gets serviced only intermittently
+    // (a full-speed mouse usually squeaks through). Reserve one packet per ESIT.
+    epi[4] = ep_mps | ((uint32_t)ep_mps << 16);              // avg TRB len | Max ESIT Payload
 
     if (run_command(pa(input_ctx), TRB_TYPE(TRB_CONFIGURE_EP) | (slot_id << 24)) < 0) {
         uart_puts("[XHCI] configure EP failed\n"); return 0;
@@ -805,12 +822,20 @@ static int claim_hid(hid_ep_t *ep, int proto) {
     return 0;
 }
 
-// Prime an interrupt endpoint with one transfer (arms it to receive a report).
-static void hid_prime(hid_ep_t *e) {
-    ring_push(e->ring, &e->enq, &e->cyc, pa(e->buf), e->len,
-              TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+// Prime an interrupt endpoint with `n` outstanding transfers. Several matter for
+// the low-speed keyboard: its initial report completes during the idle gap before
+// the REPL starts pumping, and if that drains the ring to EMPTY the VL805 does not
+// reliably resume polling when a single TRB is later re-queued - the endpoint goes
+// silent (exactly the "one completion then nothing" we see). Keeping the ring
+// non-empty makes the controller keep servicing it. All TRBs share e->buf; reports
+// are milliseconds apart and we pump continuously, so we never miss one.
+static void hid_prime_n(hid_ep_t *e, int n) {
+    for (int i = 0; i < n; i++)
+        ring_push(e->ring, &e->enq, &e->cyc, pa(e->buf), e->len,
+                  TRB_TYPE(TRB_NORMAL) | TRB_IOC);
     ring_db(e->slot, e->dci);
 }
+static void hid_prime(hid_ep_t *e) { hid_prime_n(e, 1); }
 
 // Re-arm an interrupt endpoint after a completed transfer.
 static void hid_rearm(hid_ep_t *e) {
@@ -840,9 +865,27 @@ static int key_pop(void) {
 // Route one transfer-event completion to the keyboard or mouse interrupt
 // endpoint by (slot, DCI), decoding + re-arming it. Shared by xhci_pump and the
 // bulk-transfer wait, so a HID report that lands mid-bulk-transfer is not lost.
+// Real-hardware keyboard-input diagnostics. The VL805 xHCI is not emulated by
+// QEMU, so input can only be debugged on the board - and with no serial cable the
+// numbers are surfaced via KBDLOG.TXT (see kernel.c). Counts let us tell apart
+// "no transfer events at all" (endpoint/doorbell/TT problem) from "events arrive
+// but decode to nothing" (report/decoding problem).
+volatile unsigned xhci_dbg_pumps  = 0;   // xhci_pump() invocations
+volatile unsigned xhci_dbg_events = 0;   // transfer events the pump has seen
+volatile unsigned xhci_dbg_kev    = 0;   // keyboard-endpoint completions
+volatile unsigned xhci_dbg_kcc    = 0;   // last keyboard completion code
+volatile unsigned xhci_dbg_keys   = 0;   // decoded keys pushed to the FIFO
+volatile unsigned char xhci_dbg_krep[8]; // last raw keyboard report
+
 static void handle_hid_event(int sid, int eid, int cc) {
     if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
-        if (cc == 1 || cc == 13) key_push(hid_report_key(kbd_ep_st.buf, kbd_prev));
+        xhci_dbg_kev++; xhci_dbg_kcc = (unsigned)cc;
+        for (int i = 0; i < 8; i++) xhci_dbg_krep[i] = kbd_ep_st.buf[i];
+        if (cc == 1 || cc == 13) {
+            int k = hid_report_key(kbd_ep_st.buf, kbd_prev);
+            if (k) xhci_dbg_keys++;
+            key_push(k);
+        }
         hid_rearm(&kbd_ep_st);
     } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
         if (cc == 1 || cc == 13) {
@@ -859,9 +902,11 @@ static void xhci_pump(void) {
     static uint32_t idle = 0;
     trb_t ev;
     int got = 0;
+    xhci_dbg_pumps++;
     while (next_event(&ev, 1)) {
         if (TRB_GET_TYPE(ev.control) != TRB_TRANSFER_EVENT) continue;
         got = 1;
+        xhci_dbg_events++;
         int sid = (ev.control >> 24) & 0xff;
         int eid = (ev.control >> 16) & 0x1f;
         int cc  = COMP_CODE(ev.status);
@@ -975,8 +1020,11 @@ static void handle_leaf(int root_port, uint32_t route, int speed, int tt_slot, i
     if (probe_iface(&cls, &subcls, &proto, &ifn, &bi, &bo, &bm) < 0) {
         uart_puts("[USB] probe_iface failed\n"); return;
     }
-    record_dev(root_port, route, speed, tt_slot, tt_port, ifn, cls, subcls, proto);
-    if (cls == 0x08) {
+    int di = record_dev(root_port, route, speed, tt_slot, tt_port, ifn, cls, subcls, proto);
+    if (cls == 0x08 && di >= 0) {                       // remember bulk eps for the MSC layer
+        g_devs[di].bulk_in  = bi;
+        g_devs[di].bulk_out = bo;
+        g_devs[di].bulk_mps = bm;
         uart_hex("[USB]   MSC subcls/proto ", ((uint32_t)subcls << 8) | proto);
         uart_dec("[USB]   bulk IN  ", bi);
         uart_dec("[USB]   bulk OUT ", bo);
@@ -1079,8 +1127,8 @@ int xhci_kbd_init(uintptr_t mmio_base) {
     // All devices are configured; NOW arm the HID interrupt endpoints. Priming
     // earlier would let an interrupt completion land on the shared event ring
     // mid-enumeration and be mistaken for a control-transfer completion.
-    if (kbd_ep_st.ready) hid_prime(&kbd_ep_st);
-    if (mou_ep_st.ready) hid_prime(&mou_ep_st);
+    if (kbd_ep_st.ready) hid_prime_n(&kbd_ep_st, 8);   // keep the ring non-empty (see hid_prime_n)
+    if (mou_ep_st.ready) hid_prime(&mou_ep_st);         // mouse never idles its ring; one is fine
 
     if (mou_ep_st.ready) uart_puts("[XHCI] mouse ready\n");
     if (kbd_ep_st.ready) uart_puts("[XHCI] keyboard ready\n");

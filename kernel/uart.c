@@ -4,6 +4,12 @@
 #define GPIO_BASE       (PERIPHERAL_BASE + 0x200000)
 #define UART0_BASE      (PERIPHERAL_BASE + 0x201000)
 
+// 1 MHz free-running system timer (started by the firmware) - used to stamp every
+// log line with the time since boot, so the boot log shows how long each stage
+// took and exactly where a hang stalls.
+#define TIMER_CLO       (*(volatile uint32_t *)(PERIPHERAL_BASE + 0x3004))
+#define TIMER_CHI       (*(volatile uint32_t *)(PERIPHERAL_BASE + 0x3008))
+
 // GPIO registers
 #define GPFSEL1         (*(volatile uint32_t *)(GPIO_BASE + 0x04))
 #define GPPUPPDN0       (*(volatile uint32_t *)(GPIO_BASE + 0xE4))
@@ -67,10 +73,46 @@ void uart_init(void) {
     UART0_CR = (1 << 9) | (1 << 8) | (1 << 0);
 }
 
-void uart_putc(char c) {
+// Low-level: emit one byte to the UART and tee it into the RAM log, with no
+// timestamp handling (used by uart_putc and by the timestamp emitter itself, so
+// the latter cannot recurse).
+static void uart_raw(char c) {
     if (log_len < LOG_CAP) log_buf[log_len++] = c;   // tee into the RAM log
     while (UART0_FR & (1 << 5));   // wait while TX FIFO full
     UART0_DR = (uint32_t)c;
+}
+
+static unsigned long long uart_micros(void) {
+    uint32_t hi, lo;
+    do { hi = TIMER_CHI; lo = TIMER_CLO; } while (hi != TIMER_CHI);  // guard 32-bit wrap
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+// Write "[  ssss.mmm] " (seconds.milliseconds since boot) at the start of a line.
+static void uart_stamp(void) {
+    unsigned long long ms  = uart_micros() / 1000ULL;
+    unsigned int       sec = (unsigned int)(ms / 1000ULL);
+    unsigned int       mil = (unsigned int)(ms % 1000ULL);
+    char b[8]; int n = 0;
+    do { b[n++] = (char)('0' + sec % 10); sec /= 10; } while (sec && n < 7);
+    uart_raw('[');
+    for (int pad = 4 - n; pad > 0; pad--) uart_raw(' ');   // right-align seconds to 4 cols
+    while (n) uart_raw(b[--n]);
+    uart_raw('.');
+    uart_raw((char)('0' + (mil / 100) % 10));
+    uart_raw((char)('0' + (mil / 10)  % 10));
+    uart_raw((char)('0' +  mil        % 10));
+    uart_raw(']'); uart_raw(' ');
+}
+
+// Are we at the start of a fresh log line? (Set after each '\n'.) A non-newline
+// character then triggers a timestamp prefix before it is emitted.
+static int at_line_start = 1;
+
+void uart_putc(char c) {
+    if (at_line_start && c != '\n' && c != '\r') { uart_stamp(); at_line_start = 0; }
+    uart_raw(c);
+    if (c == '\n') at_line_start = 1;
 }
 
 void uart_puts(const char *s) {

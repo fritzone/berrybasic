@@ -30,6 +30,7 @@ typedef struct xhci_dev {
     uint32_t route;
     uint8_t  cls, subcls, proto;      // from the INTERFACE descriptor
     int      ifnum, valid;
+    int      bulk_in, bulk_out, bulk_mps;  // mass-storage bulk endpoints (0 if none)
 } xhci_dev;
 
 int       xhci_dev_count(void);

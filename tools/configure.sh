@@ -120,12 +120,27 @@ EOF
 tools/genfont.sh "$FONT" drivers/font_data.c
 
 # --- 7. Patch the resolution block in boot/config.txt -----------------------
-awk -v w="$WIDTH" -v h="$HEIGHT" '
+# Prefer a STANDARD HDMI timing (CEA/DMT) for the common resolutions: custom-CVT
+# modes (hdmi_mode=87) are not reliably displayed by every monitor - some refuse
+# to lock them and show the firmware's output as a small centred colour square
+# while the kernel's framebuffer never appears. Fall back to a custom CVT timing
+# only for unusual sizes that have no standard mode.
+case "${WIDTH}x${HEIGHT}" in
+    640x480)   HGROUP=1; HMODE=1;  HCVT="" ;;   # CEA  480p60
+    1280x720)  HGROUP=1; HMODE=4;  HCVT="" ;;   # CEA  720p60
+    1920x1080) HGROUP=1; HMODE=16; HCVT="" ;;   # CEA 1080p60
+    800x600)   HGROUP=2; HMODE=9;  HCVT="" ;;   # DMT  800x600@60
+    1024x768)  HGROUP=2; HMODE=16; HCVT="" ;;   # DMT 1024x768@60
+    1280x1024) HGROUP=2; HMODE=35; HCVT="" ;;   # DMT 1280x1024@60
+    1600x1200) HGROUP=2; HMODE=51; HCVT="" ;;   # DMT 1600x1200@60
+    *)         HGROUP=2; HMODE=87; HCVT="hdmi_cvt=${WIDTH} ${HEIGHT} 60" ;;  # custom
+esac
+awk -v g="$HGROUP" -v m="$HMODE" -v cvt="$HCVT" '
     /^# >>> berrybasic-resolution/ {
         print
-        print "hdmi_group=2"
-        print "hdmi_mode=87"
-        print "hdmi_cvt=" w " " h " 60"
+        print "hdmi_group=" g
+        print "hdmi_mode=" m
+        if (cvt != "") print cvt
         skip = 1; next
     }
     /^# <<< berrybasic-resolution/ { skip = 0 }

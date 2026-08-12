@@ -7,6 +7,11 @@ TCC="$ROOT/third_party/tinycc"
 POD="$ROOT/podlib"
 DOOM="$ROOT/third_party/DOOM/linuxdoom-1.10"
 OUT="${1:-$ROOT/build/sys/DOOM.POD}"
+# Make OUT absolute BEFORE we cd into the source dir: the Makefile passes a path
+# relative to the repo root ($@ = build/sys/DOOM.POD), but tcc's -o below runs
+# after 'cd "$DOOM"', where that same relative path would resolve under the DOOM
+# source dir (which has no build/sys) and fail with "could not write ...".
+case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 mkdir -p "$(dirname "$OUT")"
 cd "$DOOM"
 "$TCC/arm64-tcc" -B"$TCC" -pod -nostdinc \

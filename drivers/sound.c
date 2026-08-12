@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include "sound.h"
 #include "mmu.h"        // dcache_clean_inval (flush ring/CB to RAM for the DMA)
+#include "uart.h"       // uart_puts (boot-log the audio init result)
 
 #define PERIPHERAL_BASE 0xFE000000UL
 #define GPIO_BASE       (PERIPHERAL_BASE + 0x200000)
@@ -63,6 +64,21 @@ static void delay(uint32_t n) {
     for (volatile uint32_t i = 0; i < n; i++) __asm__ volatile("nop");
 }
 
+// Wait until the PWM clock generator reports not-BUSY, but NEVER spin forever.
+// snd_init() runs at boot (from basic_init), and on some firmware hand-off states
+// the clock-manager BUSY bit stays set - an unbounded poll here wedges the whole
+// kernel before the BASIC prompt is ever drawn (symptom: boot stuck on the
+// firmware rainbow splash). Bail after a generous bound and carry on; the divisor
+// is reprogrammed regardless, so the worst case is a momentary audio glitch, not a
+// dead machine. Returns 1 if BUSY cleared, 0 if it timed out.
+static int cm_wait_not_busy(void) {
+    for (uint32_t i = 0; i < 2000000u; i++) {
+        if (!(CM_PWMCTL & CM_CTL_BUSY)) return 1;
+        __asm__ volatile("nop");
+    }
+    return 0;
+}
+
 // Set at boot from the board serial (see kernel.c). QEMU's raspi4b does not model
 // the PWM peripheral, so touching these registers there raises an external abort;
 // on QEMU this stays 0 and every entry point below becomes a no-op.
@@ -86,7 +102,7 @@ void snd_init(void) {
     // Program the PWM clock to PWM_CLK_HZ from the crystal oscillator. Stop it,
     // wait for BUSY to clear, set an integer-only divisor, then re-enable.
     CM_PWMCTL = CM_PASSWD | (CM_PWMCTL & ~CM_CTL_ENAB);
-    while (CM_PWMCTL & CM_CTL_BUSY) { }
+    int ok = cm_wait_not_busy();
     CM_PWMDIV = CM_PASSWD | ((OSC_HZ / PWM_CLK_HZ) << 12);   // DIVI, no fractional part
     CM_PWMCTL = CM_PASSWD | CM_SRC_OSC;                      // select source (still stopped)
     CM_PWMCTL = CM_PASSWD | CM_SRC_OSC | CM_CTL_ENAB;        // and go
@@ -95,6 +111,8 @@ void snd_init(void) {
     PWM_CTL = PWM_CLRF1;    // clear FIFO / reset the controller
     delay(150);
     PWM_CTL = 0;            // both channels off = idle low = silent
+    uart_puts(ok ? "[SND] audio init OK (PWM clock ready)\n"
+                 : "[SND] audio init: clock BUSY timeout (audio may be silent)\n");
 }
 
 void snd_silence(void) {
@@ -185,7 +203,7 @@ static void set_pwm_clock(uint32_t hz) {
     uint32_t divf = (uint32_t)(((uint64_t)(OSC_HZ % hz) << 12) / hz);
     if (divi < 2) divi = 2;
     CM_PWMCTL = CM_PASSWD | (CM_PWMCTL & ~CM_CTL_ENAB);
-    while (CM_PWMCTL & CM_CTL_BUSY) { }
+    cm_wait_not_busy();
     CM_PWMDIV = CM_PASSWD | (divi << 12) | (divf & 0xFFF);
     CM_PWMCTL = CM_PASSWD | CM_SRC_OSC | CM_MASH1;
     CM_PWMCTL = CM_PASSWD | CM_SRC_OSC | CM_MASH1 | CM_CTL_ENAB;

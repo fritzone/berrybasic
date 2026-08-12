@@ -7,8 +7,8 @@
 // ---------------------------------------------------------------------------
 
 // Native framebuffer resolution (pixels). boot/config.txt drives HDMI to match.
-#define CFG_FB_WIDTH   1280
-#define CFG_FB_HEIGHT  720
+#define CFG_FB_WIDTH   800
+#define CFG_FB_HEIGHT  600
 
 // Glyph cell (source pixels) and draw magnification. The font is 850_LAT1.F18.
 #define CFG_GLYPH_W    8

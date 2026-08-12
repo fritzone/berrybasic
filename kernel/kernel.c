@@ -14,6 +14,9 @@
 #include "storage.h"
 #include "pcie.h"
 #include "xhci.h"
+#include "msc.h"
+#include "blockdev.h"
+#include "partition.h"
 
 // ---------------------------------------------------------------------------
 // Display configuration. The native resolution comes from kernel/buildconfig.h
@@ -964,8 +967,44 @@ static void sysmon_paint(uint64_t now) {
 }
 
 // Public hooks (forward-declared up by term_pollchar).
+// DEBUG (real-HW keyboard bring-up): periodically dump the xHCI keyboard-input
+// counters to KBDLOG.TXT. The VL805 xHCI is not emulated by QEMU and there is no
+// serial cable, so this is how we see what the keyboard endpoint is doing: boot,
+// type for a while, power off, read KBDLOG.TXT. Remove once input works.
+extern volatile unsigned xhci_dbg_pumps, xhci_dbg_events, xhci_dbg_kev,
+                         xhci_dbg_kcc, xhci_dbg_keys;
+extern volatile unsigned char xhci_dbg_krep[8];
+
+static void kbdlog_tick(void) {
+    if (!g_sd_ready || !g_xhci_ok) return;
+    static uint64_t last = 0;
+    uint64_t now = con_micros();
+    if (last && now - last < 1500000ull) return;   // ~1.5 s between writes
+    last = now;
+
+    char b[256]; int n = 0;
+    #define KADD(s) do { const char *p_=(s); while(*p_ && n<250) b[n++]=*p_++; } while(0)
+    #define KNUM(v) do { char t_[12]; int m_=0; unsigned x_=(unsigned)(v); \
+        if(!x_)t_[m_++]='0'; while(x_){t_[m_++]=(char)('0'+x_%10);x_/=10;} \
+        while(m_&&n<250)b[n++]=t_[--m_]; } while(0)
+    KADD("xHCI keyboard input debug\n");
+    KADD("pumps ="); KNUM(xhci_dbg_pumps);  KADD("  getchar polls\n");
+    KADD("events="); KNUM(xhci_dbg_events); KADD("  transfer events seen\n");
+    KADD("kbd_ev="); KNUM(xhci_dbg_kev);    KADD("  keyboard completions\n");
+    KADD("lastcc="); KNUM(xhci_dbg_kcc);    KADD("  (1=success,13=short,else=err)\n");
+    KADD("keys  ="); KNUM(xhci_dbg_keys);   KADD("  decoded keys\n");
+    KADD("report=");
+    for (int i = 0; i < 8; i++) { KNUM(xhci_dbg_krep[i]); KADD(" "); }
+    KADD("\n");
+    #undef KADD
+    #undef KNUM
+    b[n] = 0;
+    stg_write("KBDLOG.TXT", b, n);
+}
+
 static void sysmon_tick(void) {
     if (!fb_ready) return;
+    kbdlog_tick();                     // DEBUG: xHCI keyboard counters -> KBDLOG.TXT
     if (!g_sysmon_on) { if (g_sysmon_drawn) sysmon_erase(); return; }
     uint64_t now = con_micros();
     if (g_sysmon_drawn && (now - g_sysmon_last) < 300000ull) return;   // throttle repaint
@@ -2075,7 +2114,10 @@ static int fb_configure(uint32_t w, uint32_t h) {
     uart_dec("[FB] width:  ", mbox[5]);
     uart_dec("[FB] height: ", mbox[6]);
     uart_hex("[FB] bus addr: ", mbox[23]);
+    uart_dec("[FB] size:   ", mbox[24]);   // bytes the GPU allocated (0 on some firmware)
     uart_dec("[FB] pitch:  ", mbox[28]);
+    uart_dec("[FB] depth:  ", mbox[15]);   // bits per pixel actually granted
+    uart_dec("[FB] order:  ", mbox[19]);   // 0 = BGR, 1 = RGB actually granted
 
     if (!ok || mbox[28] == 0) return 0;
 
@@ -2083,9 +2125,16 @@ static int fb_configure(uint32_t w, uint32_t h) {
     uint32_t fb_phys = fb_bus & 0x3FFFFFFF;  // strip VideoCore bus alias
     uint32_t pitch   = mbox[28];
     uint32_t fb_size = mbox[24];
+    // Some firmware returns 0 for the allocated size. We rely on this to mark the
+    // buffer non-cacheable once the MMU is up; if it were 0 the framebuffer would
+    // stay cached and the display would show stale/garbage pixels on real hardware
+    // (QEMU ignores caching, so it would look fine there). Fall back to the exact
+    // buffer extent (pitch * height) so the whole surface is always covered.
+    if (fb_size == 0) fb_size = pitch * mbox[6];
     uint32_t *fb     = (uint32_t *)(uintptr_t)fb_phys;
 
     uart_hex("[FB] physical: ", fb_phys);
+    uart_dec("[FB] use size: ", fb_size);
     g_fb_phys = fb_phys;
     g_fb_size = fb_size;
     g_fb_w    = mbox[5];                     // the GPU may round to a supported size
@@ -2165,6 +2214,8 @@ void kernel_main(void) {
     // real hardware this invalidates stale firmware cache state first.
     boot_msg("[MMU] enabling MMU + caches...\n");
     mmu_init();
+    uart_hex("[MMU] FB non-cached base: ", g_fb_phys);
+    uart_dec("[MMU] FB non-cached size: ", g_fb_size);
     mmu_set_noncached(g_fb_phys, g_fb_size);   // re-mark FB NC (mmu_init rebuilt the tables)
     boot_msg("[MMU] enabled\n");
 
@@ -2172,6 +2223,8 @@ void kernel_main(void) {
     // prints; clearing the boot-progress text first).
     int real_hw = board_real_hw();
     g_real_hw = real_hw;                        // let the audio driver know (skips PWM on QEMU)
+    boot_msg(real_hw ? "[BOARD] real Pi hardware (PWM audio + PCIe enabled)\n"
+                     : "[BOARD] QEMU/emulated (PWM audio + PCIe skipped)\n");
     g_show_logo = 1;
 
     // Mount the SD card (the data partition holds the user's BASIC programs).
@@ -2200,18 +2253,43 @@ void kernel_main(void) {
                            : "[USB] no USB-A keyboard\n");
         g_mouse_xhci = xhci_mouse_present();
         if (g_mouse_xhci) boot_msg("[USB] mouse ready (USB-A)\n");
+
+        // USB mass storage (Phase 3): bring up any BOT/SCSI stick enumerated on
+        // the xHCI and register it as a blockdev, then scan each for partitions
+        // (mounting + BASIC access is Phase 4 - this just proves the read path).
+        if (xhci_mmio && msc_init() > 0) {
+            boot_msg("[USB] mass storage ready\n");
+            for (int bi = 1; bi < blk_count(); bi++) {          // 0 = SD boot device
+                blockdev *b = blk_get(bi);
+                if (!b || !b->present) continue;
+                partition parts[PART_MAX];
+                int np = part_scan(bi, parts, PART_MAX);
+                uart_dec("[USB] blk ", (uint32_t)bi);
+                uart_dec("[USB]   partitions ", (uint32_t)np);
+                for (int p = 0; p < np; p++)
+                    uart_hex("[USB]   part MBR type ", parts[p].mbr_type);
+            }
+        }
     }
 
     // Select the configured keyboard layout (default US); a program can change
     // it at run time with the KEYBOARD statement.
     hid_set_layout(CFG_KBD_LAYOUT);
 
-    // Write the full boot log to BOOTLOG.TXT on the data partition so USB
-    // enumeration can be diagnosed on real hardware (no serial cable needed).
+    // Write the boot log so far (USB enumeration) to BOOTLOG.TXT on the data
+    // partition, so it can be diagnosed on real hardware with no serial cable.
+    flush_boot_log();
+
+    // Interpreter bring-up. This touches audio hardware (snd_init) and scans the
+    // /seed directory - both can stall on real silicon - so log it and flush the
+    // log AGAIN afterwards: if a future change hangs here, the last timestamped
+    // line in BOOTLOG.TXT pinpoints the stage instead of ending at the USB probe.
+    boot_msg("[BASIC] initialising interpreter (audio, keywords)...\n");
+    basic_init();
+    boot_msg("[BASIC] interpreter ready\n");
     flush_boot_log();
 
     // Hand control to the BASIC interpreter (runs forever on the target).
-    boot_msg("[LOOP] entering BASIC\n");
-    basic_init();
+    boot_msg("[LOOP] entering BASIC REPL\n");
     basic_repl();
 }
