@@ -58,6 +58,7 @@ typedef struct fs_driver {
     int  (*open )(fs_vol *v, const char *name, int mode);
     int  (*close)(fs_vol *v, int ch);
     int  (*getb )(fs_vol *v, int ch);
+    int  (*readn)(fs_vol *v, int ch, void *buf, int n);  // bulk read (fast path)
     int  (*putb )(fs_vol *v, int ch, int byte);
     long (*size )(fs_vol *v, int ch);
     long (*tell )(fs_vol *v, int ch);
@@ -70,6 +71,15 @@ int      fs_mount(int blkdev, uint64_t start, const char *volname);  // -> volum
 int      fs_unmount(int vol);
 fs_vol  *fs_vol_get(int vol);                      // 0 if absent
 int      fs_vol_count(void);
+
+// --- mount points + the stg_* path router (Phase 4, in vfs.c) ---------------
+// Graft a mounted volume into the single path tree at `at` ("/" for the SD root,
+// "/USB" for a stick). The stg_* surface (storage.h) then routes each path to a
+// volume by longest-matching mount prefix; relative paths use the current volume.
+int  fs_add_mount(int vol, const char *at);
+// Scan a block device, mount its first usable FAT volume, and graft it at `at`.
+// Returns the volume index (>=0) or <0. Used for USB sticks (see kernel boot).
+int  fs_automount(int blkdev, const char *volname, const char *at);
 
 // Boot-log one partition's identification + size, in the house style, e.g.
 //   [BLK] usb0p1: exFAT, 57.2 GB - mounted as usb0

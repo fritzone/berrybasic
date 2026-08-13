@@ -1164,6 +1164,7 @@ static int  op_dirnext(fs_vol *v, stg_dirent *o) { return fatv_dirnext((fat_vol 
 static int  op_open   (fs_vol *v, const char *n, int m) { return fatv_open((fat_vol *)v->priv, n, m); }
 static int  op_close  (fs_vol *v, int ch) { return fatv_close((fat_vol *)v->priv, ch); }
 static int  op_getb   (fs_vol *v, int ch) { return fatv_getb((fat_vol *)v->priv, ch); }
+static int  op_readn  (fs_vol *v, int ch, void *b, int n) { return fatv_readn((fat_vol *)v->priv, ch, b, n); }
 static int  op_putb   (fs_vol *v, int ch, int b) { return fatv_putb((fat_vol *)v->priv, ch, b); }
 static long op_size   (fs_vol *v, int ch) { return fatv_size((fat_vol *)v->priv, ch); }
 static long op_tell   (fs_vol *v, int ch) { return fatv_tell((fat_vol *)v->priv, ch); }
@@ -1176,7 +1177,7 @@ static const fs_driver fat_driver = {
     .read_all = op_read_all, .write_all = op_write_all, .remove = op_remove,
     .mkdir = op_mkdir, .rmdir = op_rmdir, .chdir = op_chdir, .cwd = op_cwd,
     .dir = op_dir, .diropen = op_diropen, .dirnext = op_dirnext,
-    .open = op_open, .close = op_close, .getb = op_getb, .putb = op_putb,
+    .open = op_open, .close = op_close, .getb = op_getb, .readn = op_readn, .putb = op_putb,
     .size = op_size, .tell = op_tell, .seek = op_seek, .eof = op_eof,
 };
 
@@ -1193,7 +1194,6 @@ static int sd_blk_write(void *ctx, uint32_t lba, uint32_t n, const void *buf) { 
 static const blockdev sd_blockdev = { "sd0", sd_blk_read, sd_blk_write, 0, 0, 0 };
 
 int stg_init(void) {
-    boot = 0;
     if (sd_init()) { uart_puts("[FAT] SD init failed\n"); return STG_EIO; }
     fat_register();                                     /* and later exfat_register() */
 
@@ -1212,31 +1212,10 @@ int stg_init(void) {
 
     int vol = fs_mount(b, p[chosen].start_lba, "sd");
     if (vol < 0) { uart_puts("[FAT] mount failed\n"); return STG_ENOFS; }
-    boot = (fat_vol *)fs_vol_get(vol)->priv;
+    fs_add_mount(vol, "/");                              // SD is the root of the path tree
     uart_puts("[BLK] sd0p"); uart_putc((char)('1' + chosen)); uart_puts(": mounted as sd\n");
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// storage.h surface: single boot volume in Phase 1 (Phase 4 routes per volume).
-// ---------------------------------------------------------------------------
-int  stg_read (const char *name, char *buf, int maxlen) { return boot ? fatv_read(boot, name, buf, maxlen) : STG_ENOFS; }
-int  stg_write(const char *name, const char *data, int len) { return boot ? fatv_write(boot, name, data, len) : STG_ENOFS; }
-int  stg_delete(const char *name) { return boot ? fatv_delete(boot, name) : STG_ENOFS; }
-void stg_dir(void) { if (boot) fatv_dir(boot); else con_puts("No disk\n"); }
-int  stg_mkdir(const char *path) { return boot ? fatv_mkdir(boot, path) : STG_ENOFS; }
-int  stg_rmdir(const char *path) { return boot ? fatv_rmdir(boot, path) : STG_ENOFS; }
-int  stg_chdir(const char *path) { return boot ? fatv_chdir(boot, path) : STG_ENOFS; }
-const char *stg_cwd(void) { return boot ? fatv_cwd(boot) : "/"; }
-int  stg_diropen(const char *path) { return boot ? fatv_diropen(boot, path) : STG_ENOFS; }
-int  stg_dirnext(stg_dirent *out) { return boot ? fatv_dirnext(boot, out) : STG_ENOFS; }
-int  stg_open(const char *name, int mode) { return boot ? fatv_open(boot, name, mode) : 0; }
-int  stg_close(int ch) { return boot ? fatv_close(boot, ch) : STG_EBADF; }
-void stg_close_all(void) { if (boot) fatv_close_all(boot); }
-int  stg_getb(int ch) { return boot ? fatv_getb(boot, ch) : STG_EBADF; }
-int  stg_readn(int ch, void *buf, int n) { return boot ? fatv_readn(boot, ch, buf, n) : STG_EBADF; }
-int  stg_putb(int ch, int byte) { return boot ? fatv_putb(boot, ch, byte) : STG_EBADF; }
-long stg_size(int ch) { return boot ? fatv_size(boot, ch) : STG_EBADF; }
-long stg_tell(int ch) { return boot ? fatv_tell(boot, ch) : STG_EBADF; }
-int  stg_seek(int ch, long pos) { return boot ? fatv_seek(boot, ch, pos) : STG_EBADF; }
-int  stg_eof(int ch) { return boot ? fatv_eof(boot, ch) : 1; }
+// The storage.h (stg_*) surface now lives in vfs.c, which routes each path to a
+// mounted volume's fs_driver ops (this file provides the FAT ops via fat_driver).

@@ -28,9 +28,11 @@ static void delay(uint32_t n) {
     for (volatile uint32_t i = 0; i < n; i++) __asm__ volatile("nop");
 }
 
-// In-RAM copy of everything sent to the UART, so the boot log can be dumped to a
-// file on the SD card (handy when no serial cable is available).
-#define LOG_CAP 32768
+// In-RAM copy of everything sent to the UART, so the log can be dumped to a file
+// on the SD card (handy when no serial cable is available). It is a ROLLING log:
+// once full it keeps the most recent half and drops the oldest, so a long session
+// (or verbose hardware tracing) always has recent history instead of stopping.
+#define LOG_CAP 65536
 static char log_buf[LOG_CAP];
 static int  log_len = 0;
 
@@ -77,7 +79,12 @@ void uart_init(void) {
 // timestamp handling (used by uart_putc and by the timestamp emitter itself, so
 // the latter cannot recurse).
 static void uart_raw(char c) {
-    if (log_len < LOG_CAP) log_buf[log_len++] = c;   // tee into the RAM log
+    if (log_len >= LOG_CAP) {                         // full: keep the recent half
+        int keep = LOG_CAP / 2;
+        for (int i = 0; i < keep; i++) log_buf[i] = log_buf[LOG_CAP - keep + i];
+        log_len = keep;
+    }
+    log_buf[log_len++] = c;                           // tee into the rolling RAM log
     while (UART0_FR & (1 << 5));   // wait while TX FIFO full
     UART0_DR = (uint32_t)c;
 }

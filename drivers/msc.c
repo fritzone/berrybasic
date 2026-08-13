@@ -54,23 +54,24 @@ static int bot_xfer(msc_dev *m, const uint8_t *cdb, int cdblen,
     c[14] = cdblen;                                                 // bCBWCBLength
     for (int i = 0; i < cdblen && i < 16; i++) c[15 + i] = cdb[i];  // CBWCB
 
-    if (xhci_bulk_out(m->slot, c, 31, 2000) < 0) return -1;         // command phase
-
+    if (xhci_bulk_out(m->slot, c, 31, 2000) < 0) {                  // command phase
+        uart_hex("[MSC] CBW send failed, cdb ", cdb[0]); return -1;
+    }
     if (datalen > 0) {                                             // data phase
         int r = dir_in ? xhci_bulk_in (m->slot, data, datalen, 5000)
                        : xhci_bulk_out(m->slot, data, datalen, 5000);
         if (r == -2) xhci_ep_reset(m->slot, dir_in ? m->ep_in : m->ep_out);  // stall: clear, get CSW
-        else if (r < 0) return -2;
+        else if (r < 0) { uart_hex("[MSC] data phase failed, cdb ", cdb[0]); return -2; }
     }
 
     int r = xhci_bulk_in(m->slot, g_csw, 13, 2000);               // status phase
     if (r == -2) { xhci_ep_reset(m->slot, m->ep_in); r = xhci_bulk_in(m->slot, g_csw, 13, 2000); }
-    if (r < 0) return -3;
+    if (r < 0) { uart_hex("[MSC] CSW recv failed, cdb ", cdb[0]); return -3; }
 
     uint8_t *s = g_csw;
     uint32_t sig = s[0] | (s[1] << 8) | (s[2] << 16) | ((uint32_t)s[3] << 24);
-    if (sig != CSW_SIG) return -4;
-    if (s[12] != 0)     return -5;                                 // bCSWStatus != pass
+    if (sig != CSW_SIG) { uart_hex("[MSC] bad CSW sig, cdb ", cdb[0]); return -4; }
+    if (s[12] != 0)     { uart_hex("[MSC] CSW status fail, cdb ", cdb[0]); return -5; }
     return 0;
 }
 
@@ -129,11 +130,16 @@ static int msc_blk_read(void *ctx, uint32_t lba, uint32_t n, void *buf) {
 static int msc_blk_write(void *ctx, uint32_t lba, uint32_t n, const void *buf) {
     msc_dev *m = (msc_dev *)ctx;
     const uint8_t *s = (const uint8_t *)buf;
+    // Trace writes (the operation most likely to stall) BEFORE issuing them, so a
+    // hang leaves the target LBA/count as the last line in /BOOTLOG.TXT.
+    uart_dec("[MSC] blk write lba ", lba);
+    uart_dec("[MSC]   sectors ", n);
     while (n) {
         uint32_t chunk = n > BOUNCE_SECTORS ? BOUNCE_SECTORS : n;
-        if (scsi_rw10(m, lba, chunk, (void *)s, 1) < 0) return -1;
+        if (scsi_rw10(m, lba, chunk, (void *)s, 1) < 0) { uart_dec("[MSC] write FAILED at lba ", lba); return -1; }
         lba += chunk; n -= chunk; s += chunk * BLK_SECSZ;
     }
+    uart_puts("[MSC] blk write ok\n");
     return 0;
 }
 

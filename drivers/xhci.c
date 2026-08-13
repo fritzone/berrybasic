@@ -865,27 +865,9 @@ static int key_pop(void) {
 // Route one transfer-event completion to the keyboard or mouse interrupt
 // endpoint by (slot, DCI), decoding + re-arming it. Shared by xhci_pump and the
 // bulk-transfer wait, so a HID report that lands mid-bulk-transfer is not lost.
-// Real-hardware keyboard-input diagnostics. The VL805 xHCI is not emulated by
-// QEMU, so input can only be debugged on the board - and with no serial cable the
-// numbers are surfaced via KBDLOG.TXT (see kernel.c). Counts let us tell apart
-// "no transfer events at all" (endpoint/doorbell/TT problem) from "events arrive
-// but decode to nothing" (report/decoding problem).
-volatile unsigned xhci_dbg_pumps  = 0;   // xhci_pump() invocations
-volatile unsigned xhci_dbg_events = 0;   // transfer events the pump has seen
-volatile unsigned xhci_dbg_kev    = 0;   // keyboard-endpoint completions
-volatile unsigned xhci_dbg_kcc    = 0;   // last keyboard completion code
-volatile unsigned xhci_dbg_keys   = 0;   // decoded keys pushed to the FIFO
-volatile unsigned char xhci_dbg_krep[8]; // last raw keyboard report
-
 static void handle_hid_event(int sid, int eid, int cc) {
     if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
-        xhci_dbg_kev++; xhci_dbg_kcc = (unsigned)cc;
-        for (int i = 0; i < 8; i++) xhci_dbg_krep[i] = kbd_ep_st.buf[i];
-        if (cc == 1 || cc == 13) {
-            int k = hid_report_key(kbd_ep_st.buf, kbd_prev);
-            if (k) xhci_dbg_keys++;
-            key_push(k);
-        }
+        if (cc == 1 || cc == 13) key_push(hid_report_key(kbd_ep_st.buf, kbd_prev));
         hid_rearm(&kbd_ep_st);
     } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
         if (cc == 1 || cc == 13) {
@@ -902,11 +884,9 @@ static void xhci_pump(void) {
     static uint32_t idle = 0;
     trb_t ev;
     int got = 0;
-    xhci_dbg_pumps++;
     while (next_event(&ev, 1)) {
         if (TRB_GET_TYPE(ev.control) != TRB_TRANSFER_EVENT) continue;
         got = 1;
-        xhci_dbg_events++;
         int sid = (ev.control >> 24) & 0xff;
         int eid = (ev.control >> 16) & 0x1f;
         int cc  = COMP_CODE(ev.status);

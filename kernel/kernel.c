@@ -17,6 +17,7 @@
 #include "msc.h"
 #include "blockdev.h"
 #include "partition.h"
+#include "fs.h"
 
 // ---------------------------------------------------------------------------
 // Display configuration. The native resolution comes from kernel/buildconfig.h
@@ -250,8 +251,8 @@ static void flush_boot_log(void) {
     busy = 1;
     const char *buf; int len;
     uart_log_get(&buf, &len);
-    stg_write("BOOTLOG.TXT", buf, len);
-    busy = 0;
+    stg_write("/BOOTLOG.TXT", buf, len);   // ABSOLUTE: always the SD root, never the
+    busy = 0;                              // current volume (e.g. a USB stick under /USB)
 }
 
 // Emit a boot-progress line to *both* the UART/RAM log and, once it exists, the
@@ -966,45 +967,8 @@ static void sysmon_paint(uint64_t now) {
     sysmon_render(now);
 }
 
-// Public hooks (forward-declared up by term_pollchar).
-// DEBUG (real-HW keyboard bring-up): periodically dump the xHCI keyboard-input
-// counters to KBDLOG.TXT. The VL805 xHCI is not emulated by QEMU and there is no
-// serial cable, so this is how we see what the keyboard endpoint is doing: boot,
-// type for a while, power off, read KBDLOG.TXT. Remove once input works.
-extern volatile unsigned xhci_dbg_pumps, xhci_dbg_events, xhci_dbg_kev,
-                         xhci_dbg_kcc, xhci_dbg_keys;
-extern volatile unsigned char xhci_dbg_krep[8];
-
-static void kbdlog_tick(void) {
-    if (!g_sd_ready || !g_xhci_ok) return;
-    static uint64_t last = 0;
-    uint64_t now = con_micros();
-    if (last && now - last < 1500000ull) return;   // ~1.5 s between writes
-    last = now;
-
-    char b[256]; int n = 0;
-    #define KADD(s) do { const char *p_=(s); while(*p_ && n<250) b[n++]=*p_++; } while(0)
-    #define KNUM(v) do { char t_[12]; int m_=0; unsigned x_=(unsigned)(v); \
-        if(!x_)t_[m_++]='0'; while(x_){t_[m_++]=(char)('0'+x_%10);x_/=10;} \
-        while(m_&&n<250)b[n++]=t_[--m_]; } while(0)
-    KADD("xHCI keyboard input debug\n");
-    KADD("pumps ="); KNUM(xhci_dbg_pumps);  KADD("  getchar polls\n");
-    KADD("events="); KNUM(xhci_dbg_events); KADD("  transfer events seen\n");
-    KADD("kbd_ev="); KNUM(xhci_dbg_kev);    KADD("  keyboard completions\n");
-    KADD("lastcc="); KNUM(xhci_dbg_kcc);    KADD("  (1=success,13=short,else=err)\n");
-    KADD("keys  ="); KNUM(xhci_dbg_keys);   KADD("  decoded keys\n");
-    KADD("report=");
-    for (int i = 0; i < 8; i++) { KNUM(xhci_dbg_krep[i]); KADD(" "); }
-    KADD("\n");
-    #undef KADD
-    #undef KNUM
-    b[n] = 0;
-    stg_write("KBDLOG.TXT", b, n);
-}
-
 static void sysmon_tick(void) {
     if (!fb_ready) return;
-    kbdlog_tick();                     // DEBUG: xHCI keyboard counters -> KBDLOG.TXT
     if (!g_sysmon_on) { if (g_sysmon_drawn) sysmon_erase(); return; }
     uint64_t now = con_micros();
     if (g_sysmon_drawn && (now - g_sysmon_last) < 300000ull) return;   // throttle repaint
@@ -2254,20 +2218,20 @@ void kernel_main(void) {
         g_mouse_xhci = xhci_mouse_present();
         if (g_mouse_xhci) boot_msg("[USB] mouse ready (USB-A)\n");
 
-        // USB mass storage (Phase 3): bring up any BOT/SCSI stick enumerated on
-        // the xHCI and register it as a blockdev, then scan each for partitions
-        // (mounting + BASIC access is Phase 4 - this just proves the read path).
+        // USB mass storage (Phase 3+4): bring up any BOT/SCSI stick as a blockdev,
+        // then graft its filesystem into the path tree - the first stick at /USB,
+        // a second at /USB1, ... - so BASIC reaches it with CD "/USB", CAT, LOAD.
         if (xhci_mmio && msc_init() > 0) {
-            boot_msg("[USB] mass storage ready\n");
+            int usbn = 0;
             for (int bi = 1; bi < blk_count(); bi++) {          // 0 = SD boot device
                 blockdev *b = blk_get(bi);
                 if (!b || !b->present) continue;
-                partition parts[PART_MAX];
-                int np = part_scan(bi, parts, PART_MAX);
-                uart_dec("[USB] blk ", (uint32_t)bi);
-                uart_dec("[USB]   partitions ", (uint32_t)np);
-                for (int p = 0; p < np; p++)
-                    uart_hex("[USB]   part MBR type ", parts[p].mbr_type);
+                char mp[8] = { '/', 'U', 'S', 'B', 0, 0, 0, 0 };
+                if (usbn > 0) mp[4] = (char)('0' + usbn);       // /USB1, /USB2, ...
+                if (fs_automount(bi, "usb", mp) >= 0) {
+                    boot_msg("[USB] mounted "); boot_msg(mp); boot_msg("\n");
+                    usbn++;
+                }
             }
         }
     }
