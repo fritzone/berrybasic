@@ -214,7 +214,7 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
     }
     if (caps & POD_CAP_TIME) s->time_cs = svc_time_cs;
     if (caps & POD_CAP_HEAP) { s->alloc = svc_alloc; s->free = svc_free; s->realloc = svc_realloc; s->alloc_aligned = svc_alloc_aligned; s->icache_sync = svc_icache_sync; }
-    if (caps & POD_CAP_SPAWN) s->spawn = svc_pod_spawn;
+    if (caps & POD_CAP_SPAWN) { s->spawn = svc_pod_spawn; s->run_basic = svc_run_basic; }
     if (caps & POD_CAP_DIRS) {
         s->mkdir = svc_pod_mkdir;
         s->dir_open = svc_dir_open; s->dir_read = svc_dir_read;

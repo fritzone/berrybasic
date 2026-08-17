@@ -19,8 +19,9 @@
 // (ABI 4). v14 was the first unified version; v15 appended `vdu`; v16 appended
 // `screen_size`; v17 appended `con_font`/`con_glyph`; v18 appended the directory
 // browsing set (dir_open/dir_read/getcwd/chdir); v19 appended the clipboard
-// (clip_set/clip_get/clip_len); v20 appended icache_sync.
-#define BERRY_ABI_VERSION 23u
+// (clip_set/clip_get/clip_len); v20 appended icache_sync; v21-23 blit/keys/audio;
+// v24 appended run_basic.
+#define BERRY_ABI_VERSION 24u
 
 // Modes for the file_open service.
 #define BERRY_FOPEN_READ   0
@@ -265,6 +266,11 @@ typedef struct BerryServices {
     int  (*audio_avail)(void);                        // free stereo frames
     int  (*audio_write)(const short *stereo, int frames);  // -> frames accepted
     void (*audio_close)(void);
+
+    // v24: run a BASIC program (CAP_SPAWN). Queues `path` to load and run once
+    // the calling POD exits (the CHAIN mechanism), so a tool like the editor can
+    // save and run the current program. Returns 0 if queued, <0 on error.
+    int  (*run_basic)(const char *path);
 } BerryServices;
 
 // The one services pointer the berry-libc reads. A POD's crt0 sets it before

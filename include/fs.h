@@ -10,7 +10,7 @@
 // line - not surgery on the mount path. Fixed pools, no malloc.
 // ---------------------------------------------------------------------------
 
-#define FS_MAX_VOL 4
+#define FS_MAX_VOL 6      // SD root + up to 5 USB volumes
 
 // --- filesystem identification (always, even when we can't mount it) --------
 typedef enum {
@@ -80,6 +80,10 @@ int  fs_add_mount(int vol, const char *at);
 // Scan a block device, mount its first usable FAT volume, and graft it at `at`.
 // Returns the volume index (>=0) or <0. Used for USB sticks (see kernel boot).
 int  fs_automount(int blkdev, const char *volname, const char *at);
+// Hot-plug helpers: is a volume mounted on this blockdev, and unmount+ungraft it.
+int  fs_blkdev_mounted(int blkdev);
+int  fs_unmount_blkdev(int blkdev);
+int  fs_mount_in_use(const char *at);   // is this mount point already taken?
 
 // Boot-log one partition's identification + size, in the house style, e.g.
 //   [BLK] usb0p1: exFAT, 57.2 GB - mounted as usb0

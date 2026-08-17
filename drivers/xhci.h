@@ -31,10 +31,20 @@ typedef struct xhci_dev {
     uint8_t  cls, subcls, proto;      // from the INTERFACE descriptor
     int      ifnum, valid;
     int      bulk_in, bulk_out, bulk_mps;  // mass-storage bulk endpoints (0 if none)
+    int      hub_port;                // downstream port of the onboard hub (0 = root)
 } xhci_dev;
 
 int       xhci_dev_count(void);
 xhci_dev *xhci_dev_get(int i);        // 0 if out of range
+
+// --- hot-plug (real hardware) -----------------------------------------------
+// Re-poll the onboard hub's downstream ports: enumerate any newly-attached
+// device into the device table, and mark+free any that vanished. Cheap when
+// nothing changed (a few control transfers). Returns a bitmask: 1 = a device was
+// added, 2 = a device was removed, 0 = no change. Call it periodically.
+int  xhci_rescan(void);
+// 1 if `slot` still describes a live (valid) enumerated device.
+int  xhci_slot_valid(int slot);
 
 // Control transfer on a device's default (EP0) pipe. Buffers MUST come from
 // xhci_dma_alloc. Returns 0 on success, <0 on error.

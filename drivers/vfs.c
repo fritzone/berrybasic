@@ -176,6 +176,48 @@ int stg_eof(int ch) {
     fs_vol *v = g_ch[ch].v; return D(v)->eof ? D(v)->eof(v, g_ch[ch].dch) : 1;
 }
 
+// --- hot-plug: is anything mounted on this blockdev? ------------------------
+int fs_blkdev_mounted(int blkdev) {
+    for (int i = 0; i < FS_MAX_VOL; i++) {
+        fs_vol *v = fs_vol_get(i);
+        if (v && v->blkdev == blkdev) return 1;
+    }
+    return 0;
+}
+
+// Is a mount point already grafted into the tree? (Used to pick a free /USBn for
+// each additional stick.) Case-insensitive, matching the path router.
+int fs_mount_in_use(const char *at) {
+    for (int i = 0; i < g_mnt_n; i++) {
+        const char *a = g_mnt[i].at; int j = 0;
+        while (a[j] && at[j] && lc(a[j]) == lc(at[j])) j++;
+        if (a[j] == 0 && at[j] == 0) return 1;
+    }
+    return 0;
+}
+
+// Hot-plug removal: unmount whatever is mounted on `blkdev` and drop its mount
+// point from the tree. Closes any channels open on it, resets the dir cursor, and
+// if you were "in" that volume drops you back to the SD root. 0 if unmounted.
+int fs_unmount_blkdev(int blkdev) {
+    for (int i = 0; i < FS_MAX_VOL; i++) {
+        fs_vol *v = fs_vol_get(i);
+        if (!v || v->blkdev != blkdev) continue;
+        for (int m = 0; m < g_mnt_n; )                    // drop its mount point(s)
+            if (g_mnt[m].vol == i) {
+                for (int k = m; k < g_mnt_n - 1; k++) g_mnt[k] = g_mnt[k + 1];
+                g_mnt_n--;
+            } else m++;
+        if (g_cur == i) g_cur = (g_mnt_n > 0) ? g_mnt[0].vol : -1;   // leave the gone volume
+        for (int g = 1; g <= STG_MAXCH; g++)              // invalidate its open channels
+            if (g_ch[g].used && g_ch[g].v == v) g_ch[g].used = 0;
+        if (g_dirvol == v) g_dirvol = 0;
+        fs_unmount(i);
+        return 0;
+    }
+    return -1;
+}
+
 // --- automount a block device's first usable FAT at a mount point -----------
 int fs_automount(int blkdev, const char *volname, const char *at) {
     partition p[PART_MAX];

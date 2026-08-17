@@ -11,6 +11,8 @@
 #include "gfx.h"
 #include "basic.h"
 
+#include "conf.h"
+
 // ===========================================================================
 // BerryBasiC - A small BBC-flavoured BASIC interpreter.
 //
@@ -135,10 +137,12 @@ void basic_repl(void) {
     static char line[LINE_LEN];
     // Boot logo (target/QEMU only). When it shows the logo it prints the banner
     // beside it and returns 1; otherwise we print the banner ourselves.
-    if (!con_splash("BerryBasic (C) 2026 fritzone"))
-        con_puts("BerryBasic (C) 2026 fritzone\n\n");
+    if (!con_splash(COPYRIGHT_MESSAGE))
+    {
+        con_puts(COPYRIGHT_MESSAGE"\n\n");
+    }
     for (;;) {
-        const char *prompt = ">";               // BBC BASIC prompt
+        const char *prompt = ">";                // BBC BASIC prompt
         int pre = 0;                             // editable prefill already in `line`
         int was_auto = g_auto_active;            // auto-numbering this line?
         if (g_auto_active) {                     // AUTO: offer the next line number

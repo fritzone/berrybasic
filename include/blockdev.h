@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 #define BLK_SECSZ    512
-#define BLK_MAX_DEV  4
+#define BLK_MAX_DEV  6      // SD (index 0) + up to 5 USB sticks
 
 typedef struct blockdev {
     const char *name;                                   // "sd0", "usb0"

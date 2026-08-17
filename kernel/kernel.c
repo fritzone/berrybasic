@@ -342,21 +342,38 @@ static char poll_byte_ms(int ms) {
 // Map a terminal CSI escape sequence (after ESC) to an editing key, for serial
 // use. The HID keyboard delivers KEY_* codes directly.
 static int read_esc_seq(void) {
-    if (poll_byte_ms(20) != '[') return KEY_ESC;      // nothing followed: a bare Esc
     char b = poll_byte_ms(20);
-    switch (b) {
+    if (b != '[' && b != 'O') return KEY_ESC;         // nothing (or not CSI/SS3): a bare Esc
+    b = poll_byte_ms(20);
+    switch (b) {                                       // single-char CSI / SS3
         case 'A': return KEY_UP;
         case 'B': return KEY_DOWN;
         case 'C': return KEY_RIGHT;
         case 'D': return KEY_LEFT;
         case 'H': return KEY_HOME;
         case 'F': return KEY_END;
-        case '2': poll_byte_ms(20); return KEY_INS;   // ESC [ 2 ~
-        case '3': poll_byte_ms(20); return KEY_DEL;   // ESC [ 3 ~
-        case '5': poll_byte_ms(20); return KEY_PGUP;  // ESC [ 5 ~
-        case '6': poll_byte_ms(20); return KEY_PGDN;  // ESC [ 6 ~
-        default:  return 0;
+        case 'P': return KEY_F(1);                     // SS3: ESC O P..S = F1..F4
+        case 'Q': return KEY_F(2);
+        case 'R': return KEY_F(3);
+        case 'S': return KEY_F(4);
     }
+    if (b >= '0' && b <= '9') {                        // numeric CSI: ESC [ <n> ~
+        int n = 0;
+        while (b >= '0' && b <= '9') { n = n * 10 + (b - '0'); b = poll_byte_ms(20); }
+        switch (n) {                                   // (terminator '~' already consumed)
+            case 2:  return KEY_INS;
+            case 3:  return KEY_DEL;
+            case 5:  return KEY_PGUP;
+            case 6:  return KEY_PGDN;
+            case 11: return KEY_F(1);   case 12: return KEY_F(2);
+            case 13: return KEY_F(3);   case 14: return KEY_F(4);
+            case 15: return KEY_F(5);   case 17: return KEY_F(6);
+            case 18: return KEY_F(7);   case 19: return KEY_F(8);
+            case 20: return KEY_F(9);   case 21: return KEY_F(10);
+            case 23: return KEY_F(11);  case 24: return KEY_F(12);
+        }
+    }
+    return 0;
 }
 
 // Position the framebuffer cursor at editable offset `off` from start (sc,sr).
@@ -864,6 +881,92 @@ static void sysmon_erase(void) {
     g_sysmon_drawn = 0;
 }
 
+// --- corner toast notification ----------------------------------------------
+// A small self-erasing panel in the lower-right (USB icon + a line of text) shown
+// for a few seconds, e.g. when a stick is plugged/unplugged - so hot-plug events
+// no longer scribble into the REPL line. Front-buffer draw with a save-under, like
+// the F12 overlay.
+#define TOAST_ICON 18
+#define TOAST_H    (TOAST_ICON + 12)
+#define TOAST_MAXW 340
+#define TOAST_MARG 10
+#define TOAST_CAP  (TOAST_MAXW * (TOAST_H + 4))
+
+static uint32_t g_toast_save[TOAST_CAP];
+static int      g_toast_on, g_toast_x, g_toast_y, g_toast_w;
+static uint64_t g_toast_until;
+
+static void ov_line(int x0, int y0, int x1, int y1, uint32_t col) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    int steps = adx > ady ? adx : ady;
+    if (steps <= 0) { gfx_front_putpixel(x0, y0, col); return; }
+    for (int i = 0; i <= steps; i++)
+        gfx_front_putpixel(x0 + dx * i / steps, y0 + dy * i / steps, col);
+}
+static void ov_disc(int cx, int cy, int r, uint32_t col) {
+    for (int yy = -r; yy <= r; yy++)
+        for (int xx = -r; xx <= r; xx++)
+            if (xx * xx + yy * yy <= r * r + 1) gfx_front_putpixel(cx + xx, cy + yy, col);
+}
+// The USB "trident": arrow at the top of a shaft, a base disc, and two branches
+// ending in a filled circle (left) and a filled square (right).
+static void draw_usb_icon(int x, int y, uint32_t col) {
+    int cx = x + TOAST_ICON / 2, top = y + 1, bot = y + TOAST_ICON - 3;
+    ov_line(cx, top + 3, cx, bot, col); ov_line(cx - 1, top + 3, cx - 1, bot, col);  // shaft
+    for (int r = 0; r <= 3; r++)                                        // arrow head (up)
+        for (int c = -r; c <= r; c++) gfx_front_putpixel(cx + c, top + r, col);
+    ov_disc(cx, bot, 2, col);                                          // base disc
+    ov_line(cx, y + 9, cx - 5, y + 5, col); ov_disc(cx - 5, y + 5, 2, col);          // left -> circle
+    ov_line(cx, y + 7, cx + 5, y + 4, col); ov_fill(cx + 4, y + 2, 3, 3, col);       // right -> square
+}
+
+static void toast_erase(void) {
+    if (!g_toast_on) return;
+    for (int r = 0; r < TOAST_H; r++)
+        for (int c = 0; c < g_toast_w; c++)
+            gfx_front_putpixel(g_toast_x + c, g_toast_y + r, g_toast_save[r * g_toast_w + c]);
+    g_toast_on = 0;
+}
+
+// Show `msg` (with a USB icon) in the lower-right for ~3.5 s. `good`: green accent
+// for a connect, red-ish for a removal.
+static void toast_show(const char *msg, int good) {
+    if (!fb_ready) return;
+    toast_erase();                                        // replace any current toast
+    int textw = (int)ov_slen(msg) * CHAR_W;
+    int w = 8 + TOAST_ICON + 8 + textw + 10;
+    if (w > TOAST_MAXW) w = TOAST_MAXW;
+    int h = TOAST_H;
+    g_toast_w = w;
+    g_toast_x = (int)g_fb_w - w - TOAST_MARG;
+    g_toast_y = (int)g_fb_h - h - TOAST_MARG;
+    if (g_toast_x < 0 || g_toast_y < 0) return;
+
+    for (int r = 0; r < h; r++)                            // save-under
+        for (int c = 0; c < w; c++)
+            g_toast_save[r * w + c] = gfx_front_getpixel(g_toast_x + c, g_toast_y + r);
+
+    uint32_t panel  = rgb_pixel(28, 32, 44);
+    uint32_t accent = good ? rgb_pixel(70, 200, 120) : rgb_pixel(225, 110, 90);
+    uint32_t textc  = rgb_pixel(232, 238, 248);
+    ov_fill(g_toast_x, g_toast_y, w, h, panel);
+    ov_hline(g_toast_x, g_toast_y, w, accent);
+    ov_hline(g_toast_x, g_toast_y + h - 1, w, accent);
+    ov_vline(g_toast_x, g_toast_y, h, accent);
+    ov_vline(g_toast_x + w - 1, g_toast_y, h, accent);
+    ov_fill(g_toast_x, g_toast_y, 3, h, accent);          // accent bar down the left edge
+    draw_usb_icon(g_toast_x + 8, g_toast_y + (h - TOAST_ICON) / 2, accent);
+    ov_text(msg, g_toast_x + 8 + TOAST_ICON + 8, g_toast_y + (h - CHAR_H) / 2, textc);
+
+    g_toast_on = 1;
+    g_toast_until = con_micros() + 3500000ull;            // ~3.5 s
+}
+
+static void toast_tick(void) {
+    if (g_toast_on && con_micros() >= g_toast_until) toast_erase();
+}
+
 static void sysmon_recompute(uint64_t now) {
     if (g_cpu_last_t == 0) { g_cpu_last_t = now; g_cpu_last_idle = g_idle_us; }
     uint64_t win = now - g_cpu_last_t;
@@ -967,8 +1070,66 @@ static void sysmon_paint(uint64_t now) {
     sysmon_render(now);
 }
 
+// Lowest free mount point for a stick: /USB, then /USB1, /USB2, ... Fills mp (>=8
+// bytes); mp[0]=0 if all are taken. This lets several sticks coexist, and a freed
+// slot (after removal) is reused by the next insertion.
+static void free_usb_mount(char *mp) {
+    for (int n = 0; n <= 9; n++) {
+        mp[0] = '/'; mp[1] = 'U'; mp[2] = 'S'; mp[3] = 'B';
+        if (n == 0) mp[4] = 0; else { mp[4] = (char)('0' + n); mp[5] = 0; }
+        if (!fs_mount_in_use(mp)) return;
+    }
+    mp[0] = 0;
+}
+
+// Mount every present-but-unmounted USB blockdev at its own free /USBn. `notify`:
+// show a corner toast (hot-plug); otherwise mirror to the boot screen (boot).
+static void mount_new_usb(int notify) {
+    for (int bi = 1; bi < blk_count(); bi++) {
+        blockdev *b = blk_get(bi);
+        if (!b || !b->present || fs_blkdev_mounted(bi)) continue;
+        char mp[8]; free_usb_mount(mp);
+        if (!mp[0] || fs_automount(bi, "usb", mp) < 0) continue;
+        uart_puts("[USB] mounted "); uart_puts(mp); uart_puts("\n");
+        if (notify) {
+            char t[24]; t[0] = 0; ov_cat(t, "USB stick "); ov_cat(t, mp);
+            toast_show(t, 1);
+        } else if (fb_ready) {
+            term_puts("[USB] mounted "); term_puts(mp); term_puts("\n");
+        }
+    }
+}
+
+// USB hot-plug: periodically re-poll the onboard hub. On removal, unmount the
+// stick's /USBn volume and free its blockdev; on insertion, bring the stick up and
+// mount it. Cheap when nothing changed (a few hub control transfers ~ms), heavier
+// (~a few hundred ms) only on an actual plug event - never the seconds-long SD
+// write that made typing stutter, so it is safe to run from the input loop.
+static void usb_hotplug_tick(void) {
+    if (!g_real_hw) return;
+    static uint64_t last = 0;
+    uint64_t now = con_micros();
+    if (last && now - last < 1000000ull) return;         // ~1 s between polls
+    last = now;
+
+    int ch = xhci_rescan();
+    if (!ch) return;
+
+    if (ch & 2)                                          // sticks removed
+        for (int bd; (bd = msc_dead_blkdev()) >= 0; ) {
+            fs_unmount_blkdev(bd);
+            blk_unregister(bd);
+            uart_puts("[USB] stick removed - /USB unmounted\n");   // log only (no REPL scribble)
+            toast_show("USB storage removed", 0);                 // notify in the corner
+        }
+    if ((ch & 1) && msc_init() > 0) mount_new_usb(1);    // sticks inserted -> mount + toast
+    flush_boot_log();     // a plug event is rare - persist the rescan trace to /BOOTLOG.TXT
+}
+
 static void sysmon_tick(void) {
     if (!fb_ready) return;
+    usb_hotplug_tick();                 // detect USB stick insert/removal
+    toast_tick();                       // expire the corner notification
     if (!g_sysmon_on) { if (g_sysmon_drawn) sysmon_erase(); return; }
     uint64_t now = con_micros();
     if (g_sysmon_drawn && (now - g_sysmon_last) < 300000ull) return;   // throttle repaint
@@ -1025,11 +1186,27 @@ int con_splash(const char *banner) {
     int oy = CHAR_H;                                  // small top margin
     draw_logo(ox, oy, div);                           // left side, half size
 
-    // Banner beside the logo, vertically centred on it.
-    cursor_col = (ox + lw) / CHAR_W + 1;
-    cursor_row = (oy + lh / 2) / CHAR_H;
+    // Banner beside the logo, vertically centred on it. The banner may hold
+    // several '\n'-separated lines (copyright + build info); print them by hand
+    // so every line keeps the logo's left indent instead of wrapping back to
+    // column 0 (which would overlap the icon).
+    int indent = (ox + lw) / CHAR_W + 1;
+    int nlines = 1;
+    for (const char *q = banner; *q; q++) if (*q == '\n') nlines++;
+    int first_row = (oy + lh / 2) / CHAR_H - (nlines - 1) / 2;
+    if (first_row < 0) first_row = 0;
     cursor_visible = 0;
-    con_puts(banner);
+    cursor_col = indent;
+    cursor_row = first_row;
+    for (const char *q = banner; *q; q++) {
+        if (*q == '\n') {                            // next line, same indent
+            cursor_col = indent;
+            cursor_row++;
+            uart_puts("\r\n");
+        } else {
+            con_putc(*q);
+        }
+    }
     uart_puts("\r\n");                                // tidy the serial line
 
     // Park the cursor below the logo for the REPL prompt.
@@ -2218,22 +2395,10 @@ void kernel_main(void) {
         g_mouse_xhci = xhci_mouse_present();
         if (g_mouse_xhci) boot_msg("[USB] mouse ready (USB-A)\n");
 
-        // USB mass storage (Phase 3+4): bring up any BOT/SCSI stick as a blockdev,
-        // then graft its filesystem into the path tree - the first stick at /USB,
-        // a second at /USB1, ... - so BASIC reaches it with CD "/USB", CAT, LOAD.
-        if (xhci_mmio && msc_init() > 0) {
-            int usbn = 0;
-            for (int bi = 1; bi < blk_count(); bi++) {          // 0 = SD boot device
-                blockdev *b = blk_get(bi);
-                if (!b || !b->present) continue;
-                char mp[8] = { '/', 'U', 'S', 'B', 0, 0, 0, 0 };
-                if (usbn > 0) mp[4] = (char)('0' + usbn);       // /USB1, /USB2, ...
-                if (fs_automount(bi, "usb", mp) >= 0) {
-                    boot_msg("[USB] mounted "); boot_msg(mp); boot_msg("\n");
-                    usbn++;
-                }
-            }
-        }
+        // USB mass storage (Phase 3+4): bring up every BOT/SCSI stick as a blockdev
+        // and graft each into the path tree at its own /USBn (first /USB, next
+        // /USB1, ...) so BASIC reaches them with CD "/USB", CAT, LOAD.
+        if (xhci_mmio && msc_init() > 0) mount_new_usb(0);
     }
 
     // Select the configured keyboard layout (default US); a program can change

@@ -11,7 +11,12 @@
 // ---------------------------------------------------------------------------
 
 // Discover + register every attached USB mass-storage device as a blockdev.
-// Returns the number registered (0 if none / not real hardware).
+// Idempotent: skips sticks already registered, so it doubles as the hot-plug
+// "bring up newly-arrived sticks" call. Returns the number NEWLY registered.
 int msc_init(void);
+
+// Hot-plug removal: returns the blockdev index of a registered stick whose device
+// has vanished (freeing that stick internally), or -1 if none. Call in a loop.
+int msc_dead_blkdev(void);
 
 #endif

@@ -22,6 +22,7 @@ POD_NEEDS(CAP_CONSOLE,  "CONSOLE=reads the keyboard")
 POD_NEEDS(CAP_FILES,    "FILES=loads and saves the file being edited")
 POD_NEEDS(CAP_DIRS,     "DIRS=the Open/Save dialogs browse folders and make new ones")
 POD_NEEDS(CAP_HEAP,     "HEAP=holds the text being edited")
+POD_NEEDS(CAP_SPAWN,    "SPAWN=Run runs the current BASIC program")
 
 /* ---------------------------------------------------------------- CONFIG */
 
@@ -85,6 +86,7 @@ static int wrapcol = 72;    /* word wrap column; 0 disables wrap */
 #define K_F1      0x101     /* help   */
 #define K_F2      0x102     /* save   */
 #define K_F3      0x103     /* open   */
+#define K_F5      0x105     /* run the BASIC program */
 #define K_F7      0x107     /* new folder (in the file dialog) */
 #define K_F10     0x10A     /* menu   */
 #define K_PGUP    0x10D
@@ -121,6 +123,8 @@ static int pen_x, pen_y;            /* pen position, in character cells */
 
 static void fg(int c) { cur_fg = pal[c & 7]; }
 static void bg(int c) { cur_bg = pal[c & 7]; }
+static void fgrgb(unsigned c) { cur_fg = c; }   /* arbitrary 0xRRGGBB (syntax colours) */
+static void bgrgb(unsigned c) { cur_bg = c; }
 static void at(int x, int y) { pen_x = x; pen_y = y; }
 
 /* Draw one glyph cell in the current colours, then advance the pen. */
@@ -177,6 +181,13 @@ static Line *sel_anchor = 0;   /* selection anchor line; 0 = no selection */
 static int   sel_acol   = 0;   /* selection anchor column                 */
 
 static int win_x1, win_y1, win_x2, win_y2;   /* set by layout() from COLS/ROWS */
+static int gutter_w = 5;      /* line-number gutter width in cells (recomputed)   */
+static int is_basic = 0;      /* current file looks like a BASIC program          */
+static int auto_num = 1;      /* BASIC auto line-numbering: gutter + managed nums  */
+
+/* BASIC line-number / body split (defined with the drawing code below, but used
+ * earlier by the status bar). See body_off_of() for what it means. */
+static int body_off(void);
 
 static int insert_mode = 1;
 static int changed;
@@ -328,21 +339,46 @@ static const char *edit_items[] = {
     " Delete Line  Ctrl-Y ",
     " Go to Top           ",
     " Go to Bottom        ",
+    "-",                            /* separator */
+    " Auto Number  Ctrl-N ",
     0
 };
 static const char *help_items[] = {
     " About       ", 0
 };
+static const char *run_items[] = {      /* BASIC-only menu (see menu_visible()) */
+    " Run          F5 ", 0
+};
 static const struct menu_def {
     const char *title;              /* as drawn on the bar, e.g. " File " */
     const char *const *items;
-    int x;                          /* column of the title on the bar */
 } menus[] = {
-    { " File ", file_items, 2 },
-    { " Edit ", edit_items, 9 },
-    { " Help ", help_items, 16 },
+    { " File ", file_items },
+    { " Edit ", edit_items },
+    { " Run ",  run_items  },        /* index RUN_MENU: only for BASIC files */
+    { " Help ", help_items },        /* Help stays last, as users expect */
 };
-#define NMENU ((int)(sizeof menus / sizeof menus[0]))
+#define NMENU_ALL ((int)(sizeof menus / sizeof menus[0]))
+#define RUN_MENU  2
+
+/* The Run menu is only offered while editing a BASIC program. */
+static int menu_visible(int i) { return i != RUN_MENU || is_basic; }
+
+/* Column where menu i's title is drawn: titles laid left to right from column 2,
+ * skipping any hidden menu so the bar shows no gap. */
+static int menu_col(int i)
+{
+    int x = 2, j;
+    for (j = 0; j < i; j++) if (menu_visible(j)) x += (int)strlen(menus[j].title);
+    return x;
+}
+
+/* The next visible menu from i in direction dir (+1/-1), wrapping. */
+static int menu_step(int i, int dir)
+{
+    do { i = (i + dir + NMENU_ALL) % NMENU_ALL; } while (!menu_visible(i));
+    return i;
+}
 
 static int menu_count(const char *const *it) { int n = 0; while (it[n]) n++; return n; }
 
@@ -352,10 +388,11 @@ static void draw_bar(int active)
     int i;
     bg(C_WHITE); fg(C_BLACK);
     repeat_ch(0, 0, ' ', COLS);
-    for (i = 0; i < NMENU; i++) {
+    for (i = 0; i < NMENU_ALL; i++) {
+        if (!menu_visible(i)) continue;
         if (i == active) bg(C_CYAN); else bg(C_WHITE);
         fg(C_BLACK);
-        puts_at(menus[i].x, 0, menus[i].title);
+        puts_at(menu_col(i), 0, menus[i].title);
     }
     bg(C_WHITE); fg(C_BLACK);
     if (COLS >= 26) puts_at(COLS - 26, 0, " ed - BerryBasiC editor ");
@@ -379,7 +416,7 @@ static void draw_status(void)
     do { t[i++] = (char)('0' + (v % 10)); v /= 10; } while (v);
     while (i) b[n++] = t[--i];
     b[n++] = ':';
-    v = curx + 1; i = 0;
+    v = (curx - body_off()) + 1; i = 0;      /* column within the code body (matches the caret) */
     do { t[i++] = (char)('0' + (v % 10)); v /= 10; } while (v);
     while (i) b[n++] = t[--i];
     b[n++] = ' '; b[n++] = ' ';
@@ -387,12 +424,21 @@ static void draw_status(void)
     b[n++] = insert_mode ? 'N' : 'V';
     b[n++] = insert_mode ? 'S' : 'R';
     b[n++] = ' '; b[n++] = ' ';
+    if (is_basic) {                                  /* BASIC line-number mode */
+        const char *t2 = auto_num ? "AUTO-NUM" : "MANUAL";
+        while (*t2) b[n++] = *t2++;
+        b[n++] = ' '; b[n++] = ' ';
+    }
     if (changed) { b[n++] = '*'; b[n++] = ' '; }
     b[n] = 0;
     puts_at(0, ROWS - 1, b);
 
-    puts_at(COLS - 46, ROWS - 1,
-            " F1 Help  F2 Save  F3 Open  F10 Menu  Esc Quit ");
+    if (is_basic)
+        puts_at(COLS - 55, ROWS - 1,
+                " F1 Help  F2 Save  F3 Open  F5 Run  F10 Menu  Esc Quit ");
+    else
+        puts_at(COLS - 46, ROWS - 1,
+                " F1 Help  F2 Save  F3 Open  F10 Menu  Esc Quit ");
 }
 
 /* ----------------------------------------------------------- SELECTION */
@@ -404,6 +450,16 @@ static int line_index(Line *t)
     int i = 0;
     for (Line *p = first; p; p = p->next, i++) if (p == t) return i;
     return -1;
+}
+
+/* The line at index idx (clamped to the list), or first if idx is out of range.
+ * Used to restore cursor/scroll by index after the line list is rebuilt. */
+static Line *line_at(int idx)
+{
+    Line *p = first;
+    int i = 0;
+    while (p && p->next && i < idx) { p = p->next; i++; }
+    return p ? p : first;
 }
 
 /* Normalise the selection into start (sl,sc) <= end (el,ec). 1 if non-empty. */
@@ -502,27 +558,212 @@ static void do_paste(void)
 
 /* -------------------------------------------------------------- DRAW */
 
+/* ---------------------------------------------------- SYNTAX + GUTTER */
+
+static int total_lines(void)
+{
+    int n = 0; Line *p = first;
+    while (p) { n++; p = p->next; }
+    return n;
+}
+
+/* In a BASIC file the meaningful line number is the *logical* one written at the
+ * start of the source line, so we show that in the gutter and hide it from the
+ * body (otherwise both the physical and the logical numbers are on screen, which
+ * is what confused the eye). These two helpers describe that split:
+ *   lead_digits(p) - how many leading characters of p are the decimal number.
+ *   body_off_of(p) - where the editable body starts: past the number and the one
+ *                    space after it. 0 for non-BASIC files or a numberless line,
+ *                    so every editor primitive below reduces to its old behaviour
+ *                    when body_off is 0. */
+static int lead_digits(Line *p)
+{
+    int i = 0;
+    if (!p) return 0;
+    while (i < p->len && p->s[i] >= '0' && p->s[i] <= '9') i++;
+    return i;
+}
+static int body_off_of(Line *p)
+{
+    int i;
+    if (!is_basic || !auto_num || !p) return 0; /* only auto-numbering hides the number */
+    i = lead_digits(p);
+    if (i == 0) return 0;                       /* no leading number: nothing to hide */
+    if (i < p->len && p->s[i] == ' ') i++;      /* swallow one separating space */
+    return i;
+}
+static int body_off(void) { return body_off_of(cur); }
+
+/* Size the gutter to the widest number it must hold + a separator cell: for a
+ * BASIC file that is the widest *logical* number, otherwise the physical line
+ * count. (>=3 digits keeps small files tidy.) Recomputed each redraw; cheap. */
+static void update_gutter(void)
+{
+    int d = 1;
+    if (is_basic && !auto_num) {                /* manual BASIC: no gutter, inline numbers */
+        gutter_w = 0;
+        return;
+    }
+    if (is_basic) {                             /* auto BASIC: widest logical number */
+        Line *p;
+        for (p = first; p; p = p->next) { int n = lead_digits(p); if (n > d) d = n; }
+    } else {                                    /* plain text: physical line count */
+        int t = total_lines();
+        while (t >= 10) { t /= 10; d++; }
+    }
+    if (d < 3) d = 3;
+    gutter_w = d + 1;                           /* digits + one trailing space */
+}
+
+/* Does the filename end in ".BAS" (any case)?  Then it is syntax-coloured. */
+static int name_is_basic(const char *fn)
+{
+    int n = 0; while (fn[n]) n++;
+    if (n < 4) return 0;
+    { const char *e = fn + n - 4;
+      char a = e[1], b = e[2], c = e[3];
+      if (a >= 'a') a -= 32; if (b >= 'a') b -= 32; if (c >= 'a') c -= 32;
+      return e[0] == '.' && a == 'B' && b == 'A' && c == 'S'; }
+}
+
+/* v (>=0) as decimal into buf (no NUL); returns the digit count. */
+static int fmt_uint(char *buf, int v)
+{
+    char t[12]; int n = 0, i;
+    if (v <= 0) { buf[0] = '0'; return 1; }
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    for (i = 0; i < n; i++) buf[i] = t[n - 1 - i];
+    return n;
+}
+
+/* --- a light BASIC highlighter: one colour class per character ---------- */
+enum { HL_NORM = 0, HL_KEYWORD, HL_STRING, HL_COMMENT, HL_NUMBER, HL_LINENO };
+
+static const char *const kw[] = {
+    "PRINT","INPUT","IF","THEN","ELSE","ELSEIF","ENDIF","FOR","TO","STEP","NEXT",
+    "WHILE","ENDWHILE","WEND","REPEAT","UNTIL","DO","LOOP","GOTO","GOSUB","RETURN",
+    "END","STOP","LET","DIM","DATA","READ","RESTORE","DEF","PROC","FN","ENDPROC",
+    "LOCAL","CALL","CLS","CLG","MODE","GCOL","COLOUR","COLOR","PLOT","DRAW","MOVE",
+    "LINE","RECTANGLE","CIRCLE","VDU","RUN","LIST","NEW","LOAD","SAVE","CHAIN",
+    "CLEAR","ON","OFF","AND","OR","NOT","EOR","MOD","DIV","TRUE","FALSE","TAB",
+    "SPC","AT","BY","EXIT","CONTINUE","CASE","WHEN","OTHERWISE","ENDCASE","TRY",
+    "CATCH","ENDTRY","RAISE","TYPE","ENDTYPE","IMPORT","EXEC","EVAL","SOUND","TONE",
+    "WAIT","OPENIN","OPENOUT","OPENUP","CLOSE","BPUT","BGET","MKDIR","RMDIR",
+    "DELETE","RENAME","CD", 0
+};
+static int upc(int c)     { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
+static int is_alpha(int c){ return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; }
+static int is_digit(int c){ return c >= '0' && c <= '9'; }
+static int is_kw(const char *w, int len)
+{
+    int k, j;
+    for (k = 0; kw[k]; k++) {
+        for (j = 0; j < len && kw[k][j] && upc(w[j]) == kw[k][j]; j++) ;
+        if (j == len && kw[k][j] == 0) return 1;
+    }
+    return 0;
+}
+static void hl_basic(const char *s, int len, unsigned char *cls)
+{
+    int i = 0;
+    while (i < len && is_digit(s[i])) cls[i++] = HL_LINENO;    /* leading line number */
+    while (i < len) {
+        int c = (unsigned char)s[i];
+        if (c == '"') {                                        /* string literal */
+            cls[i++] = HL_STRING;
+            while (i < len && s[i] != '"') cls[i++] = HL_STRING;
+            if (i < len) cls[i++] = HL_STRING;
+        } else if (c == '\'') {                                /* ' comment to EOL */
+            while (i < len) cls[i++] = HL_COMMENT;
+        } else if (is_alpha(c)) {                              /* word: keyword or name */
+            int j = i;
+            while (j < len && (is_alpha(s[j]) || is_digit(s[j]))) j++;
+            if (j - i == 3 && upc(s[i]) == 'R' && upc(s[i+1]) == 'E' && upc(s[i+2]) == 'M') {
+                while (i < len) cls[i++] = HL_COMMENT;         /* REM comment to EOL */
+            } else {
+                unsigned char klass = is_kw(s + i, j - i) ? HL_KEYWORD : HL_NORM;
+                while (i < j) cls[i++] = klass;
+            }
+        } else if (is_digit(c)) {                              /* number */
+            while (i < len && (is_digit(s[i]) || s[i] == '.')) cls[i++] = HL_NUMBER;
+        } else {
+            cls[i++] = HL_NORM;
+        }
+    }
+}
+static unsigned syn_color(int cls)
+{
+    switch (cls) {
+        case HL_KEYWORD: return 0xFFE060;   /* warm yellow */
+        case HL_STRING:  return 0x80FF80;   /* green       */
+        case HL_COMMENT: return 0x9FB0D0;   /* muted grey  */
+        case HL_NUMBER:  return 0xFF9C60;   /* orange      */
+        case HL_LINENO:  return 0x50E0FF;   /* cyan        */
+        default:         return 0xFFFFFF;   /* white       */
+    }
+}
+
 static void draw_text(void)
 {
     Line *p = top;
     int row, col, i;
     Line *sl = 0, *el = 0; int sc = 0, ec = 0;
-    int has_sel, sl_idx = -1, el_idx = -1, top_idx = -1;
+    int has_sel, sl_idx = -1, el_idx = -1, top_idx;
+    int gw = gutter_w, tx1 = win_x1 + gw, tw = win_x2 - tx1;
+    unsigned char clsbuf[MAXLEN + 1];
 
     has_sel = sel_ordered(&sl, &sc, &el, &ec);
-    if (has_sel) { sl_idx = line_index(sl); el_idx = line_index(el); top_idx = line_index(top); }
+    top_idx = line_index(top);
+    if (has_sel) { sl_idx = line_index(sl); el_idx = line_index(el); }
 
     for (row = win_y1; row <= win_y2; row++) {
         int lidx = top_idx + (row - win_y1);
-        int hl_lo = -1, hl_hi = -1;
+        int pfx  = body_off_of(p);            /* leading number shown in the gutter, not the body */
+        int hl_lo = -1, hl_hi = -1, hl_on = 0;
         if (has_sel && p && lidx >= sl_idx && lidx <= el_idx) {
             hl_lo = (lidx == sl_idx) ? sc : 0;
             hl_hi = (lidx == el_idx) ? ec : p->len + 1;   /* +1 shows the newline is in the range */
         }
-        at(win_x1, row);
-        for (col = 0, i = coloff; col <= win_x2 - win_x1; i++, col++) {
+
+        /* gutter: right-aligned line number (blank past end of file). For an
+         * auto-numbered BASIC file that is the logical number taken from the
+         * source line, coloured like the code's own line-number token; otherwise
+         * the physical row number. Manual BASIC has gw==0 (no gutter at all). */
+        if (gw > 0) {
+            bgrgb(0x00003C);
+            at(win_x1, row);
+            if (p && is_basic && auto_num) {
+                int nd = lead_digits(p), k, pad = gw - 1 - nd;
+                fgrgb(syn_color(HL_LINENO));
+                for (i = 0; i < pad; i++) out(' ');
+                for (k = 0; k < nd; k++) out((unsigned char)p->s[k]);
+                out(' ');
+            } else if (p) {
+                char num[12]; int nl = fmt_uint(num, lidx + 1), pad = gw - 1 - nl;
+                fgrgb(0x8090C0);
+                for (i = 0; i < pad; i++) out(' ');
+                for (i = 0; i < nl; i++) out((unsigned char)num[i]);
+                out(' ');
+            } else {
+                fgrgb(0x8090C0);
+                for (i = 0; i < gw; i++) out(' ');
+            }
+        }
+
+        if (p && is_basic) { hl_basic(p->s, p->len, clsbuf); hl_on = 1; }
+
+        /* body: screen column `col` shows buffer index pfx + coloff + col, so the
+         * hidden number scrolls off to the gutter and the code sits at the left. */
+        at(tx1, row);
+        for (col = 0; col <= tw; col++) {
+            i = pfx + coloff + col;
             int selc = (i >= hl_lo && i < hl_hi);
-            if (selc) { bg(C_CYAN); fg(C_BLACK); } else { bg(C_BLUE); fg(C_WHITE); }
+            if (selc) { bgrgb(pal[C_CYAN]); fgrgb(pal[C_BLACK]); }
+            else {
+                bgrgb(pal[C_BLUE]);
+                if (hl_on && i < p->len) fgrgb(syn_color(clsbuf[i]));
+                else                     fgrgb(pal[C_WHITE]);
+            }
             if (p && i < p->len) out((unsigned char)p->s[i]);
             else                 out(' ');
         }
@@ -533,12 +774,14 @@ static void draw_text(void)
 static void place_cursor(void)
 {
     fg(C_WHITE);                        /* a white caret on the blue text area */
-    caret(win_x1 + curx - coloff, cury);
+    caret(win_x1 + gutter_w + (curx - body_off()) - coloff, cury);
 }
 
 static void redraw(void)
 {
     cursor(0);
+    is_basic = name_is_basic(filename);    /* colour + logical-number gutter for .BAS   */
+    update_gutter();                       /* size the gutter (needs is_basic set first) */
     draw_menubar();
     draw_frame();
     draw_text();
@@ -723,10 +966,14 @@ static void scroll_into_view(void)
     Line *p;
     int r;
 
-    /* horizontal */
-    if (curx < coloff) coloff = curx;
-    if (curx - coloff > win_x2 - win_x1) coloff = curx - (win_x2 - win_x1);
-    if (coloff < 0) coloff = 0;
+    /* horizontal (the gutter narrows the usable text width; column is measured
+     * within the body, so the hidden BASIC line number does not consume width) */
+    {
+        int vcol = curx - body_off();
+        if (vcol < coloff) coloff = vcol;
+        if (vcol - coloff > win_x2 - win_x1 - gutter_w) coloff = vcol - (win_x2 - win_x1 - gutter_w);
+        if (coloff < 0) coloff = 0;
+    }
 
     /* is cur visible?  walk down from top */
     p = top; r = win_y1;
@@ -744,17 +991,26 @@ static void scroll_into_view(void)
     cury = win_y2;
 }
 
+/* Vertical moves keep the *visual* column (position within the code body), so
+ * the caret stays put over the code even when adjacent lines have line numbers
+ * of different widths. With body_off==0 (non-BASIC) this is the old behaviour. */
 static void go_up(void)
 {
+    int vcol;
     if (!cur->prev) return;
+    vcol = curx - body_off();
     cur = cur->prev; lineno--;
+    curx = body_off() + (vcol < 0 ? 0 : vcol);
     if (curx > cur->len) curx = cur->len;
 }
 
 static void go_down(void)
 {
+    int vcol;
     if (!cur->next) return;
+    vcol = curx - body_off();
     cur = cur->next; lineno++;
+    curx = body_off() + (vcol < 0 ? 0 : vcol);
     if (curx > cur->len) curx = cur->len;
 }
 
@@ -802,14 +1058,15 @@ static void insert_char(int c)
 
 static void do_backspace(void)
 {
-    int i, join;
+    int i, join, lo = body_off();
 
-    if (curx > 0) {
+    if (curx > lo) {
         for (i = curx - 1; i < cur->len; i++) cur->s[i] = cur->s[i + 1];
         cur->len--; curx--;
         mark_changed();
         return;
     }
+    if (lo > 0) return;                 /* at the code start: the line number is protected */
     if (!cur->prev) return;
 
     /* join this line onto the end of the previous one */
@@ -849,6 +1106,219 @@ static void do_delete(void)
     mark_changed();
 }
 
+/* ===================== AUTO LINE NUMBERING (BASIC) =====================
+ * When Auto Numbering is on, the BASIC line number is managed for the user: it
+ * shows in the gutter, is never edited by hand, and Enter assigns the new line a
+ * free number between its neighbours. When the neighbours are adjacent (no free
+ * number between them) the whole program is renumbered to a step of 10 and every
+ * line-number *reference* (GOTO/GOSUB/THEN/ELSE/RESTORE, incl. ON..GOTO lists)
+ * is rewritten to match. Turning the feature off drops the gutter and lets the
+ * programmer manage numbers as plain (still syntax-coloured) text. */
+
+/* The leading decimal number of a line, or -1 if it has none. */
+static int line_num(Line *p)
+{
+    int i = 0, v = 0;
+    if (!p) return -1;
+    while (i < p->len && p->s[i] >= '0' && p->s[i] <= '9') { v = v * 10 + (p->s[i] - '0'); i++; }
+    return i ? v : -1;
+}
+
+/* Characters occupied by "digits + one space" - mode-independent (body_off_of is
+ * the mode-gated version used for the cursor/rendering). */
+static int num_prefix_len(Line *p)
+{
+    int i = lead_digits(p);
+    if (i == 0) return 0;
+    if (i < p->len && p->s[i] == ' ') i++;
+    return i;
+}
+
+/* Keywords a line number may follow. Matched whole-word, case-insensitive. */
+static int is_ref_kw(const char *w, int len)
+{
+    static const char *const r[] = { "GOTO", "GOSUB", "THEN", "ELSE", "RESTORE", 0 };
+    int k, j;
+    for (k = 0; r[k]; k++) {
+        for (j = 0; j < len && r[k][j] && upc((unsigned char)w[j]) == r[k][j]; j++) ;
+        if (j == len && r[k][j] == 0) return 1;
+    }
+    return 0;
+}
+
+/* Rewrite code `s` (length len) into `out`, remapping every line-number
+ * reference through old[]->new[] (cnt entries). Bare numbers that are data, and
+ * anything inside a string literal, are copied unchanged. Returns the output
+ * length, or -1 on overflow. */
+static int fix_refs(const char *s, int len, const int *oldn, const int *newn, int cnt,
+                    char *out, int outmax)
+{
+    int i = 0, o = 0, ovf = 0;
+#define PUT(ch) do { if (o < outmax) out[o++] = (char)(ch); else ovf = 1; } while (0)
+#define PUTNUM(v) do { char rv[12]; int nd_ = 0, vv_ = (v), t_; \
+        if (vv_ <= 0) rv[nd_++] = '0'; else while (vv_) { rv[nd_++] = (char)('0' + vv_ % 10); vv_ /= 10; } \
+        for (t_ = 0; t_ < nd_; t_++) PUT(rv[nd_ - 1 - t_]); } while (0)
+
+    while (i < len) {
+        char c = s[i];
+        if (c == '"') {                                   /* string: verbatim */
+            PUT(c); i++;
+            while (i < len && s[i] != '"') { PUT(s[i]); i++; }
+            if (i < len) { PUT(s[i]); i++; }
+        } else if (is_alpha((unsigned char)c)) {          /* word */
+            int j = i, k;
+            while (j < len && (is_alpha((unsigned char)s[j]) || is_digit((unsigned char)s[j]))) j++;
+            for (k = i; k < j; k++) PUT(s[k]);
+            if (is_ref_kw(s + i, j - i)) {                /* a reference follows */
+                i = j;
+                { int si = i, so = o;                     /* spaces before the first number */
+                  while (i < len && s[i] == ' ') { PUT(s[i]); i++; }
+                  if (!(i < len && is_digit((unsigned char)s[i]))) { i = si; o = so; } }
+                while (i < len && is_digit((unsigned char)s[i])) {
+                    int r = 0, nn, t;
+                    while (i < len && is_digit((unsigned char)s[i])) { r = r * 10 + (s[i] - '0'); i++; }
+                    nn = r;
+                    for (t = 0; t < cnt; t++) if (oldn[t] == r) { nn = newn[t]; break; }
+                    PUTNUM(nn);
+                    { int si = i, so = o;                 /* a comma continues an ON..GOTO list */
+                      while (i < len && s[i] == ' ') { PUT(s[i]); i++; }
+                      if (i < len && s[i] == ',') {
+                          PUT(','); i++;
+                          while (i < len && s[i] == ' ') { PUT(s[i]); i++; }
+                      } else { i = si; o = so; break; }
+                    }
+                }
+            } else {
+                i = j;
+            }
+        } else if (is_digit((unsigned char)c)) {          /* bare number = data */
+            while (i < len && is_digit((unsigned char)s[i])) { PUT(s[i]); i++; }
+        } else {
+            PUT(c); i++;
+        }
+    }
+#undef PUTNUM
+#undef PUT
+    return ovf ? -1 : o;
+}
+
+/* Prepend "num " to p, treating ALL of p's current text as code (never stripping
+ * a leading number - a freshly split line is pure code that may itself begin with
+ * digits). Returns -1 on overflow. */
+static int line_prepend_number(Line *p, int num)
+{
+    char tmp[MAXLEN + 1], rev[12];
+    int nd = 0, vv = num, k, total = 0;
+    if (vv <= 0) rev[nd++] = '0'; else while (vv) { rev[nd++] = (char)('0' + vv % 10); vv /= 10; }
+    total = nd + 1 + p->len;
+    if (total > MAXLEN) return -1;
+    for (k = 0; k < nd; k++) tmp[k] = rev[nd - 1 - k];
+    tmp[nd] = ' ';
+    memcpy(tmp + nd + 1, p->s, p->len);
+    memcpy(p->s, tmp, total); p->len = total; p->s[total] = 0;
+    return 0;
+}
+
+/* Set p's number to newnum AND rewrite its references (used by renumber). */
+static int line_rebuild(Line *p, int newnum, const int *oldn, const int *newn, int cnt)
+{
+    char code[MAXLEN + 1], fixed[MAXLEN * 2 + 2], tmp[MAXLEN + 1], rev[12];
+    int pl = num_prefix_len(p), clen = p->len - pl, flen, nd = 0, vv = newnum, k, total;
+    memcpy(code, p->s + pl, clen);
+    flen = fix_refs(code, clen, oldn, newn, cnt, fixed, (int)sizeof(fixed));
+    if (flen < 0) return -1;
+    if (vv <= 0) rev[nd++] = '0'; else while (vv) { rev[nd++] = (char)('0' + vv % 10); vv /= 10; }
+    total = nd + 1 + flen;
+    if (total > MAXLEN) return -1;
+    for (k = 0; k < nd; k++) tmp[k] = rev[nd - 1 - k];
+    tmp[nd] = ' ';
+    memcpy(tmp + nd + 1, fixed, flen);
+    memcpy(p->s, tmp, total); p->len = total; p->s[total] = 0;
+    return 0;
+}
+
+#define RN_MAX 4096
+
+/* Largest line number in the program (0 if none). */
+static int max_line_num(void)
+{
+    int m = 0; Line *p;
+    for (p = first; p; p = p->next) { int n = line_num(p); if (n > m) m = n; }
+    return m;
+}
+
+/* Renumber from `start` to the end at `step`, leaving every earlier line's number
+ * untouched - the change stays local to the insertion point. New numbers continue
+ * from the last kept line (start->prev). References are fixed across the WHOLE
+ * program (an earlier line may GOTO one that moved), so both halves below run
+ * line_rebuild with the same old->new map. */
+static int renumber_from(Line *start, int step)
+{
+    static int oldn[RN_MAX], newn[RN_MAX];
+    int cnt = 0, base, idx; Line *p;
+    base = start->prev ? line_num(start->prev) : 0;
+    for (p = start; p; p = p->next) {
+        if (cnt >= RN_MAX) { message("Too many lines to renumber."); return -1; }
+        oldn[cnt] = line_num(p);
+        newn[cnt] = base + (cnt + 1) * step;
+        cnt++;
+    }
+    for (p = first; p != start; p = p->next)          /* earlier lines: keep number, fix refs */
+        if (line_rebuild(p, line_num(p), oldn, newn, cnt) < 0) {
+            message("Renumber failed (line too long)."); return -1;
+        }
+    idx = 0;
+    for (p = start; p; p = p->next, idx++)             /* moved lines: new number + fix refs */
+        if (line_rebuild(p, newn[idx], oldn, newn, cnt) < 0) {
+            message("Renumber failed (line too long)."); return -1;
+        }
+    mark_changed();
+    return 0;
+}
+
+/* Assign nl a number between its neighbours; if the gap is exhausted, renumber
+ * from nl onwards (earlier lines keep their numbers, references fixed globally). */
+static void autonum_assign(Line *nl)
+{
+    int prev = nl->prev ? line_num(nl->prev) : -1;
+    int nxt  = nl->next ? line_num(nl->next) : -1;
+    int lo = prev >= 0 ? prev : 0, newn = 0, room = 1;
+    if (nxt >= 0) {
+        if (nxt - lo >= 2) newn = lo + (nxt - lo) / 2;
+        else room = 0;                                /* no free number between neighbours */
+    } else {
+        newn = lo + 10;
+    }
+    if (room) {
+        if (line_prepend_number(nl, newn) < 0) message("Line too long to number.");
+    } else {
+        /* Give nl a unique, unreferenced provisional number (above every real one)
+         * so the renumber's old->new map has no collision - a real line whose code
+         * starts with digits would otherwise be ambiguous - then renumber the tail. */
+        if (line_prepend_number(nl, max_line_num() + 10) < 0) { message("Line too long to number."); return; }
+        renumber_from(nl, 10);
+    }
+}
+
+/* Make sure every line carries a number (called when auto mode turns on). */
+static void autonum_ensure(void)
+{
+    Line *p;
+    for (p = first; p; p = p->next)
+        if (line_num(p) < 0) autonum_assign(p);
+}
+
+static void toggle_autonum(void)
+{
+    if (!is_basic) { message("Auto numbering applies to BASIC (.BAS) files."); return; }
+    auto_num = !auto_num;
+    if (auto_num) autonum_ensure();
+    coloff = 0;
+    if (curx < body_off()) curx = body_off();
+    mark_changed();
+    message(auto_num ? "Auto numbering ON." : "Auto numbering OFF - manual line numbers.");
+}
+
 static void do_enter(void)
 {
     Line *nl;
@@ -863,8 +1333,13 @@ static void do_enter(void)
     cur->len = curx;
     cur = nl;
     lineno++;
-    curx = 0;
     coloff = 0;
+    if (is_basic && auto_num) {
+        autonum_assign(nl);         /* give the new line a managed number */
+        curx = body_off();          /* cursor at the start of its code */
+    } else {
+        curx = 0;
+    }
     mark_changed();
 }
 
@@ -1114,6 +1589,61 @@ static void do_save(void)
     else message("Saved.");
 }
 
+/* Run the current BASIC program: save it, run it synchronously on the visible
+ * screen, then repaint the editor unchanged. The editor never exits, so the
+ * cursor, scroll, selection and text are all exactly as they were. Always
+ * returns 0 (stay in the editor). */
+static int run_current(void)
+{
+    static const char *pause = "\n[ press a key to return to the editor ]\n";
+    int ci, ti, si, scurx, scoloff, sselc;
+
+    if (!is_basic) { message("Run works with BASIC (.BAS) files."); return 0; }
+    if (!strcmp(filename, "NONAME.TXT")) {
+        do_saveas();
+        if (!strcmp(filename, "NONAME.TXT")) return 0;      /* Save As cancelled: stay */
+    } else if (save_file(filename) < 0) {
+        message("Could not save; not run.");
+        return 0;
+    }
+    changed = 0;
+    if (!S->run_basic) { message("Run is unavailable."); return 0; }
+
+    /* The run resets the seed heap (a fresh slate for the program) - which is the
+     * heap our line list is malloc'd from. So remember the cursor/scroll as
+     * indices, run, then rebuild the list from the (just-saved) file on the clean
+     * heap and restore the position. Content is identical since we just saved. */
+    ci = line_index(cur);
+    ti = line_index(top);
+    si = sel_anchor ? line_index(sel_anchor) : -1;
+    scurx = curx; scoloff = coloff; sselc = sel_acol;
+
+    S->run_basic(filename);                 /* blocks on the visible screen until it stops */
+
+    S->puts(pause, (int)strlen(pause));     /* let the user read the output */
+    S->getkey();                            /* wait for any key */
+
+    first = 0;                              /* abandon the dead list (its heap was reset) */
+    S->gfx_backbuffer(1);                   /* re-enable the editor's double buffer */
+    if (load_file(filename) < 0) {          /* rebuild fresh from disk */
+        S->puts("ed: out of memory\n", 18);
+        return 1;                           /* fatal: leave the editor */
+    }
+    cur = line_at(ci);
+    top = line_at(ti);
+    sel_anchor = (si >= 0) ? line_at(si) : 0;
+    sel_acol = sselc;
+    curx = scurx; coloff = scoloff;
+    lineno = ci + 1;
+    if (curx > cur->len) curx = cur->len;
+    if (curx < body_off()) curx = body_off();
+
+    bg(C_BLUE); fg(C_WHITE); cls();
+    scroll_into_view();
+    redraw();
+    return 0;                               /* stay in the editor */
+}
+
 /* Delete the current line (also Ctrl-Y). Never empties the list. */
 static void delete_line(void)
 {
@@ -1148,7 +1678,10 @@ static int menu_action(int menu, int item)
         case 4: delete_line();  break;
         case 5: goto_top();     break;
         case 6: goto_bottom();  break;
+        case 8: toggle_autonum(); break;              /* item 7 is the separator */
         }
+    } else if (menu == RUN_MENU) {                    /* Run (BASIC only) */
+        if (item == 0) return run_current();
     } else {                                          /* Help */
         switch (item) {
         case 0: message("ed - a full-screen text editor for BerryBasiC"); break;
@@ -1162,7 +1695,8 @@ static int menu_action(int menu, int item)
 static int menu_accel(int c)
 {
     int up = (c >= 'a' && c <= 'z') ? c - 32 : c;
-    for (int i = 0; i < NMENU; i++) {
+    for (int i = 0; i < NMENU_ALL; i++) {
+        if (!menu_visible(i)) continue;
         const char *t = menus[i].title;
         while (*t == ' ') t++;                        /* first letter of the title */
         int tu = (*t >= 'a' && *t <= 'z') ? *t - 32 : *t;
@@ -1178,13 +1712,14 @@ static int run_menu_at(int active)
 {
     int quit = 0;
 
+    if (!menu_visible(active)) active = menu_step(active, 1);   /* defensive */
     for (;;) {
         redraw();                        /* erase any previous dropdown first */
         draw_bar(active);
-        int sel = popup(menus[active].x, 1, menus[active].items,
+        int sel = popup(menu_col(active), 1, menus[active].items,
                         menu_count(menus[active].items));
-        if (sel == NAV_LEFT)  { active = (active + NMENU - 1) % NMENU; continue; }
-        if (sel == NAV_RIGHT) { active = (active + 1) % NMENU;         continue; }
+        if (sel == NAV_LEFT)  { active = menu_step(active, -1); continue; }
+        if (sel == NAV_RIGHT) { active = menu_step(active,  1); continue; }
         if (sel == NAV_CANCEL) break;                 /* Esc: leave the menu */
         quit = menu_action(active, sel);
         break;
@@ -1253,6 +1788,9 @@ static void layout(void)
     wrapcol = win_x2 - win_x1;          /* wrap at the window's right edge */
     if (wrapcol > MAXLEN - 1) wrapcol = MAXLEN - 1;
     if (wrapcol < 8)          wrapcol = 0;   /* too narrow: don't wrap */
+
+    is_basic = name_is_basic(filename); /* so the first scroll/paint sees the right width */
+    update_gutter();
 }
 
 int main(int argc, char **argv)
@@ -1275,6 +1813,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    is_basic = name_is_basic(filename);
+    if (is_basic && auto_num) autonum_ensure();     /* every line gets a managed number */
+    if (curx < body_off()) curx = body_off();
+
     bg(C_BLUE); fg(C_WHITE);
     cls();
     scroll_into_view();                 /* set top/cury so the caret starts in the text */
@@ -1282,6 +1824,7 @@ int main(int argc, char **argv)
 
     while (!quit) {
         c = key();
+        if (curx < body_off()) curx = body_off();   /* edits/moves act on code, never the number */
 
         int mods = S->keymods(), handled = 0;
 
@@ -1304,6 +1847,7 @@ int main(int argc, char **argv)
             do_paste(); handled = 1;                                  /* paste */
         }
         else if ((mods & KMOD_CTRL) && (c == 'y' || c == 'Y')) { delete_line(); handled = 1; }  /* Ctrl-Y */
+        else if (((mods & KMOD_CTRL) && (c == 'n' || c == 'N')) || c == 0x0E) { toggle_autonum(); handled = 1; }  /* Ctrl-N */
         else if ((mods & KMOD_CTRL) && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { handled = 1; }  /* swallow */
 
         if (!handled) {
@@ -1323,16 +1867,16 @@ int main(int argc, char **argv)
 
         if (!handled) switch (c) {
         case K_LEFT:
-            if (curx > 0) curx--;
+            if (curx > body_off()) curx--;                 /* stop at the code, not the number */
             else if (cur->prev) { go_up(); curx = cur->len; }
             break;
         case K_RIGHT:
             if (curx < cur->len) curx++;
-            else if (cur->next) { go_down(); curx = 0; }
+            else if (cur->next) { go_down(); curx = body_off(); }
             break;
         case K_UP:    go_up();   break;
         case K_DOWN:  go_down(); break;
-        case K_HOME:  curx = 0; coloff = 0; break;
+        case K_HOME:  curx = body_off(); coloff = 0; break;
         case K_END:   curx = cur->len; break;
 
         case K_PGUP:
@@ -1358,6 +1902,10 @@ int main(int argc, char **argv)
 
         case K_F2:
             do_save();
+            break;
+
+        case K_F5:                      /* run the current BASIC program */
+            quit = run_current();
             break;
 
         case K_F3:
@@ -1386,6 +1934,7 @@ int main(int argc, char **argv)
             } else if (r != 1) quit = 0;                    /* Cancel / Esc: stay in the editor */
         }                                                   /* Discard (r==1): leave, unsaved */
 
+        if (curx < body_off()) curx = body_off();           /* never rest inside the gutter number */
         scroll_into_view();
         redraw();
     }

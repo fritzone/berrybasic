@@ -46,6 +46,14 @@ TGT_S = $(wildcard $(KERNEL_DIR)/*.S)
 # Objects are flattened into build/ (every source basename is unique).
 OBJ = $(addprefix $(BUILD_DIR)/,$(notdir $(TGT_C:.c=.o) $(TGT_S:.S=.o)))
 
+# basic.c #includes "conf.h": a generated header carrying the copyright banner
+# plus build information (version, date, git revision). tools/genconf.sh writes
+# it and only rewrites on a real change, so depending on the phony FORCE keeps
+# the stamp fresh without recompiling basic.o on every make. Shared by the host
+# and CMake test builds too (see `host` and `test`/`coverage` below). The rule
+# itself is defined below `all:` so it does not steal the default goal.
+CONF_H = $(BASIC_DIR)/conf.h
+
 # Let pattern rules find each source in its directory.
 vpath %.c $(KERNEL_DIR) $(DRIVERS_DIR) $(BASIC_DIR) $(SEED_DIR)
 vpath %.S $(KERNEL_DIR)
@@ -54,6 +62,13 @@ ELF    = $(BUILD_DIR)/kernel.elf
 KERNEL = $(BUILD_DIR)/kernel8.img
 
 all: $(KERNEL)
+
+# Regenerate the build-info header (see CONF_H above). FORCE makes genconf.sh
+# run every build; it only rewrites conf.h when the stamp actually changes.
+$(CONF_H): FORCE
+	@tools/genconf.sh $@
+FORCE:
+.PHONY: FORCE
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -66,6 +81,10 @@ $(KERNEL): $(ELF)
 
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# The interpreter object needs the generated banner header present first (on a
+# clean build the auto-dependency .d does not exist yet).
+$(BUILD_DIR)/basic.o: $(CONF_H)
 
 # Pull in the auto-generated header/fragment dependencies (from -MMD). This is
 # what makes a header edit (or a change to one of basic.c's interp_*.inc
@@ -86,7 +105,7 @@ $(BUILD_DIR)/image.o: CFLAGS += -Ithird_party -Ithird_party/stb_shim -w
 $(BUILD_DIR)/ttf.o: CFLAGS += -Ithird_party -w
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(CONF_H)
 
 # Interactively choose the native resolution and font, regenerating
 # kernel/buildconfig.h, drivers/font_data.c and the HDMI block in boot/config.txt.
@@ -145,7 +164,7 @@ HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storag
               $(HOST_DIR)/gpio_host.c $(HOST_DIR)/i2c_host.c $(HOST_DIR)/ttf_host.c $(HOST_DIR)/gfx_host.c \
               $(DRIVERS_DIR)/usb_hid.c $(HOST_DIR)/main.c
 
-host: $(HOST_SRC) | $(BUILD_DIR)
+host: $(CONF_H) $(HOST_SRC) | $(BUILD_DIR)
 	$(HOSTCC) -Wall -g $(HOST_INC) -o $(HOST_BIN) $(HOST_SRC) -lm
 
 # Unit tests (Catch2) for the interpreter, configured by basic/CMakeLists.txt.
@@ -156,12 +175,12 @@ COV_BUILD     = $(BUILD_DIR)/tests-cov
 
 # The '&&' chaining is intentional: it runs the recipe through the shell (whose
 # PATH search skips a stray directory named 'cmake') and stops on first failure.
-test:
+test: $(CONF_H)
 	cmake -S basic -B $(TEST_BUILD) -DCMAKE_BUILD_TYPE=Debug && \
 	cmake --build $(TEST_BUILD) -j && \
 	ctest --test-dir $(TEST_BUILD) --output-on-failure
 
-coverage:
+coverage: $(CONF_H)
 	cmake -S basic -B $(COV_BUILD) -DCOVERAGE=ON && \
 	cmake --build $(COV_BUILD) --target coverage && \
 	echo "HTML report: $(COV_BUILD)/coverage/index.html"

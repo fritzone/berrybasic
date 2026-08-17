@@ -694,37 +694,86 @@ static void svc_gfx_text(int x, int y, const char *s, int len, uint32_t rgb) { s
 static int  svc_text_width(const char *s, int len) { return ttf_text_width(s, len); }
 static int  svc_text_height(void) { return ttf_line_height(); }
 
+// spawn/mkdir round out the unified ABI. A seed cannot launch another POD (that
+// path needs the loader context the /sys shell has), so spawn is refused with
+// -1; mkdir maps straight to storage, which the interpreter fully supports.
+static int  svc_spawn(const char *path, int argc, const char *const *argv)
+                                        { (void)path; (void)argc; (void)argv; return -1; }
+static int  svc_mkdir(const char *path) { return stg_mkdir(path); }
+
+/* run_basic: run a BASIC program synchronously, on the visible screen, returning
+ * when it stops - so a tool like the editor can repaint itself afterwards (its
+ * POD state stays live in memory the whole time). This mirrors a BASIC
+ * `RUN "file"`: the caller is a POD dispatched by pod_run_program, which reads no
+ * more tokens once it returns, so re-entering the run loop here is safe. g_err is
+ * saved/restored so the program's own error (already reported by the run) does
+ * not leak into the caller's immediate-mode context. */
+static int  load_bas_file(const char *name);                /* interp_files.inc   */
+static void run_program_once(int start_pc, int start_off);  /* interp_control.inc */
+static int  svc_run_basic(const char *path) {
+    int saved_err;
+    if (!path || !path[0]) return -1;
+    if (load_bas_file(path) < 0) return -2;
+    saved_err = g_err; g_err = 0;
+    con_backbuffer(0);          // draw to the visible screen, not an unshown back buffer
+    con_cls();                  // a clean screen for the program's output
+    run_program_once(0, 0);     // run as a top-level program (reports its own errors)
+    g_err = saved_err;
+    return 0;
+}
+
+// Designated initialisers: each entry names its field, so the table stays
+// correct no matter how BerryServices grows or is reordered (a positional list
+// silently mis-assigns on any struct change - see the history of this file).
+// A field left out here is simply 0/NULL.
 static const BerryServices g_svc = {
-    BERRY_ABI_VERSION,
-    svc_putc, svc_puts, svc_getkey, svc_inkey,
-    svc_get_num, svc_set_num, svc_get_str, svc_set_str,
-    svc_num_array, svc_set_return_str, svc_time_cs,
-    svc_alloc, svc_free,
-    svc_realloc, svc_alloc_aligned,
-    svc_gpio_avail, svc_gpio_mode, svc_gpio_pull, svc_gpio_write, svc_gpio_read,
-    svc_gpio_set, svc_gpio_clr, svc_gpio_level, svc_gpio_wait,
-    svc_file_open, svc_file_close, svc_file_read, svc_file_write,
-    svc_file_seek, svc_file_size, svc_file_eof, svc_file_remove,
-    svc_fmt_num,
-    svc_gfx_avail, svc_gfx_width, svc_gfx_height, svc_gfx_clear,
-    svc_gfx_putpixel, svc_gfx_getpixel, svc_gfx_line, svc_gfx_fillrect,
-    svc_gfx_circle, svc_gfx_fillcircle, svc_gfx_ellipse, svc_gfx_fillellipse,
-    svc_gfx_fillpoly, svc_gfx_flood, svc_gfx_clip, svc_gfx_noclip,
-    svc_font_load, svc_font_select, svc_font_size, svc_font_style,
-    svc_gfx_text, svc_text_width, svc_text_height,
-    svc_rec_array, svc_rec_field, svc_rec_get_str, svc_rec_set_str,
-    svc_mouse,
-    svc_gfx_backbuffer, svc_gfx_flip, svc_gfx_buffered,
-    svc_keymods,
-    svc_gfx_mode,
-    svc_gfx_line_style, svc_gfx_polyline,
-    svc_vdu, svc_screen_size, svc_con_font, svc_con_glyph,
-    svc_dir_open, svc_dir_read, svc_getcwd, svc_chdir,
-    svc_clip_set, svc_clip_get, svc_clip_len,
-    svc_icache_sync,
-    svc_gfx_blit8,
-    svc_keys_down,
-    svc_audio_open, svc_audio_avail, svc_audio_write, svc_audio_close,
+    .abi_version = BERRY_ABI_VERSION,
+    .putc = svc_putc, .puts = svc_puts, .getkey = svc_getkey, .inkey = svc_inkey,
+    .get_num = svc_get_num, .set_num = svc_set_num,
+    .get_str = svc_get_str, .set_str = svc_set_str,
+    .num_array = svc_num_array, .set_return_str = svc_set_return_str, .time_cs = svc_time_cs,
+    .alloc = svc_alloc, .free = svc_free,
+    .realloc = svc_realloc, .alloc_aligned = svc_alloc_aligned,
+    .gpio_avail = svc_gpio_avail, .gpio_mode = svc_gpio_mode, .gpio_pull = svc_gpio_pull,
+    .gpio_write = svc_gpio_write, .gpio_read = svc_gpio_read,
+    .gpio_set = svc_gpio_set, .gpio_clr = svc_gpio_clr,
+    .gpio_level = svc_gpio_level, .gpio_wait = svc_gpio_wait,
+    .file_open = svc_file_open, .file_close = svc_file_close,
+    .file_read = svc_file_read, .file_write = svc_file_write,
+    .file_seek = svc_file_seek, .file_size = svc_file_size,
+    .file_eof = svc_file_eof, .file_remove = svc_file_remove,
+    .fmt_num = svc_fmt_num,
+    .gfx_avail = svc_gfx_avail, .gfx_width = svc_gfx_width,
+    .gfx_height = svc_gfx_height, .gfx_clear = svc_gfx_clear,
+    .gfx_putpixel = svc_gfx_putpixel, .gfx_getpixel = svc_gfx_getpixel,
+    .gfx_line = svc_gfx_line, .gfx_fillrect = svc_gfx_fillrect,
+    .gfx_circle = svc_gfx_circle, .gfx_fillcircle = svc_gfx_fillcircle,
+    .gfx_ellipse = svc_gfx_ellipse, .gfx_fillellipse = svc_gfx_fillellipse,
+    .gfx_fillpoly = svc_gfx_fillpoly, .gfx_flood = svc_gfx_flood,
+    .gfx_clip = svc_gfx_clip, .gfx_noclip = svc_gfx_noclip,
+    .font_load = svc_font_load, .font_select = svc_font_select,
+    .font_size = svc_font_size, .font_style = svc_font_style,
+    .gfx_text = svc_gfx_text, .text_width = svc_text_width, .text_height = svc_text_height,
+    .rec_array = svc_rec_array, .rec_field = svc_rec_field,
+    .rec_get_str = svc_rec_get_str, .rec_set_str = svc_rec_set_str,
+    .mouse = svc_mouse,
+    .gfx_backbuffer = svc_gfx_backbuffer, .gfx_flip = svc_gfx_flip,
+    .gfx_buffered = svc_gfx_buffered,
+    .keymods = svc_keymods,
+    .gfx_mode = svc_gfx_mode,
+    .gfx_line_style = svc_gfx_line_style, .gfx_polyline = svc_gfx_polyline,
+    .spawn = svc_spawn, .mkdir = svc_mkdir,
+    .vdu = svc_vdu, .screen_size = svc_screen_size,
+    .con_font = svc_con_font, .con_glyph = svc_con_glyph,
+    .dir_open = svc_dir_open, .dir_read = svc_dir_read,
+    .getcwd = svc_getcwd, .chdir = svc_chdir,
+    .clip_set = svc_clip_set, .clip_get = svc_clip_get, .clip_len = svc_clip_len,
+    .icache_sync = svc_icache_sync,
+    .gfx_blit8 = svc_gfx_blit8,
+    .keys_down = svc_keys_down,
+    .audio_open = svc_audio_open, .audio_avail = svc_audio_avail,
+    .audio_write = svc_audio_write, .audio_close = svc_audio_close,
+    .run_basic = svc_run_basic,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma

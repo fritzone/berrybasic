@@ -237,6 +237,11 @@ static void ring_push(trb_t *ring, uint32_t *enq, uint32_t *cyc,
 
 // Issue a command TRB and wait for its completion event. Returns the slot id
 // from the completion (or completion code in low bits); <0 on error.
+// Route a stray transfer-event completion to the keyboard/mouse interrupt EP so a
+// HID report that lands while we wait for a command/control completion is decoded
+// and its endpoint re-armed (defined far below; forward-declared for the waits).
+static void handle_hid_event(int sid, int eid, int cc);
+
 static int run_command(uint64_t param, uint32_t control) {
     // Remember the address of the command TRB we are about to enqueue. The
     // Command Completion Event echoes this pointer, so we can match the
@@ -269,7 +274,8 @@ static int run_command(uint64_t param, uint32_t control) {
             if (cc != 1) { uart_hex("[XHCI] cmd comp code ", cc); return -1; }
             return (ev.control >> 24) & 0xff;     // slot id
         }
-        uart_hex("[XHCI] skip event type ", TRB_GET_TYPE(ev.control));
+        if (TRB_GET_TYPE(ev.control) == TRB_TRANSFER_EVENT)   // HID report arrived mid-command
+            handle_hid_event((ev.control >> 24) & 0xff, (ev.control >> 16) & 0x1f, COMP_CODE(ev.status));
     }
     uart_puts("[XHCI] cmd timeout\n");
     uart_hex("[XHCI]   USBSTS: ", RD32(op_base + OP_USBSTS));
@@ -310,11 +316,15 @@ static int control_xfer(uint8_t bmReqType, uint8_t bReq, uint16_t wValue,
             continue;
         }
         if (TRB_GET_TYPE(ev.control) == TRB_TRANSFER_EVENT) {
-            int cc = COMP_CODE(ev.status);
-            if (cc != 1 && cc != 13 /*short packet*/) { uart_hex("[XHCI] ctrl cc ", cc); return -1; }
-            return 0;
+            int sid = (ev.control >> 24) & 0xff;
+            int eid = (ev.control >> 16) & 0x1f;
+            int cc  = COMP_CODE(ev.status);
+            if (sid == slot_id && eid == 1) {            // OUR EP0 completion
+                if (cc != 1 && cc != 13 /*short packet*/) { uart_hex("[XHCI] ctrl cc ", cc); return -1; }
+                return 0;
+            }
+            handle_hid_event(sid, eid, cc);              // a HID report mid-transfer - keep it alive
         }
-        uart_hex("[XHCI] skip event type ", TRB_GET_TYPE(ev.control));
     }
     uart_puts("[XHCI] ctrl timeout\n");
     return -1;
@@ -906,10 +916,17 @@ static void xhci_pump(void) {
 // EP0 pipe + contexts are snapshotted so control/bulk transfers can target it
 // later (the globals only ever describe the most-recently-addressed device).
 // ===========================================================================
-#define XHCI_MAX_DEV 8
+#define XHCI_MAX_DEV 12    // hub + keyboard + mouse + several sticks (freed slots reused)
 
 static xhci_dev g_devs[XHCI_MAX_DEV];
 static int      g_dev_n;
+
+static int g_enum_hub_port;   // downstream hub port being enumerated now (0 = root)
+// Onboard hub topology, captured when it is first scanned, so a hot-plug rescan
+// can re-drive its ports without re-walking the whole tree.
+static int g_ihub_valid, g_ihub_slot, g_ihub_speed, g_ihub_root_port,
+           g_ihub_tt_slot, g_ihub_tt_port;
+static uint32_t g_ihub_route;
 
 // Per-device private pipe state, parallel to g_devs.
 typedef struct {
@@ -926,12 +943,15 @@ static int ep_addr_dci(int ep_addr) { return (ep_addr & 0x0f) * 2 + ((ep_addr & 
 // topology + interface class. Snapshots its EP0 pipe and contexts.
 static int record_dev(int root_port, uint32_t route, int speed, int tt_slot, int tt_port,
                       int ifnum, int cls, int subcls, int proto) {
-    if (g_dev_n >= XHCI_MAX_DEV) return -1;
-    int i = g_dev_n++;
+    int i = -1;                                   // reuse a freed (unplugged) slot first
+    for (int k = 0; k < g_dev_n; k++) if (!g_devs[k].valid) { i = k; break; }
+    if (i < 0) { if (g_dev_n >= XHCI_MAX_DEV) return -1; i = g_dev_n++; }
     xhci_dev *d = &g_devs[i];
     d->slot = slot_id; d->speed = speed; d->root_port = root_port; d->route = route;
     d->tt_slot = tt_slot; d->tt_port = tt_port; d->ifnum = ifnum;
     d->cls = (uint8_t)cls; d->subcls = (uint8_t)subcls; d->proto = (uint8_t)proto;
+    d->hub_port = g_enum_hub_port;
+    d->bulk_in = d->bulk_out = d->bulk_mps = 0;
     d->valid = 1;
     dev_priv *p = &g_priv[i];
     p->ep0_ring = ep0_ring; p->ep0_enq = ep0_enq; p->ep0_cyc = ep0_cycle;
@@ -1033,11 +1053,36 @@ static void handle_device(int root_port, uint32_t route, int speed,
     }
 }
 
+// Address + descend into the child on downstream port `dp` of the hub whose EP0
+// is currently selected in the globals. Addressing the child moves the globals,
+// so snapshot the hub's EP0 and re-select it afterwards. Shared by the boot scan
+// and the hot-plug rescan.
+static void enum_child(int hub_slot, int hub_speed, uint32_t hub_route,
+                       int hub_tt_slot, int hub_tt_port, int root_port, int depth,
+                       int dp, int dspeed, uint8_t *buf) {
+    trb_t   *hub_ring = ep0_ring; uint32_t he = ep0_enq, hc = ep0_cycle;
+    int      hslot = slot_id;
+    uint32_t croute = hub_route | ((uint32_t)(dp & 0xf) << (4 * depth));
+    int ctt_slot = hub_tt_slot, ctt_port = hub_tt_port;
+    if (dspeed < 3) { ctt_slot = hub_slot; ctt_port = dp; }   // FS/LS -> parent is the TT
+    g_enum_hub_port = dp;
+    int cslot = address_device_on(root_port, croute, dspeed, ctt_slot, ctt_port);
+    if (cslot && get_device_descriptor(buf, dspeed) >= 0)
+        handle_device(root_port, croute, dspeed, ctt_slot, ctt_port, depth + 1, buf);
+    g_enum_hub_port = 0;
+    ep0_ring = hub_ring; ep0_enq = he; ep0_cycle = hc; slot_id = hslot;  // re-select hub
+}
+
 // Enumerate every connected downstream port of a hub (globals point at the hub).
 static void scan_hub(int hub_slot, int hub_speed, uint32_t hub_route,
                      int hub_tt_slot, int hub_tt_port, int root_port, int depth,
                      uint8_t *buf) {
     if (depth >= 5) { uart_puts("[USB] hub chain too deep\n"); return; }
+    if (depth == 0) {                                 // remember the onboard hub for rescans
+        g_ihub_valid = 1; g_ihub_slot = hub_slot; g_ihub_speed = hub_speed;
+        g_ihub_route = hub_route; g_ihub_tt_slot = hub_tt_slot; g_ihub_tt_port = hub_tt_port;
+        g_ihub_root_port = root_port;
+    }
     uint32_t skip = 0;
     int first_time = 1;
     for (;;) {
@@ -1047,21 +1092,17 @@ static void scan_hub(int hub_slot, int hub_speed, uint32_t hub_route,
             break;                                     // no more connected ports
         first_time = 0;
         skip |= (1u << dp);
-        // The hub's EP0 is selected now (hub_enumerate used it). Snapshot so we can
-        // re-select it after addressing/handling the child (which moves the globals).
-        trb_t   *hub_ring = ep0_ring; uint32_t he = ep0_enq, hc = ep0_cycle;
-        int      hslot = slot_id;
-
-        uint32_t croute = hub_route | ((uint32_t)(dp & 0xf) << (4 * depth));
-        int ctt_slot = hub_tt_slot, ctt_port = hub_tt_port;
-        if (dspeed < 3) { ctt_slot = hub_slot; ctt_port = dp; }   // FS/LS -> parent is TT
-
-        int cslot = address_device_on(root_port, croute, dspeed, ctt_slot, ctt_port);
-        if (cslot && get_device_descriptor(buf, dspeed) >= 0)
-            handle_device(root_port, croute, dspeed, ctt_slot, ctt_port, depth + 1, buf);
-
-        ep0_ring = hub_ring; ep0_enq = he; ep0_cycle = hc; slot_id = hslot;  // re-select hub
+        enum_child(hub_slot, hub_speed, hub_route, hub_tt_slot, hub_tt_port,
+                   root_port, depth, dp, dspeed, buf);
     }
+    // The hub's EP0 ring advanced through every port poll/reset above, but its
+    // saved pipe (g_priv) was snapshotted back in record_dev, before all that.
+    // Write the final position back so later control transfers to the hub - above
+    // all the hot-plug rescan - continue from here instead of a stale ring slot
+    // the controller has already passed (which would time out and look like every
+    // device vanished).
+    int hpi = find_priv(hub_slot);
+    if (hpi >= 0) { g_priv[hpi].ep0_enq = ep0_enq; g_priv[hpi].ep0_cyc = ep0_cycle; }
 }
 
 int xhci_kbd_init(uintptr_t mmio_base) {
@@ -1266,6 +1307,80 @@ int xhci_ep_reset(int slot, int ep_addr) {
     run_command(dq, TRB_TYPE(TRB_SET_TR_DEQUEUE) | (dci << 16) | (slot << 24));
     xhci_control(slot, 0x02, 1 /*CLEAR_FEATURE*/, 0 /*ENDPOINT_HALT*/, (uint16_t)ep_addr, 0, 0);
     return 0;
+}
+
+// --- hot-plug rescan --------------------------------------------------------
+#define TRB_DISABLE_SLOT 10
+
+static void xhci_disable_slot(int slot) {
+    run_command(0, TRB_TYPE(TRB_DISABLE_SLOT) | (slot << 24));
+}
+
+int xhci_slot_valid(int slot) {
+    for (int i = 0; i < g_dev_n; i++)
+        if (g_devs[i].valid && g_devs[i].slot == slot) return 1;
+    return 0;
+}
+
+// Re-poll the onboard hub's downstream ports (via the hub's EP0), enumerate any
+// newly-connected device and free any that vanished. Reuses the boot enumeration
+// path (hub_enumerate + enum_child). Bitmask: 1 added, 2 removed. See xhci.h.
+int xhci_rescan(void) {
+    if (!g_ihub_valid) return 0;
+    int hidx = find_priv(g_ihub_slot);
+    if (hidx < 0) return 0;
+    static uint8_t *rbuf;
+    if (!rbuf) rbuf = dma_alloc(256, 64);
+    uint8_t *buf = rbuf;
+    int changed = 0;
+
+    if (xhci_control(g_ihub_slot, 0xA0, 6, (0x29 << 8), 0, 8, buf) < 0) return 0;  // hub descriptor
+    int nports = buf[2];
+    if (nports > 15) nports = 15;
+
+    uint32_t connected = 0;
+    for (int p = 1; p <= nports; p++)
+        if (xhci_control(g_ihub_slot, 0xA3, 0, 0, p, 4, buf) >= 0 && (buf[0] & 1))
+            connected |= (1u << p);                                              // PORT_CONNECTION
+
+    // Removals: a known hub child whose port no longer reports a connection.
+    for (int i = 0; i < g_dev_n; i++) {
+        xhci_dev *d = &g_devs[i];
+        if (!d->valid || !d->hub_port || d->slot == g_ihub_slot) continue;
+        if (!(connected & (1u << d->hub_port))) {
+            uart_dec("[USB] hotplug: REMOVED, hub port ", (uint32_t)d->hub_port);
+            xhci_disable_slot(d->slot);
+            d->valid = 0;
+            changed |= 2;
+        }
+    }
+
+    // Additions: a connected port with no known child -> enumerate it.
+    uint32_t known = 0;
+    for (int i = 0; i < g_dev_n; i++)
+        if (g_devs[i].valid && g_devs[i].hub_port) known |= (1u << g_devs[i].hub_port);
+    for (int p = 1; p <= nports; p++) {
+        if (!(connected & (1u << p)) || (known & (1u << p))) continue;
+        uart_dec("[USB] hotplug: NEW device, hub port ", (uint32_t)p);
+        dev_priv *hp = &g_priv[hidx];                       // select the hub's EP0
+        trb_t *sr = ep0_ring; uint32_t se = ep0_enq, sc = ep0_cycle; int ss = slot_id;
+        uint8_t *si = input_ctx, *sd = dev_ctx;
+        ep0_ring = hp->ep0_ring; ep0_enq = hp->ep0_enq; ep0_cycle = hp->ep0_cyc;
+        slot_id = g_ihub_slot; input_ctx = hp->input_ctx; dev_ctx = hp->dev_ctx;
+
+        int dp = 0, dspeed = 0;
+        if (hub_enumerate(buf, g_ihub_root_port, g_ihub_slot, g_ihub_speed, g_ihub_route,
+                          g_ihub_tt_slot, g_ihub_tt_port, ~(1u << p), 0, &dp, &dspeed) && dp == p) {
+            enum_child(g_ihub_slot, g_ihub_speed, g_ihub_route, g_ihub_tt_slot, g_ihub_tt_port,
+                       g_ihub_root_port, 0, dp, dspeed, buf);
+            changed |= 1;
+        }
+        hp->ep0_enq = ep0_enq; hp->ep0_cyc = ep0_cycle;     // carry the hub ring forward
+        ep0_ring = sr; ep0_enq = se; ep0_cycle = sc; slot_id = ss;
+        input_ctx = si; dev_ctx = sd;
+        known |= (1u << p);
+    }
+    return changed;
 }
 
 void xhci_selftest(void) {

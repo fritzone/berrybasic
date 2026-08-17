@@ -21,13 +21,21 @@
 #define BOUNCE_BYTES    (BOUNCE_SECTORS * BLK_SECSZ)
 
 typedef struct {
-    int      slot, ep_in, ep_out, lun;
+    int      slot, ep_in, ep_out, lun, blkidx, used;
     uint64_t nblocks;
 } msc_dev;
 
 static msc_dev  g_msc[BLK_MAX_DEV];
-static int      g_msc_n;
 static uint32_t g_tag = 1;
+
+static int msc_by_slot(int slot) {
+    for (int i = 0; i < BLK_MAX_DEV; i++) if (g_msc[i].used && g_msc[i].slot == slot) return i;
+    return -1;
+}
+static int msc_free_slot(void) {
+    for (int i = 0; i < BLK_MAX_DEV; i++) if (!g_msc[i].used) return i;
+    return -1;
+}
 
 // Non-cached DMA scratch, allocated once from the xHCI arena (bulk buffers must
 // come from there). g_cbw/g_csw are the wrappers; g_bounce carries data so the
@@ -150,7 +158,7 @@ static int get_max_lun(int slot, int iface) {
     return b[0];
 }
 
-static const char *msc_names[BLK_MAX_DEV] = { "usb0", "usb1", "usb2", "usb3" };
+static const char *msc_names[BLK_MAX_DEV] = { "usb0", "usb1", "usb2", "usb3", "usb4", "usb5" };
 
 int msc_init(void) {
     if (!g_cbw) {                                    // one-time DMA scratch
@@ -161,18 +169,21 @@ int msc_init(void) {
     }
 
     int registered = 0, n = xhci_dev_count();
-    for (int i = 0; i < n && g_msc_n < BLK_MAX_DEV; i++) {
+    for (int i = 0; i < n; i++) {
         xhci_dev *d = xhci_dev_get(i);
         if (!d || !d->valid) continue;
         if (d->cls != 0x08 || d->proto != 0x50) continue;        // BOT/SCSI only
         if (!d->bulk_in || !d->bulk_out) continue;
+        if (msc_by_slot(d->slot) >= 0) continue;                 // already registered (idempotent)
+        int mi = msc_free_slot();
+        if (mi < 0) break;                                       // msc pool full
 
         uart_dec("[MSC] mass storage on slot ", d->slot);
         if (xhci_bulk_config(d->slot, d->bulk_in, d->bulk_out, d->bulk_mps) < 0) {
             uart_puts("[MSC] bulk config failed\n"); continue;
         }
 
-        msc_dev *m = &g_msc[g_msc_n];
+        msc_dev *m = &g_msc[mi];
         m->slot = d->slot; m->ep_in = d->bulk_in; m->ep_out = d->bulk_out; m->lun = 0;
         (void)get_max_lun(d->slot, d->ifnum);                    // LUN 0 only for now
 
@@ -202,13 +213,26 @@ int msc_init(void) {
         m->nblocks = (uint64_t)last_lba + 1;
 
         blockdev bd;
-        bd.name = msc_names[g_msc_n];
+        bd.name = msc_names[mi];
         bd.read = msc_blk_read; bd.write = msc_blk_write; bd.ctx = m;
         bd.nblocks = m->nblocks; bd.present = 1;
         int idx = blk_register(&bd);
         if (idx < 0) { uart_puts("[MSC] block pool full\n"); continue; }
         uart_dec("[MSC] registered as blockdev ", idx);
-        g_msc_n++; registered++;
+        m->blkidx = idx; m->used = 1; registered++;
     }
     return registered;
+}
+
+// Hot-plug removal: if a registered stick's xHCI slot is no longer live (it was
+// unplugged and freed by xhci_rescan), forget it and return its blockdev index so
+// the caller can unmount + unregister it. Returns -1 when nothing was removed.
+int msc_dead_blkdev(void) {
+    for (int i = 0; i < BLK_MAX_DEV; i++)
+        if (g_msc[i].used && !xhci_slot_valid(g_msc[i].slot)) {
+            g_msc[i].used = 0;
+            uart_dec("[MSC] device gone, freeing blockdev ", g_msc[i].blkidx);
+            return g_msc[i].blkidx;
+        }
+    return -1;
 }

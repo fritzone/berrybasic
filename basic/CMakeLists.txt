@@ -10,6 +10,13 @@ endif()
 # The interpreter lives one directory up, alongside its host backends.
 set(REPO ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# basic.c #includes the generated "conf.h" (copyright banner + build info).
+# Generate it at configure time so a bare `cmake` build works without the
+# Makefile; the same tools/genconf.sh is used by the kernel and host builds.
+execute_process(
+  COMMAND ${REPO}/tools/genconf.sh ${CMAKE_CURRENT_SOURCE_DIR}/conf.h
+  WORKING_DIRECTORY ${REPO})
+
 # --- Catch2 v3 --------------------------------------------------------------
 include(FetchContent)
 FetchContent_Declare(
