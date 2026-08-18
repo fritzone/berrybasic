@@ -1,125 +1,34 @@
+#include "interp_lexer.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_seed.h"
+#include "interp_stmt.h"
+#include "interp_events.h"
+#include "interp_pod.h"
 // ===========================================================================
 // BerryBasiC — keyword table and lexer
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_lexer.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // ---------------------------------------------------------------------------
 // Lexer
 // ---------------------------------------------------------------------------
 
-enum {
-    T_EOL, T_NUM, T_STR, T_VAR, T_KW, T_LABEL,
-    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_CARET,
-    T_LP, T_RP, T_COMMA, T_SEMI, T_COLON, T_SQUOTE,
-    T_EQ, T_NE, T_LT, T_GT, T_LE, T_GE,
-    T_QUERY, T_PLING, T_DOLLAR,         // ? ! $ memory indirection
-    T_HASH                              // # file channel prefix
-};
 
-enum {
-    // Keywords
-    KW_PRINT, KW_LET, KW_GOTO, KW_IF, KW_THEN,
-    KW_REM, KW_END, KW_RUN, KW_LIST, KW_NEW,
-    KW_FOR, KW_TO, KW_STEP, KW_NEXT, KW_GOSUB, KW_RETURN, KW_INPUT, KW_DIM, KW_PI,
-    KW_REPEAT, KW_UNTIL, KW_ELSE, KW_CLS, KW_COLOUR,
-    KW_WHILE, KW_ENDWHILE, KW_ENDIF,                  // structured loops / block IF
-    KW_CASE, KW_OF, KW_WHEN, KW_OTHERWISE, KW_ENDCASE, // CASE selection
-    KW_EXIT, KW_CONTINUE,                              // loop control (break / continue)
-    KW_TRY, KW_CATCH, KW_ENDTRY, KW_RAISE,             // structured error handling
-    KW_DEF, KW_PROC, KW_FN, KW_ENDPROC, KW_LOCAL,     // procedures & functions
-    KW_TYPE, KW_ENDTYPE, KW_AS,                       // user-defined types (records)
-    KW_IMPORT,                                        // IMPORT "module": pull in its PROC/FN
-    KW_DIV, KW_MOD, KW_AND, KW_OR, KW_EOR, KW_NOT,    // operator keywords
-    KW_ON, KW_DATA, KW_READ, KW_RESTORE, KW_STOP, KW_VDU, KW_TIME,  // statements
-    KW_WAIT,                                                        // WAIT: pace to ~60 Hz
-    KW_DELAY,                                                       // DELAY cs: pause for n centiseconds
-    KW_POKE,                                                        // POKE addr,byte (alias for ?addr=byte)
-    KW_EXEC,                                                        // EXEC "stmt" : run a string as BASIC
-    KW_CHAIN,                                                       // CHAIN c$[,r$] : run another .BAS, then optionally r$
-    KW_PINMODE, KW_PINSET, KW_PINCLR,                              // GPIO statements
-    KW_OUTPUT, KW_PULLUP, KW_PULLDOWN, KW_ALT,                    // PINMODE sub-keywords (INPUT reused)
-    KW_I2CWRITE, KW_I2CREAD,                                       // I2C statements
-    KW_SOUND, KW_TONE,                                             // audio statements
-    KW_MODE, KW_GCOL, KW_PLOT, KW_MOVE, KW_DRAW, KW_CLG,            // graphics statements
-    KW_LINE, KW_RECTANGLE, KW_CIRCLE, KW_ELLIPSE, KW_FILL,         // shape commands
-    KW_LINEWIDTH, KW_LINEJOIN, KW_LINECAP,                        // thick-line pen
-    KW_GGET, KW_GPUT, KW_SAVESPRITE,                              // sprite capture / stamp / save
-    KW_BUFFER, KW_FLIP,                                           // double buffering: BUFFER ON/OFF + FLIP
-    KW_GTINT,                                                     // GTINT r,g,b,a / GTINT OFF : sprite tint
-    KW_NEWSPRITE, KW_SPRITETARGET,                               // render-to-sprite: blank sprite + redirect drawing
-    KW_TILEMAP,                                                  // TILEMAP sheet,map,cols,rows,tw,th,sx,sy
-    KW_FONT, KW_FONTSIZE, KW_FONTSTYLE, KW_GTEXT,                // TrueType fonts: select / size / style / draw
-    KW_SAVE, KW_LOAD, KW_CAT, KW_DIR, KW_DELETE,                    // storage statements
-    KW_MKDIR, KW_CD, KW_RMDIR, KW_PWD,                              // directory statements
-    KW_BPUT, KW_CLOSE,                                              // file I/O statements
-    KW_SEED,                                                        // load a native seed
-    KW_PODLOAD, KW_PODFREE, KW_PODINFO, KW_PODCAPS,                 // POD executables
-    KW_AUTO, KW_RENUMBER, KW_EDIT,                                  // editor commands
-    KW_MOUSE,                                                       // MOUSE x,y,b statement
-    KW_TRUE, KW_FALSE, KW_POS, KW_VPOS,               // parenless value keywords
-    KW_PINS,                                          // PINS : read all header pins at once
-    KW_SCREEN, KW_SCREENW, KW_SCREENH,                // SCREEN statement + current-resolution values
-    KW_GMODE,                                         // GMODE : active graphics mode (1 or 2)
-    KW_FONTHEIGHT,                                    // FONTHEIGHT : line height of the current font (px)
-    KW_KEYBOARD, KW_KEYBOARDS,                        // KEYBOARD "NO" statement + KEYBOARD$ (current layout)
-    KW_KEYMOD,                                        // KEYMOD : modifier/lock bitmask
-    KW_ERR, KW_ERRS,                                  // ERR / ERR$ : code + message of a caught error
-    KW_MOUSEX, KW_MOUSEY, KW_MOUSEB,                  // mouse pointer x / y / buttons
-    KW_DIRNEXT, KW_DIRSIZE, KW_DIRTYPE,               // directory-scan cursor fields
-    KW_DIRNAMES, KW_DIRDATES, KW_DIRTIMES,            // (DIRNAME$/DIRDATE$/DIRTIME$)
-    KW_NEWDICT, KW_NEWLIST, KW_NEWTREE,               // create a new dictionary / list / tree
-    KW_DICTSET, KW_DICTDEL,                           // dictionary statements
-    KW_PUSH, KW_LISTSET, KW_LISTINS, KW_LISTDEL,      // list statements
-    KW_TREESET, KW_TREEDEL,                           // tree statements
-    // Functions from the "standard library"
-    KW_ABS, KW_INT, KW_SGN, KW_SQR, KW_SIN, KW_COS, KW_TAN, KW_ATN,
-    KW_LOG, KW_EXP, KW_DEG, KW_RAD, KW_ACS, KW_ASN,
-    KW_RND, KW_LEN, KW_ASC, KW_VAL, KW_INSTR, KW_GET, KW_INKEY,
-    KW_CHRS, KW_STRS, KW_LEFTS, KW_RIGHTS, KW_MIDS, KW_STRINGS, KW_GETS, KW_INKEYS,
-    KW_POINT,                                         // POINT(x,y) graphics function
-    KW_SHL, KW_SHR, KW_ASR, KW_ROL, KW_ROR,           // bitwise shift / rotate functions
-    KW_CALL, KW_CALLS,                                // CALL()/CALL$(): invoke a native seed
-    KW_OPENIN, KW_OPENOUT, KW_OPENUP,                 // open a file -> channel
-    KW_BGET, KW_EOF, KW_EXT, KW_PTR,                  // BGET#/EOF#/EXT#/PTR# channel functions
-    KW_RGB,                                           // RGB(r,g,b) -> packed truecolour value
-    KW_LOADSPRITE,                                    // LOADSPRITE("file") -> sprite address
-    KW_SPRW, KW_SPRH,                                 // SPRW(addr)/SPRH(addr): sprite size
-    KW_UPPERS, KW_LOWERS, KW_TRIMS, KW_REPLACES,      // string library: case, trim, replace
-    KW_CONTAINS, KW_STARTSWITH, KW_ENDSWITH,          // string predicates -> TRUE/FALSE
-    KW_SPLIT, KW_JOINS,                               // SPLIT(...) -> array ; JOIN$(array,...)
-    KW_PEEK,                                          // PEEK(addr) -> byte (alias for ?addr)
-    KW_PIN,                                           // PIN(n) -> level (also a statement: PIN n,v)
-    KW_PINWAIT,                                       // PINWAIT(pin,edge,timeout) -> pin or -1
-    KW_EVAL,                                          // EVAL("expr") -> value of the parsed expression
-    KW_DIROPEN,                                       // DIROPEN("path") -> start a scan
-    // Collection accessor functions (see the NEW* creators above)
-    KW_SIZE,                                          // SIZE(h) : element count of any collection
-    KW_DICTGET, KW_DICTGETS, KW_DICTHAS, KW_DICTKEYS, // dictionary lookups + key iteration
-    KW_POP, KW_POPS, KW_LISTGET, KW_LISTGETS,         // list read/remove
-    KW_TREEGET, KW_TREEGETS, KW_TREEHAS,              // tree lookups
-    KW_TREEMIN, KW_TREEMAX, KW_TREEKEY,               // tree ordered access
-    KW_I2CPROBE,                                      // I2CPROBE(addr) -> device present?
-    KW_HEXS, KW_BINS, KW_FORMATS,                     // formatted / multi-base output
-    KW_LOADFONT, KW_TEXTWIDTH,                         // LOADFONT("f")->handle ; TEXTWIDTH(s$)->pixels
-    KW__FIRST_FUNC = KW_ABS, KW__LAST_FUNC = KW_TEXTWIDTH,
-    KW_TAB, KW_SPC, KW_USING                          // PRINT-only modifiers
-};
 
-static int is_func_kw(int id) { return id >= KW__FIRST_FUNC && id <= KW__LAST_FUNC; }
+int is_func_kw(int id) { return id >= KW__FIRST_FUNC && id <= KW__LAST_FUNC; }
 
 // Keywords registered by native seeds (see SEED_KEYWORD) get token ids from this
 // base upward, well clear of the built-in KW_* enum. The lexer recognises their
 // names via seed_kw_lookup (defined with the seed machinery, forward-declared
 // here); is_seed_kw() tells the two apart during dispatch.
-#define KW_SEED_DYN 5000
-static int seed_kw_lookup(const char *name);   // -> registry index, or -1
-static const char *seed_kw_name(int idx);      // registry index -> name, or 0
-static int is_seed_kw(int id) { return id >= KW_SEED_DYN; }
+int seed_kw_lookup(const char *name);   // -> registry index, or -1
+const char *seed_kw_name(int idx);      // registry index -> name, or 0
+int is_seed_kw(int id) { return id >= KW_SEED_DYN; }
 
-static const struct { const char *name; int id; } kwtab[] = {
+const kwent_t kwtab[] = {
     { "PRINT", KW_PRINT }, { "LET",  KW_LET   }, { "GOTO",   KW_GOTO   },
     { "IF",    KW_IF    }, { "THEN", KW_THEN  }, { "REM",    KW_REM    },
     { "END",   KW_END   }, { "RUN",  KW_RUN   }, { "LIST",   KW_LIST   },
@@ -216,29 +125,29 @@ static const struct { const char *name; int id; } kwtab[] = {
     { "TAB",   KW_TAB   }, { "SPC",  KW_SPC   }, { "USING", KW_USING },
     { "HEX$",  KW_HEXS  }, { "BIN$", KW_BINS  }, { "FORMAT$", KW_FORMATS },
 };
-static const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
+const int kwcount = (int)(sizeof(kwtab) / sizeof(kwtab[0]));
 
 // The canonical spelling of a keyword id, or 0 if there isn't one. Used where a
 // keyword's *word* is wanted rather than its meaning - a type or field name is
 // allowed to be a word like POINT or SIZE, because it can only appear where
 // nothing else is legal. Aliases (COLOUR/COLOR) resolve to whichever is listed
 // first, which is all a name needs.
-static const char *kw_spelling(int id) {
+const char *kw_spelling(int id) {
     for (int i = 0; i < kwcount; i++)
         if (kwtab[i].id == id) return kwtab[i].name;
     return 0;
 }
 
-static const char *cur_text;           // text of the line currently executing (see cur_line_idx)
-static const char *lx;                 // lexer cursor into the current line
-static const char *tok_start;          // start of the current token (for re-branching)
-static int    tok;                     // current token type
-static double tok_num;                 // payload for T_NUM
-static int  tok_kw;                    // payload for T_KW
-static char tok_str[LINE_LEN];         // payload for T_STR
-static char tok_var[NAME_LEN];         // payload for T_VAR
+const char *cur_text;           // text of the line currently executing (see cur_line_idx)
+const char *lx;                 // lexer cursor into the current line
+const char *tok_start;          // start of the current token (for re-branching)
+int    tok;                     // current token type
+double tok_num;                 // payload for T_NUM
+int  tok_kw;                    // payload for T_KW
+char tok_str[LINE_LEN];         // payload for T_STR
+char tok_var[NAME_LEN];         // payload for T_VAR
 
-static void lex_next(void) {
+void lex_next(void) {
     while (is_space(*lx)) lx++;
     tok_start = lx;
     char c = *lx;
@@ -386,21 +295,14 @@ static void lex_next(void) {
 // A snapshot of the whole lexer position, so EVAL / EXEC can point the lexer at
 // a brand-new source string, run it, and put everything back exactly as it was.
 // Everything the lexer/parser reads to decide "where am I" lives here.
-typedef struct {
-    const char *cur_text, *lx, *tok_start;
-    int    tok, tok_kw;
-    double tok_num;
-    char   tok_str[LINE_LEN];
-    char   tok_var[NAME_LEN];
-} lexstate_t;
 
-static void lex_save(lexstate_t *s) {
+void lex_save(lexstate_t *s) {
     s->cur_text = cur_text; s->lx = lx; s->tok_start = tok_start;
     s->tok = tok; s->tok_kw = tok_kw; s->tok_num = tok_num;
     s_copy(s->tok_str, tok_str, LINE_LEN);
     s_copy(s->tok_var, tok_var, NAME_LEN);
 }
-static void lex_restore(const lexstate_t *s) {
+void lex_restore(const lexstate_t *s) {
     cur_text = s->cur_text; lx = s->lx; tok_start = s->tok_start;
     tok = s->tok; tok_kw = s->tok_kw; tok_num = s->tok_num;
     s_copy(tok_str, s->tok_str, LINE_LEN);

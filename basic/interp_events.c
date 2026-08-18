@@ -1,27 +1,35 @@
+#include "interp_events.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_stmt.h"
+#include "interp_hw.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — DATA/READ/RESTORE, event handlers (ON TIMER/PIN/MOUSE), VDU
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_events.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // ---------------------------------------------------------------------------
 // DATA / READ / RESTORE. The data pointer walks the program's DATA statements
 // using plain text scanning (no lexer state), so READ can run mid-statement.
 // ---------------------------------------------------------------------------
 
-static int  data_pc  = 0;        // prog index to scan for DATA from
-static int  data_off = -1;       // offset of next item in prog[data_pc], -1 = not located
-static char data_item[LINE_LEN];
+int  data_pc  = 0;        // prog index to scan for DATA from
+int  data_off = -1;       // offset of next item in prog[data_pc], -1 = not located
+char data_item[LINE_LEN];
 
-static void data_reset(int line_num) {
+void data_reset(int line_num) {
     if (line_num < 0) data_pc = 0;
     else { int idx = find_line_index(line_num); data_pc = (idx < 0) ? prog_n : idx; }
     data_off = -1;
 }
 
-static int line_is_data(const char *t, int *body) {
+int line_is_data(const char *t, int *body) {
     int i = 0; while (t[i] == ' ' || t[i] == '\t') i++;
     if (up(t[i]) == 'D' && up(t[i+1]) == 'A' && up(t[i+2]) == 'T' &&
         up(t[i+3]) == 'A' && !is_alnum(t[i+4])) { *body = i + 4; return 1; }
@@ -29,7 +37,7 @@ static int line_is_data(const char *t, int *body) {
 }
 
 // Fetch the next DATA item into data_item[]; returns 1, or 0 when out of data.
-static int data_next(int *len) {
+int data_next(int *len) {
     for (;;) {
         if (data_off < 0) {                      // locate the next DATA line
             int body;
@@ -71,17 +79,15 @@ static int data_next(int *len) {
 // interrupt, so the interpreter is never re-entered at an unsafe point. A handler
 // is an ordinary parameterless PROC; while one runs, further events are held off.
 // ---------------------------------------------------------------------------
-#define EV_PIN_MAX 8
 
-static struct { int active; char proc[NAME_LEN];
-                long interval_us; unsigned long long last_us; } ev_timer;
-static struct { int active; char proc[NAME_LEN]; int x, y, b; } ev_mouse;
-static struct { int active; char proc[NAME_LEN]; } ev_key;
-static struct { int active; char proc[NAME_LEN]; int pin, edge, level; } ev_pin[EV_PIN_MAX];
-static int  in_event;                            // reentrancy guard while a handler runs
-static unsigned long long g_frame_us;            // WAIT's ~60 Hz cadence clock
+ev_timer_t ev_timer;
+ev_mouse_t ev_mouse;
+ev_key_t   ev_key;
+ev_pin_t   ev_pin[EV_PIN_MAX];
+int  in_event;                            // reentrancy guard while a handler runs
+unsigned long long g_frame_us;            // WAIT's ~60 Hz cadence clock
 
-static void events_reset(void) {
+void events_reset(void) {
     ev_timer.active = 0;
     ev_mouse.active = 0;
     ev_key.active = 0;
@@ -98,7 +104,7 @@ static void events_reset(void) {
 }
 
 // Read the handler's PROC name (glued "PROCname" or spaced "PROC name") into out.
-static int read_handler_proc(char *out) {
+int read_handler_proc(char *out) {
     if (tok != T_KW || tok_kw != KW_PROC) { err("Expected PROC and a handler name"); return 0; }
     if (tok_var[0]) { s_copy(out, tok_var, NAME_LEN); lex_next(); return 1; }
     lex_next();
@@ -106,10 +112,10 @@ static int read_handler_proc(char *out) {
     s_copy(out, tok_var, NAME_LEN); lex_next();
     return 1;
 }
-static int word_is(const char *w) { return tok == T_VAR && s_eq(tok_var, w); }
+int word_is(const char *w) { return tok == T_VAR && s_eq(tok_var, w); }
 
 // ON TIMER cs PROC name   |   ON TIMER OFF
-static void on_timer(void) {
+void on_timer(void) {
     lex_next();                                  // consume TIMER
     if (word_is("OFF")) { lex_next(); ev_timer.active = 0; return; }
     long cs = (long)need_num(); if (g_err) return;
@@ -122,7 +128,7 @@ static void on_timer(void) {
 }
 
 // ON MOUSE PROC name   |   ON MOUSE OFF
-static void on_mouse(void) {
+void on_mouse(void) {
     lex_next();                                  // consume MOUSE
     if (word_is("OFF")) { lex_next(); ev_mouse.active = 0; return; }
     char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
@@ -134,7 +140,7 @@ static void on_mouse(void) {
 // ON KEY PROC name   |   ON KEY OFF
 // The handler reads the triggering key with GET / GET$ / INKEY(0), which return
 // the very key that fired the event (it is held in g_pending_key).
-static void on_key(void) {
+void on_key(void) {
     lex_next();                                  // consume KEY
     if (word_is("OFF")) { lex_next(); ev_key.active = 0; return; }
     char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
@@ -143,7 +149,7 @@ static void on_key(void) {
 }
 
 // ON PIN p [RISING|FALLING] PROC name   |   ON PIN p OFF   |   ON PIN OFF
-static void on_pin(void) {
+void on_pin(void) {
     lex_next();                                  // consume PIN
     if (word_is("OFF")) { lex_next();            // cancel every pin handler
         for (int i = 0; i < EV_PIN_MAX; i++)
@@ -175,7 +181,7 @@ static void on_pin(void) {
 // WAIT : block until the next ~1/60 s frame boundary, giving an animation loop a
 // steady cadence without a busy spin in the program. (There is no hardware vsync
 // interrupt on this path; this is frame pacing, not tear-free page flipping.)
-static void stmt_wait(void) {
+void stmt_wait(void) {
     lex_next();
     const unsigned long long period = 16667;     // ~60 Hz
     unsigned long long now = con_micros();
@@ -188,7 +194,7 @@ static void stmt_wait(void) {
 // DELAY 50 waits half a second. Unlike an empty counting loop, the duration is
 // real-time and independent of CPU speed. Background audio keeps playing during
 // the wait; a non-positive value returns at once.
-static void stmt_delay(void) {
+void stmt_delay(void) {
     lex_next();                                       // consume DELAY
     double cs = need_num();
     if (g_err || cs <= 0) return;
@@ -196,7 +202,7 @@ static void stmt_delay(void) {
     while (con_micros() < target) sound_pump();
 }
 
-static void stmt_on(void) {
+void stmt_on(void) {
     lex_next();                                  // consume ON
     if (tok == T_KW && tok_kw == KW_PIN)   { on_pin();   return; }
     if (tok == T_KW && tok_kw == KW_MOUSE) { on_mouse(); return; }
@@ -231,7 +237,7 @@ static void stmt_on(void) {
 // by ';' is sent as a 16-bit word (two bytes, least-significant first); otherwise
 // just its least-significant byte is sent. A trailing '|' (BBC shorthand) sends
 // nine zero bytes, padding out a VDU 23 command.
-static void stmt_vdu(void) {
+void stmt_vdu(void) {
     lex_next();                                  // consume VDU
     if (tok == T_EOL || tok == T_COLON) return;  // bare VDU does nothing
     for (;;) {
@@ -250,7 +256,7 @@ static void stmt_vdu(void) {
     }
 }
 
-static void stmt_restore(void) {
+void stmt_restore(void) {
     lex_next();                                  // consume RESTORE
     int line = -1;
     if (tok == T_NUM) { line = (int)tok_num; lex_next(); }
@@ -258,7 +264,7 @@ static void stmt_restore(void) {
 }
 
 // READ var[,var...] : assign successive DATA items (numeric or string).
-static void stmt_read(void) {
+void stmt_read(void) {
     lex_next();                                  // consume READ
     for (;;) {
         target_t t;

@@ -1,17 +1,26 @@
+#include "interp_files.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_list.h"
+#include "interp_pod.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — storage commands: LOAD/SAVE, modules (IMPORT), CAT, dir ops, editor
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_files.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // --- Storage statements (LOAD / SAVE / CAT / DELETE) -------------------------
-#define STG_BUF_SIZE 65536
-static char stg_buf[STG_BUF_SIZE];
+char stg_buf[STG_BUF_SIZE];
 
 // Map a storage error code to a BASIC error message.
-static void stg_err(int code) {
+void stg_err(int code) {
     switch (code) {
         case STG_ENOTFOUND: err("File not found");                 break;
         case STG_EEXIST:    err("Already exists");                 break;
@@ -26,11 +35,11 @@ static void stg_err(int code) {
 // LOAD/SAVE/DELETE filename: quoted or bare (LOAD WELCOME finds WELCOME.BAS via
 // the .BAS default). Thin wrapper over read_path; callers must not lex past the
 // keyword first, so lx still points just after LOAD/SAVE/DELETE.
-static int read_filename(char *out, int outsz) {
+int read_filename(char *out, int outsz) {
     return read_path(out, outsz, ".BAS");      // quoted-or-bare, .BAS default
 }
 
-static int uint_to_str(char *p, int v) {        // unsigned decimal -> p, returns length
+int uint_to_str(char *p, int v) {        // unsigned decimal -> p, returns length
     char t[12]; int n = 0;
     if (v == 0) t[n++] = '0';
     while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
@@ -39,7 +48,7 @@ static int uint_to_str(char *p, int v) {        // unsigned decimal -> p, return
 }
 
 // SAVE "name" : serialise the program ("<num> <text>\n" per line) and write it.
-static void stmt_save(void) {
+void stmt_save(void) {
     char name[64];
     if (!read_filename(name, sizeof name)) return;
     int pos = 0;
@@ -58,7 +67,7 @@ static void stmt_save(void) {
 // Read a .BAS file into the program store, replacing the current program (and
 // clearing variables), exactly as LOAD does. Returns 0 or a negative stg_* code.
 // Shared by LOAD and CHAIN.
-static int load_bas_file(const char *name) {
+int load_bas_file(const char *name) {
     int n = stg_read(name, stg_buf, STG_BUF_SIZE);
     if (n < 0) return n;
     prog_n = 0;
@@ -86,7 +95,7 @@ static int load_bas_file(const char *name) {
 }
 
 // LOAD "name" : clear the current program and parse the file's numbered lines.
-static void stmt_load(void) {
+void stmt_load(void) {
     char name[64];
     if (!read_filename(name, sizeof name)) return;
     int r = load_bas_file(name);
@@ -101,12 +110,11 @@ static void stmt_load(void) {
 // once it finishes, reloads and runs caller$ - so a menu can launch an example
 // and get itself back automatically, without a resident-program snapshot.
 // ---------------------------------------------------------------------------
-#define CHAIN_MAX 4
-static char chain_q[CHAIN_MAX][64];
-static int  chain_qn = 0;
-static void chain_reset(void)                 { chain_qn = 0; }
-static void chain_enqueue(const char *name)   { if (chain_qn < CHAIN_MAX) s_copy(chain_q[chain_qn++], name, 64); }
-static void chain_dequeue(char *out) {
+char chain_q[CHAIN_MAX][64];
+int  chain_qn = 0;
+void chain_reset(void)                 { chain_qn = 0; }
+void chain_enqueue(const char *name)   { if (chain_qn < CHAIN_MAX) s_copy(chain_q[chain_qn++], name, 64); }
+void chain_dequeue(char *out) {
     s_copy(out, chain_q[0], 64);
     for (int i = 1; i < chain_qn; i++) s_copy(chain_q[i - 1], chain_q[i], 64);
     if (chain_qn > 0) chain_qn--;
@@ -114,14 +122,14 @@ static void chain_dequeue(char *out) {
 
 // Uppercase a program name and default its extension to .BAS (the FAT is 8.3 and
 // case-folding, so "koch" and "graphics/koch" both resolve after this).
-static void chain_normalise(char *name) {
+void chain_normalise(char *name) {
     int i = 0, dot = 0;
     for (; name[i]; i++) { name[i] = up(name[i]); if (name[i] == '.') dot = 1; }
     if (!dot && i < 59) { name[i] = '.'; name[i+1] = 'B'; name[i+2] = 'A'; name[i+3] = 'S'; name[i+4] = 0; }
 }
 
 // CHAIN callee$ [, caller$]
-static void stmt_chain(void) {
+void stmt_chain(void) {
     lex_next();                                         // consume CHAIN
     value_t s = need_str(); if (g_err) return;
     char callee[64]; int cn = s.len; if (cn > 63) cn = 63;
@@ -145,7 +153,7 @@ static void stmt_chain(void) {
 // LIST "file" support (the parser is in interp_list.inc). Splits a raw file line
 // "NUM TEXT" into *num and a pointer to TEXT (past the number and one space);
 // returns the whole line with *num = 0 when there is no leading number.
-static const char *list_line_split(const char *line, int *num) {
+const char *list_line_split(const char *line, int *num) {
     const char *p = line;
     while (is_space(*p)) p++;
     if (!is_digit(*p)) { *num = 0; return line; }
@@ -158,7 +166,7 @@ static const char *list_line_split(const char *line, int *num) {
 
 // Pause the listing when the screen fills (target only; con_rows()==0 on host and
 // in tests, so page==0 and nothing ever blocks). Returns 1 if the user quit.
-static int list_page(int printed, int page) {
+int list_page(int printed, int page) {
     if (!page || printed % page != 0) return 0;
     con_colour(LC_DEF);
     con_puts("-- more (any key, Q quits) --");
@@ -176,7 +184,7 @@ static int list_page(int printed, int page) {
 // Copy the next '\n'/'\r'-terminated line of buf[*i..n) into out (NUL-terminated,
 // clamped to LINE_LEN), advancing *i past the line and its terminator. Returns 0
 // at end of buffer.
-static int list_next_line(const char *buf, int n, int *i, char *out) {
+int list_next_line(const char *buf, int n, int *i, char *out) {
     if (*i >= n) return 0;
     int j = 0;
     while (*i < n && buf[*i] != '\n' && buf[*i] != '\r') {
@@ -188,7 +196,7 @@ static int list_next_line(const char *buf, int n, int *i, char *out) {
     return 1;
 }
 
-static void list_file(const char *name, int simple) {
+void list_file(const char *name, int simple) {
     int n = stg_read(name, stg_buf, STG_BUF_SIZE);
     if (n < 0) { stg_err(n); return; }
 
@@ -245,13 +253,12 @@ static void list_file(const char *name, int simple) {
 // The appended lines are stripped when the run ends, so editing/LIST/SAVE only
 // ever see the main program.
 // ---------------------------------------------------------------------------
-#define MAX_MODULES 16
-static char imported_names[MAX_MODULES][64];
-static int  n_imported;
+char imported_names[MAX_MODULES][64];
+int  n_imported;
 
 // Append one line to `module`'s block, keeping that block sorted by line number.
 // Module blocks sit at the tail of prog[] (after main and earlier modules).
-static void module_add_line(int module, int num, const char *text) {
+void module_add_line(int module, int num, const char *text) {
     if (prog_n >= MAX_LINES) { err("Out of memory"); return; }
     int i = prog_n;
     while (i > 0 && prog[i-1].module == module && prog[i-1].num > num) {
@@ -264,7 +271,7 @@ static void module_add_line(int module, int num, const char *text) {
 
 // Load a module file and append its numbered lines under `module`. Returns 0, or
 // a negative STG_* error if the file could not be read.
-static int load_module(const char *name, int module) {
+int load_module(const char *name, int module) {
     int n = stg_read(name, stg_buf, STG_BUF_SIZE);
     if (n < 0) return n;
     int i = 0;
@@ -291,7 +298,7 @@ static int load_module(const char *name, int module) {
 
 // If `text` begins with IMPORT "name", copy the (.BAS-defaulted) file name into
 // `out` and return 1; otherwise 0. Uses the global lexer, safe in the pre-pass.
-static int line_import_name(const char *text, char *out, int outsz) {
+int line_import_name(const char *text, char *out, int outsz) {
     cur_text = text; lx = text; lex_next();
     if (!(tok == T_KW && tok_kw == KW_IMPORT)) return 0;
     return read_filename(out, outsz);          // reads from lx, applies the .BAS default
@@ -301,7 +308,7 @@ static int line_import_name(const char *text, char *out, int outsz) {
 // IMPORT and append its lines. prog_n grows as modules are added, so the loop
 // also visits IMPORT lines inside modules (transitive). Dedup by name breaks
 // cycles and avoids importing the same module twice.
-static void import_modules(void) {
+void import_modules(void) {
     n_imported = 0;
     for (int i = 0; i < prog_n && !g_err; i++) {
         char name[64];
@@ -320,7 +327,7 @@ static void import_modules(void) {
     }
 }
 
-static void stmt_delete(void) {
+void stmt_delete(void) {
     char name[64];
     if (!read_filename(name, sizeof name)) return;
     int r = stg_delete(name);
@@ -329,7 +336,7 @@ static void stmt_delete(void) {
 
 // --- CAT: a rich directory listing ------------------------------------------
 // Categorise a file by extension into a short icon tag and a colour (BBC index).
-static void cat_kind(const char *name, int is_dir, const char **icon, int *colour) {
+void cat_kind(const char *name, int is_dir, const char **icon, int *colour) {
     if (is_dir) { *icon = "[DIR]"; *colour = 3; return; }             // not blue
     int n = 0; while (name[n]) n++;
     int dot = -1;
@@ -350,7 +357,7 @@ static void cat_kind(const char *name, int is_dir, const char **icon, int *colou
     *icon = "[BIN]"; *colour = 7;                                     // anything else
 }
 
-static int cat_u_to_str(char *out, long v) {          // non-negative -> decimal, returns len
+int cat_u_to_str(char *out, long v) {          // non-negative -> decimal, returns len
     char t[24]; int n = 0;
     if (v <= 0) { out[0] = '0'; out[1] = 0; return 1; }
     while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
@@ -359,7 +366,7 @@ static int cat_u_to_str(char *out, long v) {          // non-negative -> decimal
 }
 
 // Human-readable size: "845", "12.3K", "4.0M".
-static void cat_size_str(long sz, char *out) {
+void cat_size_str(long sz, char *out) {
     if (sz < 0) sz = 0;
     if (sz < 1024) { cat_u_to_str(out, sz); return; }
     long div  = (sz < 1024L * 1024) ? 1024L : 1024L * 1024L;
@@ -369,8 +376,8 @@ static void cat_size_str(long sz, char *out) {
     out[n++] = '.'; out[n++] = (char)('0' + tenths % 10); out[n++] = unit; out[n] = 0;
 }
 
-static void cat_pad(int n) { while (n-- > 0) con_putc(' '); }
-static void cat_2d(int v)  { con_putc((char)('0' + (v / 10) % 10)); con_putc((char)('0' + v % 10)); }
+void cat_pad(int n) { while (n-- > 0) con_putc(' '); }
+void cat_2d(int v)  { con_putc((char)('0' + (v / 10) % 10)); con_putc((char)('0' + v % 10)); }
 
 // CAT / DIR : list the current directory. By default it is rich - a coloured
 // type icon per file, the name, a human-readable size, and the date/time, in
@@ -379,7 +386,7 @@ static void cat_2d(int v)  { con_putc((char)('0' + (v / 10) % 10)); con_putc((ch
 // Plain one-name-per-line listing of a directory (CAT SIMPLE "path"). Same shape
 // as the backend stg_dir(), but works for any directory through the path-aware
 // scan cursor rather than only the current one.
-static void cat_simple(const char *path) {
+void cat_simple(const char *path) {
     int r = stg_diropen(path);
     if (r != 0) { stg_err(r); return; }
     while (stg_dirnext(&g_dirent) == 1) {
@@ -393,7 +400,7 @@ static void cat_simple(const char *path) {
 // form shows coloured type icons, sizes and dates with screen paging; SIMPLE
 // prints just the names. An optional path lets you peek into a subdirectory
 // (e.g. CAT "SEED") without CD-ing into it.
-static void stmt_cat(void) {
+void stmt_cat(void) {
     // lx sits just after CAT/DIR. Read the optional SIMPLE flag and optional path
     // straight from the source (not via the tokeniser) so a bare or leading-dot
     // path (CAT .., CAT sub) needs no quotes, just as CD does.
@@ -489,25 +496,25 @@ static void stmt_cat(void) {
 // lx sits just after the keyword here; read_path reads the path raw from there,
 // so a bare "cd ..", "cd /sys" or "cd examples" needs no quotes. Do NOT lex_next
 // first: a leading '.' (as in "..") is not a valid expression token.
-static void stmt_mkdir(void) {
+void stmt_mkdir(void) {
     char nm[64]; if (!read_path(nm, sizeof nm, 0)) return;
     int r = stg_mkdir(nm); if (r) stg_err(r);
 }
-static void stmt_rmdir(void) {
+void stmt_rmdir(void) {
     char nm[64]; if (!read_path(nm, sizeof nm, 0)) return;
     int r = stg_rmdir(nm); if (r) stg_err(r);
 }
-static void stmt_cd(void) {
+void stmt_cd(void) {
     char nm[64]; if (!read_path(nm, sizeof nm, 0)) return;
     int r = stg_chdir(nm); if (r) stg_err(r);
 }
-static void stmt_pwd(void) {
+void stmt_pwd(void) {
     lex_next();
     con_puts(stg_cwd()); con_puts("\n");
 }
 
 // BPUT# ch, value : write a byte (numeric) or a whole string's bytes to a channel.
-static void stmt_bput(void) {
+void stmt_bput(void) {
     lex_next();                              // consume BPUT
     int ch = read_channel();
     if (g_err) return;
@@ -523,7 +530,7 @@ static void stmt_bput(void) {
 }
 
 // CLOSE# ch : close one channel; CLOSE# 0 closes every open channel.
-static void stmt_close(void) {
+void stmt_close(void) {
     lex_next();                              // consume CLOSE
     int ch = read_channel();
     if (g_err) return;
@@ -537,7 +544,7 @@ static void stmt_close(void) {
 // Plain SEED_EXPORT seeds are skipped here; they load on demand via SEED. Safe to
 // read files mid-scan: stg_read resolves paths with its own buffers and does not
 // touch the directory-enumeration cursor.
-static void seed_scan_keywords(void) {
+void seed_scan_keywords(void) {
     seed_kw_n = 0;
     if (stg_diropen("/seed") != 0) return;           // no /seed dir: nothing to add
     stg_dirent ent;
@@ -560,7 +567,7 @@ static void seed_scan_keywords(void) {
 
 // SEED h%, "FILE.SED" : load a native seed from storage into an executable slot
 // and put its handle into the numeric variable h%.
-static void stmt_seed(void) {
+void stmt_seed(void) {
     lex_next();                                  // consume SEED
     if (tok != T_VAR) { err("Expected a variable name"); return; }
     char hname[NAME_LEN];
@@ -624,7 +631,7 @@ static void stmt_seed(void) {
 
 // CALL h%, arg... : invoke a seed for its side effects, discarding the result.
 // (CALL(...) and CALL$(...) as functions return the numeric / string result.)
-static void stmt_call(void) {
+void stmt_call(void) {
     lex_next();                                  // consume CALL
     int paren = (tok == T_LP);
     if (paren) lex_next();
@@ -634,11 +641,11 @@ static void stmt_call(void) {
 }
 
 // --- RENUMBER ---------------------------------------------------------------
-static int g_renum_start = 10, g_renum_step = 10;
+int g_renum_start = 10, g_renum_step = 10;
 
 // Map an old line number to its new one. References to a line that does not
 // exist are left unchanged.
-static int remap_line(int old) {
+int remap_line(int old) {
     for (int i = 0; i < prog_n; i++)
         if (prog[i].num == old) return g_renum_start + i * g_renum_step;
     return old;
@@ -647,7 +654,7 @@ static int remap_line(int old) {
 // Rewrite one line's text into `out`, remapping the line-number references that
 // follow GOTO / GOSUB / RESTORE / THEN / ELSE (including the comma lists of
 // ON ... GOTO / ON ... GOSUB). Numeric literals in expressions are left alone.
-static void renum_fixup_line(const char *in, char *out) {
+void renum_fixup_line(const char *in, char *out) {
     const char *p = in;
     int oi = 0;
     int linref = 0;          // 0 none, 1 GOTO/GOSUB/RESTORE list, 2 THEN/ELSE (optional)
@@ -687,7 +694,7 @@ static void renum_fixup_line(const char *in, char *out) {
 
 // RENUMBER [start][,step] : renumber the program (default 10,10) and fix up all
 // line-number references so GOTO/GOSUB/RESTORE/THEN/ELSE/ON still point correctly.
-static void stmt_renumber(void) {
+void stmt_renumber(void) {
     lex_next();                                  // consume RENUMBER
     g_renum_start = 10; g_renum_step = 10;
     if (tok == T_NUM) { g_renum_start = (int)tok_num; lex_next(); }
@@ -705,15 +712,15 @@ static void stmt_renumber(void) {
 
 // --- AUTO / EDIT ------------------------------------------------------------
 // State the REPL reads to pre-fill the next input line.
-static int  g_auto_active = 0;        // AUTO mode: auto-number each entered line
-static int  g_auto_num    = 0;        // next line number to offer
-static int  g_auto_step   = 10;
-static char g_prefill[LINE_LEN];      // one-shot prefill for the next line (EDIT)
-static int  g_prefill_len = 0;
+int  g_auto_active = 0;        // AUTO mode: auto-number each entered line
+int  g_auto_num    = 0;        // next line number to offer
+int  g_auto_step   = 10;
+char g_prefill[LINE_LEN];      // one-shot prefill for the next line (EDIT)
+int  g_prefill_len = 0;
 
 // AUTO [start][,step] : enter auto line-numbering. The REPL offers each line
 // number for editing; pressing Return on an empty line leaves AUTO.
-static void stmt_auto(void) {
+void stmt_auto(void) {
     lex_next();
     int start = 10, step = 10;
     if (tok == T_NUM) { start = (int)tok_num; lex_next(); }
@@ -724,7 +731,7 @@ static void stmt_auto(void) {
 }
 
 // EDIT n : recall line n into the input line, ready to edit and re-enter.
-static void stmt_edit(void) {
+void stmt_edit(void) {
     lex_next();
     if (tok != T_NUM) { err("Expected a line number"); return; }
     int num = (int)tok_num; lex_next();

@@ -1,12 +1,22 @@
+#include "interp_graphics.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_events.h"
+#include "interp_pod.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — graphics & misc statements: SCREEN, GCOL, shapes, sprites, fonts, collections
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_graphics.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
-static void stmt_screen(void) {
+void stmt_screen(void) {
     lex_next();                                  // consume SCREEN
     if (tok == T_EOL || tok == T_COLON) {        // bare SCREEN -> restore startup
         con_screen(0, 0);
@@ -20,7 +30,7 @@ static void stmt_screen(void) {
 // KEYBOARD "NO" : select the keyboard layout by two-letter code (US/UK/NO/DK/SE/
 // DE, case-insensitive). Affects how physical key presses are decoded from here
 // on; the current layout can be read back with the KEYBOARD$ function.
-static void stmt_keyboard(void) {
+void stmt_keyboard(void) {
     lex_next();                                  // consume KEYBOARD
     value_t s = need_str();   if (g_err) return;
     char code[8];
@@ -34,7 +44,7 @@ static void stmt_keyboard(void) {
 // indirection form `?addr = byte`; use `!addr = word` / `$addr = "..."` for a
 // 32-bit word or a string. On this bare-metal machine the address is real, so
 // poke inside a DIMed buffer (see DIM name size) unless you mean a hardware one.
-static void stmt_poke_kw(void) {
+void stmt_poke_kw(void) {
     lex_next();                                  // consume POKE
     long a = (long)need_num();   if (!expect(T_COMMA)) return;
     long v = (long)need_num();   if (g_err) return;
@@ -50,7 +60,7 @@ static void stmt_poke_kw(void) {
 // A branch (GOTO/GOSUB) or END inside the string propagates out as usual; a
 // half-open block (a FOR with no NEXT, say) is a mistake, because the copied
 // text is gone once EXEC returns.
-static void stmt_exec(void) {
+void stmt_exec(void) {
     lex_next();                                  // consume EXEC
     value_t s = need_str();   if (g_err) return;
     char buf[LINE_LEN];
@@ -63,7 +73,7 @@ static void stmt_exec(void) {
 }
 
 // --- Graphics statements ----------------------------------------------------
-static void stmt_mode(void) {
+void stmt_mode(void) {
     lex_next();                                  // consume MODE
     int n = (int)need_num();
     if (g_err) return;
@@ -72,7 +82,7 @@ static void stmt_mode(void) {
 }
 
 // LINEWIDTH n : set the pen width (coordinate units) for thick lines and outlines.
-static void stmt_linewidth(void) {
+void stmt_linewidth(void) {
     lex_next();                                  // consume LINEWIDTH
     int w = (int)need_num();
     if (g_err) return;
@@ -80,7 +90,7 @@ static void stmt_linewidth(void) {
 }
 
 // LINEJOIN MITER | BEVEL | ROUND : how the corners of a stroked outline are drawn.
-static void stmt_linejoin(void) {
+void stmt_linejoin(void) {
     lex_next();                                  // consume LINEJOIN
     if      (word_is("MITER") || word_is("MITRE")) con_line_join(CON_JOIN_MITER);
     else if (word_is("BEVEL"))                     con_line_join(CON_JOIN_BEVEL);
@@ -90,7 +100,7 @@ static void stmt_linejoin(void) {
 }
 
 // LINECAP BUTT | ROUND | SQUARE : how the open ends of a stroked line are drawn.
-static void stmt_linecap(void) {
+void stmt_linecap(void) {
     lex_next();                                  // consume LINECAP
     if      (word_is("BUTT"))   con_line_cap(CON_CAP_BUTT);
     else if (word_is("ROUND"))  con_line_cap(CON_CAP_ROUND);
@@ -101,15 +111,14 @@ static void stmt_linecap(void) {
 
 // A packed colour from RGB() carries bit 30, so it can't be mistaken for a
 // logical colour index (0..15 / 128..143).
-#define RGB_TAG 0x40000000
-static void gcol_apply_packed(int packed) {      // truecolour foreground
+void gcol_apply_packed(int packed) {      // truecolour foreground
     con_gcol_rgb((packed >> 16) & 255, (packed >> 8) & 255, packed & 255);
 }
 
 // GCOL colour            (action 0)
 // GCOL action, colour    (colour = logical index, or a packed RGB() value)
 // GCOL r, g, b           (24-bit truecolour foreground)
-static void stmt_gcol(void) {
+void stmt_gcol(void) {
     lex_next();                                  // consume GCOL
     int a = (int)need_num(); if (g_err) return;
     if (tok != T_COMMA) {                        // GCOL c
@@ -130,7 +139,7 @@ static void stmt_gcol(void) {
 }
 
 // Read `n` more comma-separated numbers into out[]. Returns 0 on error.
-static int read_nums(int *out, int n) {
+int read_nums(int *out, int n) {
     for (int i = 0; i < n; i++) {
         if (i && !expect(T_COMMA)) return 0;
         out[i] = (int)need_num();
@@ -140,48 +149,48 @@ static int read_nums(int *out, int n) {
 }
 
 // LINE x1,y1,x2,y2
-static void stmt_line(void) {
+void stmt_line(void) {
     lex_next(); int v[4];
     if (!read_nums(v, 4)) return;
     con_line(v[0], v[1], v[2], v[3]);
 }
 
 // After a shape keyword, an optional FILL modifier means the solid variant.
-static int shape_fill(void) {
+int shape_fill(void) {
     if (tok == T_KW && tok_kw == KW_FILL) { lex_next(); return 1; }
     return 0;
 }
 
 // RECTANGLE [FILL] x,y,w,h
-static void stmt_rectangle(void) {
+void stmt_rectangle(void) {
     lex_next(); int f = shape_fill(); int v[4];
     if (!read_nums(v, 4)) return;
     con_rectangle(v[0], v[1], v[2], v[3], f);
 }
 
 // CIRCLE [FILL] x,y,r
-static void stmt_circle(void) {
+void stmt_circle(void) {
     lex_next(); int f = shape_fill(); int v[3];
     if (!read_nums(v, 3)) return;
     con_circle(v[0], v[1], v[2], f);
 }
 
 // ELLIPSE [FILL] x,y,rx,ry
-static void stmt_ellipse(void) {
+void stmt_ellipse(void) {
     lex_next(); int f = shape_fill(); int v[4];
     if (!read_nums(v, 4)) return;
     con_ellipse(v[0], v[1], v[2], v[3], f);
 }
 
 // FILL x,y : flood fill from a point
-static void stmt_fill(void) {
+void stmt_fill(void) {
     lex_next(); int v[2];
     if (!read_nums(v, 2)) return;
     con_fill(v[0], v[1]);
 }
 
 // GGET addr, x1,y1,x2,y2 : capture a screen rectangle into a DIM buffer
-static void stmt_gget(void) {
+void stmt_gget(void) {
     lex_next();
     long addr = (long)need_num(); if (!expect(T_COMMA)) return;
     int v[4];
@@ -190,7 +199,7 @@ static void stmt_gget(void) {
 }
 
 // GPUT addr,x,y [,scale,angle] : stamp a sprite, optionally scaled and rotated.
-static void stmt_gput(void) {
+void stmt_gput(void) {
     lex_next();
     long addr = (long)need_num(); if (!expect(T_COMMA)) return;
     int x = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -207,7 +216,7 @@ static void stmt_gput(void) {
 }
 
 // GTINT r,g,b,a | GTINT OFF : tint every subsequently blitted sprite.
-static void stmt_gtint(void) {
+void stmt_gtint(void) {
     lex_next();                                   // consume GTINT
     if (word_is("OFF")) { lex_next(); con_sprite_tint(0, 0, 0, 0, 0); return; }
     int v[4];
@@ -216,7 +225,7 @@ static void stmt_gtint(void) {
 }
 
 // NEWSPRITE addr, w, h : initialise a DIM buffer as a blank transparent sprite.
-static void stmt_newsprite(void) {
+void stmt_newsprite(void) {
     lex_next();
     long addr = (long)need_num(); if (!expect(T_COMMA)) return;
     int wh[2];
@@ -226,7 +235,7 @@ static void stmt_newsprite(void) {
 }
 
 // SPRITETARGET addr | SPRITETARGET OFF : redirect drawing into a sprite (or back).
-static void stmt_spritetarget(void) {
+void stmt_spritetarget(void) {
     lex_next();
     if (word_is("OFF")) { lex_next(); con_target_screen(); return; }
     long addr = (long)need_num(); if (g_err) return;
@@ -234,7 +243,7 @@ static void stmt_spritetarget(void) {
 }
 
 // TILEMAP sheet,map,cols,rows,tilew,tileh,scrollx,scrolly : draw a tile grid.
-static void stmt_tilemap(void) {
+void stmt_tilemap(void) {
     lex_next();
     long sheet = (long)need_num(); if (!expect(T_COMMA)) return;
     long map   = (long)need_num(); if (!expect(T_COMMA)) return;
@@ -245,14 +254,14 @@ static void stmt_tilemap(void) {
 
 // --- TrueType font statements -----------------------------------------------
 // FONT handle : make a font loaded with LOADFONT the current one.
-static void stmt_font(void) {
+void stmt_font(void) {
     lex_next();
     int h = (int)need_num(); if (g_err) return;
     if (!ttf_select(h)) err("No such font");
 }
 
 // FONTSIZE pixels : set the current font's glyph height.
-static void stmt_fontsize(void) {
+void stmt_fontsize(void) {
     lex_next();
     int px = (int)need_num(); if (g_err) return;
     if (px < 1) { err("Invalid argument"); return; }
@@ -260,7 +269,7 @@ static void stmt_fontsize(void) {
 }
 
 // FONTSTYLE bold [, italic [, underline]] : each a 0/1 flag (default 0).
-static void stmt_fontstyle(void) {
+void stmt_fontstyle(void) {
     lex_next();
     int bold = (int)need_num(); if (g_err) return;
     int italic = 0, underline = 0;
@@ -270,7 +279,7 @@ static void stmt_fontstyle(void) {
 }
 
 // GTEXT x, y, s$ : draw text with the current font at logical baseline (x,y).
-static void stmt_gtext(void) {
+void stmt_gtext(void) {
     lex_next();
     int x = (int)need_num(); if (!expect(T_COMMA)) return;
     int y = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -281,14 +290,14 @@ static void stmt_gtext(void) {
 // --- Collection statements --------------------------------------------------
 // Copy a just-read string key into a stable local buffer: the value expression
 // that follows may run the GC and move the key's bytes in the string heap.
-static int grab_key(value_t k, char *buf) {
+int grab_key(value_t k, char *buf) {
     int n = k.len; if (n > MAX_STR) n = MAX_STR;
     for (int i = 0; i < n; i++) buf[i] = k.str[i];
     return n;
 }
 
 // DICTSET d, key$, value   |   DICTDEL d, key$
-static void stmt_dictset(void) {
+void stmt_dictset(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     value_t k = need_str(); if (g_err) return;
@@ -298,7 +307,7 @@ static void stmt_dictset(void) {
     dict_t *D = (dict_t *)coll_get(h, CT_DICT); if (!D) return;
     dict_set(D, key, klen, v);
 }
-static void stmt_dictdel(void) {
+void stmt_dictdel(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     value_t k = need_str(); if (g_err) return;
@@ -308,14 +317,14 @@ static void stmt_dictdel(void) {
 }
 
 // PUSH L, value  |  LISTSET L, i, value  |  LISTINS L, i, value  |  LISTDEL L, i
-static void stmt_push(void) {
+void stmt_push(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     value_t v = eval_expr(); if (g_err) return;
     list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) return;
     list_ins(L, L->len, v);                        // append
 }
-static void stmt_listset(void) {
+void stmt_listset(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     int i = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -324,7 +333,7 @@ static void stmt_listset(void) {
     if (i < 0 || i >= L->len) { err("Index out of range"); return; }
     cval_store(&L->item[i], v);
 }
-static void stmt_listins(void) {
+void stmt_listins(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     int i = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -332,7 +341,7 @@ static void stmt_listins(void) {
     list_t *L = (list_t *)coll_get(h, CT_LIST); if (!L) return;
     list_ins(L, i, v);
 }
-static void stmt_listdel(void) {
+void stmt_listdel(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     int i = (int)need_num(); if (g_err) return;
@@ -341,7 +350,7 @@ static void stmt_listdel(void) {
 }
 
 // TREESET t, key, value   |   TREEDEL t, key
-static void stmt_treeset(void) {
+void stmt_treeset(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     double key = need_num(); if (!expect(T_COMMA)) return;
@@ -349,7 +358,7 @@ static void stmt_treeset(void) {
     tree_t *T = (tree_t *)coll_get(h, CT_TREE); if (!T) return;
     tree_set(T, key, v);
 }
-static void stmt_treedel(void) {
+void stmt_treedel(void) {
     lex_next();
     double h = need_num(); if (!expect(T_COMMA)) return;
     double key = need_num(); if (g_err) return;
@@ -359,7 +368,7 @@ static void stmt_treedel(void) {
 
 // BUFFER ON | BUFFER OFF : enable/disable off-screen drawing (double buffering).
 // While on, every draw targets the back buffer and the screen freezes until FLIP.
-static void stmt_buffer(void) {
+void stmt_buffer(void) {
     lex_next();                                   // consume BUFFER
     if (tok == T_KW && tok_kw == KW_ON) {
         lex_next();
@@ -373,14 +382,14 @@ static void stmt_buffer(void) {
 }
 
 // FLIP : present the back buffer to the screen (a no-op when buffering is off).
-static void stmt_flip(void) {
+void stmt_flip(void) {
     lex_next();                                   // consume FLIP
     con_flip();
 }
 
 // SAVESPRITE addr, "file" : write a sprite (LOADSPRITE result or GGET capture)
 // out as an image file (PNG, or BMP if the name ends in .bmp).
-static void stmt_savesprite(void) {
+void stmt_savesprite(void) {
     lex_next();
     long addr = (long)need_num(); if (!expect(T_COMMA)) return;
     value_t s = need_str(); if (g_err) return;
@@ -389,7 +398,7 @@ static void stmt_savesprite(void) {
 }
 
 // PLOT code,x,y
-static void stmt_plot(void) {
+void stmt_plot(void) {
     lex_next();                                  // consume PLOT
     int k = (int)need_num(); if (!expect(T_COMMA)) return;
     int x = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -398,7 +407,7 @@ static void stmt_plot(void) {
 }
 
 // MOVE x,y  ==  PLOT 4,x,y     DRAW x,y  ==  PLOT 5,x,y
-static void stmt_move_draw(int plotcode) {
+void stmt_move_draw(int plotcode) {
     lex_next();                                  // consume MOVE/DRAW
     int x = (int)need_num(); if (!expect(T_COMMA)) return;
     int y = (int)need_num(); if (g_err) return;

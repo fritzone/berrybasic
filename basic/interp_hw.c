@@ -1,10 +1,19 @@
+#include "interp_hw.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_pod.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — hardware statements: sound engine, GPIO, I2C, SOUND/TONE
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_hw.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // --- Sound: a portable, queued, background tone player ----------------------
 // The hardware backend (sound.h) plays at most one square-wave tone at a time.
@@ -21,10 +30,7 @@
 // and the target's key-wait idle loop) — but because the tone is sustained in
 // hardware, the current note keeps playing even between pumps.
 
-#define SND_CHANS 4          // BBC channels 0..3
-#define SND_QLEN  9          // per-channel ring buffer (8 usable notes)
 
-typedef struct { int freq, vol; long dur_us; } snd_note;   // dur_us < 0 = play forever
 
 static struct {
     snd_note q[SND_QLEN];
@@ -35,9 +41,9 @@ static struct {
     unsigned long long end_us;             // when the current note ends
 } snd_ch[SND_CHANS];
 
-static int snd_out_freq = -1, snd_out_vol = -1;   // last tone handed to the hardware
+int snd_out_freq = -1, snd_out_vol = -1;   // last tone handed to the hardware
 
-static void sound_reset(void) {
+void sound_reset(void) {
     for (int c = 0; c < SND_CHANS; c++) {
         snd_ch[c].head = snd_ch[c].tail = 0;
         snd_ch[c].active = snd_ch[c].forever = 0;
@@ -48,7 +54,7 @@ static void sound_reset(void) {
     snd_silence();
 }
 
-static void sound_enqueue(int chan, int freq, int vol, long dur_us) {
+void sound_enqueue(int chan, int freq, int vol, long dur_us) {
     if (chan < 0 || chan >= SND_CHANS) return;
     int nt = (snd_ch[chan].tail + 1) % SND_QLEN;
     if (nt == snd_ch[chan].head) return;               // queue full: drop the note
@@ -100,7 +106,7 @@ int sound_queued(void) {
 
 // BBC pitch -> Hz: 4 units = 1 semitone (48 = 1 octave), and pitch 89 is the A
 // above middle C (440 Hz), so freq = 440 * 2^((pitch-89)/48).
-static int pitch_to_hz(int pitch) {
+int pitch_to_hz(int pitch) {
     return (int)(440.0 * dpow(2.0, (pitch - 89) / 48.0) + 0.5);
 }
 
@@ -117,11 +123,11 @@ static int pitch_to_hz(int pitch) {
 // first checks that we are on real hardware (the host build has no header).
 
 // Raise the host guard; returns 1 if GPIO is unavailable (caller should bail).
-static int gpio_guard(void) {
+int gpio_guard(void) {
     if (!gpio_available()) { err("GPIO needs the Pi, not the host build"); return 1; }
     return 0;
 }
-static int gpio_pin_arg(void) {          // read+validate a BCM header pin (0..27)
+int gpio_pin_arg(void) {          // read+validate a BCM header pin (0..27)
     int p = (int)need_num();
     if (g_err) return -1;
     if (p < 0 || p > 27) { err("No such pin"); return -1; }
@@ -129,7 +135,7 @@ static int gpio_pin_arg(void) {          // read+validate a BCM header pin (0..2
 }
 
 // PINMODE pin, OUTPUT | INPUT [PULLUP|PULLDOWN] | ALT f
-static void stmt_pinmode(void) {
+void stmt_pinmode(void) {
     lex_next();                          // consume PINMODE
     if (gpio_guard()) return;
     int pin = gpio_pin_arg(); if (g_err) return;
@@ -158,7 +164,7 @@ static void stmt_pinmode(void) {
 }
 
 // PIN pin, level     (statement form; the read form PIN(n) is in eval_function)
-static void stmt_pin(void) {
+void stmt_pin(void) {
     lex_next();                          // consume PIN
     if (gpio_guard()) return;
     int pin = gpio_pin_arg(); if (g_err) return;
@@ -168,7 +174,7 @@ static void stmt_pin(void) {
 }
 
 // PINSET mask / PINCLR mask : atomically set/clear every pin whose bit is 1.
-static void stmt_pinset(int setit) {
+void stmt_pinset(int setit) {
     lex_next();                          // consume PINSET/PINCLR
     if (gpio_guard()) return;
     uint32_t mask = (uint32_t)(long)need_num(); if (g_err) return;
@@ -177,13 +183,13 @@ static void stmt_pinset(int setit) {
 }
 
 // I2C needs a real Pi (QEMU does not model the BSC); raise a clear error otherwise.
-static int i2c_guard(void) {
+int i2c_guard(void) {
     if (!i2c_available()) { err("I2C needs real Pi hardware"); return 1; }
     return 0;
 }
 
 // I2CWRITE addr, b1 [, b2, ...] : send the listed bytes to the device at `addr`.
-static void stmt_i2cwrite(void) {
+void stmt_i2cwrite(void) {
     lex_next();                          // consume I2CWRITE
     if (i2c_guard()) return;
     int addr = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -199,7 +205,7 @@ static void stmt_i2cwrite(void) {
 }
 
 // I2CREAD addr, buf, count : read `count` bytes from `addr` into the DIM buffer.
-static void stmt_i2cread(void) {
+void stmt_i2cread(void) {
     lex_next();                          // consume I2CREAD
     if (i2c_guard()) return;
     int addr = (int)need_num(); if (!expect(T_COMMA)) return;
@@ -211,7 +217,7 @@ static void stmt_i2cread(void) {
     if (i2c_read(addr, (unsigned char *)(uintptr_t)ad, n) < 0) err("I2C read failed");
 }
 
-static void stmt_sound(void) {
+void stmt_sound(void) {
     lex_next();                                  // consume SOUND
     if (tok == T_VAR && s_eq(tok_var, "OFF")) { lex_next(); sound_reset(); return; }
     int chan = (int)need_num();   if (!expect(T_COMMA)) return;
@@ -226,7 +232,7 @@ static void stmt_sound(void) {
 
 // TONE frequency_hz, duration_ms [, volume]   (direct, non-BBC helper)
 // Plays on channel 0. Volume defaults to full (15).
-static void stmt_tone(void) {
+void stmt_tone(void) {
     lex_next();                                  // consume TONE
     int freq = (int)need_num();   if (!expect(T_COMMA)) return;
     int ms   = (int)need_num();

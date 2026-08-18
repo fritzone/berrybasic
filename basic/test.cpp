@@ -1110,14 +1110,14 @@ struct Kbd {
     uint8_t prev[8] = {0};
     int press(uint8_t kc, uint8_t mod = 0) {
         uint8_t down[8] = {mod, 0, kc, 0, 0, 0, 0, 0};
-        int k = hid_report_key(down, prev);
+        int k = hid_report_key(down, prev, 0);
         uint8_t up[8] = {mod, 0, 0, 0, 0, 0, 0, 0};
-        hid_report_key(up, prev);
+        hid_report_key(up, prev, 0);
         return k;
     }
     int hold(uint8_t mod) {                       // modifier down, no key
         uint8_t r[8] = {mod, 0, 0, 0, 0, 0, 0, 0};
-        return hid_report_key(r, prev);
+        return hid_report_key(r, prev, 0);
     }
 };
 
@@ -1199,13 +1199,13 @@ TEST_CASE("a lock key pressed with another key doesn't eat it") {
     REQUIRE(hid_set_layout("US") == 1);
     uint8_t prev[8] = {0};
     uint8_t down[8] = {0, 0, 0x39, 0x05, 0, 0, 0, 0};   // CapsLock + 'b' together
-    int k = hid_report_key(down, prev);
+    int k = hid_report_key(down, prev, 0);
     REQUIRE(k == 'B');                            // caps applied, key still delivered
     uint8_t up[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    hid_report_key(up, prev);
+    hid_report_key(up, prev, 0);
     uint8_t c2[8] = {0, 0, 0x39, 0, 0, 0, 0, 0};  // CapsLock off again
-    hid_report_key(c2, prev);
-    hid_report_key(up, prev);
+    hid_report_key(c2, prev, 0);
+    hid_report_key(up, prev, 0);
     hid_leds_ack();
 }
 

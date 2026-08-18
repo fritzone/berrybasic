@@ -1,10 +1,18 @@
+#include "interp_call.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — PROC / FN call
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_call.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // ---------------------------------------------------------------------------
 // PROC / FN call. `name` is the callee; on entry the current token is at the
@@ -15,18 +23,16 @@
 // `DEF fn NAME` via the value of its NAME variable at END fn.
 // ---------------------------------------------------------------------------
 
-#define MAX_ARGS 16
 
 // A record passed as an argument. Records are passed *by reference*: only these
 // offsets travel into the callee, so its parameter addresses the caller's own
 // field storage and writes through to it.
-typedef struct { int rtype, nelem, off_num, off_str; } recref_t;
 
 // Look ahead, from just past a record variable's name, to decide whether this
 // argument is the whole record (p, e(3)) or an expression reading one of its
 // fields (p.x). Only scans tokens - nothing is evaluated, so an index with a
 // side effect can't fire twice - and puts the lexer back where it found it.
-static int arg_is_whole_record(void) {
+int arg_is_whole_record(void) {
     lexstate_t sv;
     lex_save(&sv);
     if (tok == T_LP) {                           // step over the element index
@@ -44,7 +50,7 @@ static int arg_is_whole_record(void) {
     return whole;
 }
 
-static void call_named(int is_fn, const char *name, value_t *retval) {
+void call_named(int is_fn, const char *name, value_t *retval) {
     // Evaluate arguments (copy string args into scratch so a later GC can't move them).
     value_t  args[MAX_ARGS];
     recref_t recargs[MAX_ARGS];
@@ -230,7 +236,7 @@ static void call_named(int is_fn, const char *name, value_t *retval) {
 
 // PROC / FN call written with the keyword prefix (PROCname / FNname). The current
 // token is KW_PROC or KW_FN with the name in tok_var; consume it, then delegate.
-static void call_proc(int is_fn, value_t *retval) {
+void call_proc(int is_fn, value_t *retval) {
     char name[NAME_LEN];
     s_copy(name, tok_var, NAME_LEN);
     lex_next();                                  // consume the PROC/FN token

@@ -1,10 +1,19 @@
+#include "interp_stmt.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_events.h"
+#include "interp_pod.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — statements: control flow, PRINT/LET/IF, loops, FOR, DIM, INPUT
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_stmt.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // ---------------------------------------------------------------------------
 // Statements
@@ -14,97 +23,74 @@
 //
 // A "position" is a (program-line index, byte offset into that line's text)
 // pair, so GOSUB/RETURN and FOR/NEXT can resume in the *middle* of a line.
-static int  cur_line_idx;        // prog[] index of that line, or -1 if immediate
+int  cur_line_idx;        // prog[] index of that line, or -1 if immediate
 
 // The module the executing line belongs to (0 = main program, or immediate mode).
-static int cur_module(void) {
+int cur_module(void) {
     return (cur_line_idx >= 0 && cur_line_idx < prog_n) ? prog[cur_line_idx].module : 0;
 }
 
-static int  g_stop;              // END encountered -> stop RUN
-static int  g_branch;            // a jump was requested this statement
-static int  g_branch_line;       // target prog[] index
-static int  g_branch_off;        // target byte offset within that line
+int  g_stop;              // END encountered -> stop RUN
+int  g_branch;            // a jump was requested this statement
+int  g_branch_line;       // target prog[] index
+int  g_branch_off;        // target byte offset within that line
 
 // GOSUB return stack
-#define GOSUB_MAX 32
-typedef struct { int line; int off; } retaddr_t;
-static retaddr_t gosub_stack[GOSUB_MAX];
-static int       gosub_sp;
+retaddr_t gosub_stack[GOSUB_MAX];
+int       gosub_sp;
 
 // FOR loop stack
-#define FOR_MAX 16
-typedef struct {
-    char   name[NAME_LEN];
-    double limit;
-    double step;
-    int    line;        // position of the loop body (first thing after FOR...)
-    int    off;
-} for_rec_t;
-static for_rec_t for_stack[FOR_MAX];
-static int       for_sp;
+for_rec_t for_stack[FOR_MAX];
+int       for_sp;
 
 // REPEAT loop stack (just the position of the loop body start)
-#define REPEAT_MAX 16
-static retaddr_t repeat_stack[REPEAT_MAX];
-static int       repeat_sp;
+retaddr_t repeat_stack[REPEAT_MAX];
+int       repeat_sp;
 
 // WHILE loop stack: position of the WHILE keyword, so ENDWHILE re-tests it.
-#define WHILE_MAX 16
-static retaddr_t while_stack[WHILE_MAX];
-static int       while_sp;
+retaddr_t while_stack[WHILE_MAX];
+int       while_sp;
 
 // CASE nesting depth (the selector is matched immediately, so only the depth
 // needs tracking for ENDCASE balancing and nested-CASE skipping).
-static int       case_sp;
+int       case_sp;
 
 // Loop-type tags for EXIT/CONTINUE. The three loop stacks (for_/repeat_/while_)
 // don't record their relative nesting order, so EXIT/CONTINUE find the innermost
 // loop by comparing the source positions of each stack's active frames instead.
-enum { LOOP_FOR = 1, LOOP_REPEAT, LOOP_WHILE };
 
 // TRY/CATCH handler stack. Each active TRY records where its CATCH clause starts
 // and a snapshot of the interpreter's stacks, so catching an error unwinds any
 // loops / PROC frames entered since the TRY and resumes cleanly at the handler.
-#define TRY_MAX 16
-typedef struct {
-    int catch_pc, catch_off;       // where the CATCH handler body begins
-    int call_sp;                   // PROC/FN depth the TRY sits at
-    int for_sp, repeat_sp, while_sp, case_sp, gosub_sp, fn_ret_sp, local_sp;
-    int scratch_base, scratch_top;
-} try_rec_t;
-static try_rec_t try_stack[TRY_MAX];
+try_rec_t try_stack[TRY_MAX];
 
 // Procedures / functions
-static int     g_return;         // ENDPROC / END FN / =<expr> ends the current body
-static value_t fn_retval;        // value returned from an FN
-static int     call_sp;          // PROC/FN recursion depth
+int     g_return;         // ENDPROC / END FN / =<expr> ends the current body
+value_t fn_retval;        // value returned from an FN
+int     call_sp;          // PROC/FN recursion depth
 
 // New-style functions (DEF fn NAME(..) / NAME = expr / END fn) return the value
 // of a local variable named after the function. This stack holds that variable
 // for each active new-style call, so END fn knows what to hand back.
-#define FN_RET_MAX 32
-static var_t  *fn_ret_slot[FN_RET_MAX];
-static int     fn_ret_sp;
+var_t  *fn_ret_slot[FN_RET_MAX];
+int     fn_ret_sp;
 
-#define DEF_MAX 64
 // newstyle: 1 = DEF fn/proc NAME (spaced, END fn/proc-terminated); 0 = glued
 // DEF FNNAME / DEF PROCNAME (=<expr> / ENDPROC-terminated).
-typedef struct { char name[NAME_LEN]; int is_fn; int newstyle; int line; int off; } defrec_t;
-static defrec_t defs[DEF_MAX];
-static int      def_n;
+defrec_t defs[DEF_MAX];
+int      def_n;
 
 // Is `name` a defined function (either style)? Returns its defs[] index or -1.
 // Lets a bare `name(args)` in an expression be recognised as a call.
-static int find_fn_def(const char *name) {
+int find_fn_def(const char *name) {
     for (int i = 0; i < def_n; i++)
         if (defs[i].is_fn && s_eq(defs[i].name, name)) return i;
     return -1;
 }
 
-static int cur_off(void) { return (int)(lx - cur_text); }
+int cur_off(void) { return (int)(lx - cur_text); }
 
-static void branch_to_line(int num) {
+void branch_to_line(int num) {
     int idx = find_line_index(num);
     if (idx < 0) { err("No such line number"); return; }
     g_branch = 1; g_branch_line = idx; g_branch_off = 0;
@@ -112,7 +98,7 @@ static void branch_to_line(int num) {
 
 // Find the program line that begins with the label ".name". Labels are matched
 // only as the first token of a line. Returns the prog[] index, or -1.
-static int find_label(const char *name) {
+int find_label(const char *name) {
     const char *save_text = cur_text;
     const char *save_lx   = lx;
     int save_tok = tok, save_kw = tok_kw;
@@ -128,7 +114,7 @@ static int find_label(const char *name) {
 }
 
 // Branch to a label by name (GOTO/GOSUB target).
-static void branch_to_label(const char *name) {
+void branch_to_label(const char *name) {
     int idx = find_label(name);
     if (idx < 0) { err("No such label"); return; }
     g_branch = 1; g_branch_line = idx; g_branch_off = 0;
@@ -136,14 +122,14 @@ static void branch_to_label(const char *name) {
 
 // Reposition the global lexer at (program line index pc, byte offset off) and
 // read the first token there. Used by the structured-block forward scanners.
-static void lex_at(int pc, int off) {
+void lex_at(int pc, int off) {
     cur_text = prog[pc].text;
     lx = cur_text + off;
     lex_next();
 }
 
 // Two string values are equal iff same length and same bytes.
-static int val_equal(value_t a, value_t b) {
+int val_equal(value_t a, value_t b) {
     if (a.is_str != b.is_str) return 0;
     if (a.is_str) {
         if (a.len != b.len) return 0;
@@ -157,7 +143,7 @@ static int val_equal(value_t a, value_t b) {
 // matches an enclosing `open_kw`, honouring nesting. On success sets g_branch to
 // the position just after the matched close keyword and returns 1; on running
 // off the end of the program raises `msg` and returns 0. Used by WHILE/ENDWHILE.
-static int skip_to_close(int open_kw, int close_kw, const char *msg) {
+int skip_to_close(int open_kw, int close_kw, const char *msg) {
     int pc = cur_line_idx;
     int depth = 0;
     for (;;) {
@@ -174,10 +160,9 @@ static int skip_to_close(int open_kw, int close_kw, const char *msg) {
     }
 }
 
-static void exec_statement(void);   // forward decl (IF runs a sub-statement)
-static void exec_text(const char *text, int off);   // forward decl (EXEC runs a string)
+void exec_statement(void);   // forward decl (IF runs a sub-statement)
+void exec_text(const char *text, int off);   // forward decl (EXEC runs a string)
 
-#define PRINT_FIELD 8     // column width for the ',' separator and TAB alignment
 
 // PRINT items separated by ; (close up), , (next field), ' (newline), TAB(n),
 // SPC(n). Column is tracked from the start of this PRINT (assumed column 0).
@@ -186,16 +171,14 @@ static void exec_text(const char *text, int off);   // forward decl (EXEC runs a
 //   number : 0x40, then 8 bytes IEEE-754 double, little-endian
 //   string : 0x00, then a 1-byte length (0..255), then that many bytes
 // INPUT# reads the tag and reconstructs the value into the target variable.
-#define REC_NUM  0x40
-#define REC_STR  0x00
 
-static int rec_put_num(int ch, double x) {
+int rec_put_num(int ch, double x) {
     union { double d; unsigned char b[8]; } u; u.d = x;
     if (stg_putb(ch, REC_NUM) < 0) return -1;
     for (int i = 0; i < 8; i++) if (stg_putb(ch, u.b[i]) < 0) return -1;
     return 0;
 }
-static int rec_put_str(int ch, const char *s, int len) {
+int rec_put_str(int ch, const char *s, int len) {
     if (len < 0) len = 0;
     if (len > 255) len = 255;
     if (stg_putb(ch, REC_STR) < 0) return -1;
@@ -205,7 +188,7 @@ static int rec_put_str(int ch, const char *s, int len) {
 }
 
 // PRINT# ch, item, item, ... : write each value as a typed record.
-static void stmt_print_file(void) {
+void stmt_print_file(void) {
     int ch = read_channel();
     if (g_err) return;
     while (tok == T_COMMA || tok == T_SEMI) {
@@ -220,7 +203,7 @@ static void stmt_print_file(void) {
 
 // INPUT# ch, var, var, ... : read typed records back into variables, array
 // elements or record fields.
-static void stmt_input_file(void) {
+void stmt_input_file(void) {
     int ch = read_channel();
     if (g_err) return;
     while (tok == T_COMMA || tok == T_SEMI) {
@@ -258,7 +241,7 @@ static void stmt_input_file(void) {
     }
 }
 
-static void stmt_print(void) {
+void stmt_print(void) {
     lex_next();                              // consume PRINT
     if (tok == T_HASH) { stmt_print_file(); return; }
     // PRINT USING tmpl$; a; b; ...  — format every numeric item with the same
@@ -312,7 +295,7 @@ static void stmt_print(void) {
 // Assignment to a record variable: either one field (p.x = v, e(3).x = v) or a
 // whole record (q = p, e(3) = p), which copies every field across from another
 // record of the same type. The current token is just past the target's name.
-static void stmt_let_record(const var_t *v) {
+void stmt_let_record(const var_t *v) {
     int e;
     if (!rec_index(v, &e)) return;
     const type_t *ty = &types[v->rtype];
@@ -359,7 +342,7 @@ static void stmt_let_record(const var_t *v) {
     }
 }
 
-static void stmt_let(int had_let) {
+void stmt_let(int had_let) {
     if (had_let) lex_next();                 // consume LET
     if (tok != T_VAR) { err("Expected a variable name"); return; }
     char name[NAME_LEN];
@@ -423,7 +406,7 @@ static void stmt_let(int had_let) {
 // Unary indirection poke statement: ?addr = v (byte), !addr = v (word),
 // $addr = s$ (CR-terminated string). The address is a primary, so use
 // parentheses for an arithmetic address: ?(P%+1) = v  (or write P%?1 = v).
-static void stmt_poke(void) {
+void stmt_poke(void) {
     int op = tok;                            // T_QUERY / T_PLING / T_DOLLAR
     lex_next();
     value_t addrv = prim_base();
@@ -443,7 +426,7 @@ static void stmt_poke(void) {
     }
 }
 
-static void stmt_goto(void) {
+void stmt_goto(void) {
     lex_next();
     // A label target may be written bare (GOTO start) or dotted (GOTO .start).
     if (tok == T_LABEL || tok == T_VAR) { char nm[NAME_LEN]; s_copy(nm, tok_var, NAME_LEN);
@@ -456,7 +439,7 @@ static void stmt_goto(void) {
 
 // Run ':'-separated statements from the current position until ELSE / EOL or a
 // control transfer. Used for the THEN and ELSE clauses of IF.
-static void exec_clause(void) {
+void exec_clause(void) {
     while (!g_err && !g_stop && !g_branch && tok != T_EOL &&
            !(tok == T_KW && tok_kw == KW_ELSE)) {
         exec_statement();
@@ -470,7 +453,7 @@ static void exec_clause(void) {
 // token on it (the block-IF form `IF cond THEN` <newline>). The lexer is left
 // at EOL. Used while scanning so a nested single-line IF (whose ELSE belongs to
 // itself) is skipped as a whole and never miscounted.
-static int scan_if_line_is_block(void) {
+int scan_if_line_is_block(void) {
     int last_then = 0;
     lex_next();                              // consume IF
     while (tok != T_EOL) {
@@ -485,7 +468,7 @@ static int scan_if_line_is_block(void) {
 // else_too set we stop at the first depth-0 ELSE *or* ENDIF (the false branch
 // jumps to whichever comes first); otherwise only ENDIF (a finished THEN branch
 // jumps past its ELSE block). Branches past the matched keyword. Returns 1.
-static int skip_if_block(int else_too) {
+int skip_if_block(int else_too) {
     int pc = cur_line_idx;
     int depth = 0;
     for (;;) {
@@ -511,7 +494,7 @@ static int skip_if_block(int else_too) {
 // IF <expr> THEN <newline> ... [ELSE ...] ENDIF            -- block form
 // THEN is optional in the single-line form; the block form is recognised when
 // THEN is the last token on the line.
-static void stmt_if(void) {
+void stmt_if(void) {
     lex_next();                              // consume IF
     value_t cv = eval_expr();
     if (g_err) return;
@@ -542,13 +525,13 @@ static void stmt_if(void) {
 
 // A standalone ELSE statement is only reached after running a block IF's THEN
 // branch: skip past the matching ENDIF.
-static void stmt_else_block(void) {
+void stmt_else_block(void) {
     lex_next();                              // consume ELSE
     if (cur_line_idx < 0) { err("ELSE without a matching IF"); return; }
     skip_if_block(0);
 }
 
-static void stmt_repeat(void) {
+void stmt_repeat(void) {
     lex_next();                              // consume REPEAT
     if (cur_line_idx < 0) { err("This can only be used inside a program"); return; }
     if (repeat_sp >= REPEAT_MAX) { err("Too many nested REPEAT loops"); return; }
@@ -557,7 +540,7 @@ static void stmt_repeat(void) {
     repeat_sp++;
 }
 
-static void stmt_until(void) {
+void stmt_until(void) {
     lex_next();                              // consume UNTIL
     double cond = need_num();
     if (g_err) return;
@@ -574,7 +557,7 @@ static void stmt_until(void) {
 // each pass, so ENDWHILE branches back to the WHILE keyword (re-running this).
 // To keep the stack balanced, ENDWHILE pops before branching back and each
 // WHILE pass pushes exactly once.
-static void stmt_while(void) {
+void stmt_while(void) {
     int kw_line = cur_line_idx;
     int kw_off  = (int)(tok_start - cur_text);   // offset of the WHILE keyword
     lex_next();                                  // consume WHILE
@@ -592,7 +575,7 @@ static void stmt_while(void) {
     }
 }
 
-static void stmt_endwhile(void) {
+void stmt_endwhile(void) {
     if (while_sp <= 0) { err("ENDWHILE without a matching WHILE"); return; }
     while_sp--;
     retaddr_t r = while_stack[while_sp];
@@ -604,7 +587,7 @@ static void stmt_endwhile(void) {
 // jumps into the matching clause (or OTHERWISE, or past ENDCASE if none match).
 // Falling through into a later WHEN/OTHERWISE means the chosen clause finished,
 // so those jump to ENDCASE.
-static void stmt_case(void) {
+void stmt_case(void) {
     lex_next();                                  // consume CASE
     value_t sel = eval_expr();
     if (g_err) return;
@@ -662,20 +645,20 @@ static void stmt_case(void) {
 
 // Reached by falling through after a chosen clause's body finished: jump past
 // the matching ENDCASE. (Encountered as a statement, not during the CASE scan.)
-static void case_skip_to_end(void) {
+void case_skip_to_end(void) {
     if (case_sp <= 0) { err("WHEN/OTHERWISE without a matching CASE"); return; }
     if (skip_to_close(KW_CASE, KW_ENDCASE, "CASE without a matching ENDCASE"))
         case_sp--;
 }
 
-static void stmt_endcase(void) {
+void stmt_endcase(void) {
     lex_next();                                  // consume ENDCASE
     if (case_sp > 0) case_sp--;
 }
 
 // COLOUR n            : text colour (0..7 foreground, 128..135 background)
 // COLOUR l, r, g, b   : redefine logical colour l's palette entry to an RGB value
-static void stmt_colour(void) {
+void stmt_colour(void) {
     lex_next();                              // consume COLOUR
     int l = (int)need_num();
     if (g_err) return;
@@ -692,7 +675,7 @@ static void stmt_colour(void) {
 
 // LOCAL var[,var...] : save the named variables' current values (restored when
 // the enclosing PROC/FN ends) and reset them to zero/empty.
-static void stmt_local(void) {
+void stmt_local(void) {
     lex_next();                              // consume LOCAL
     for (;;) {
         if (tok != T_VAR) { err("Expected a variable name"); return; }
@@ -710,7 +693,7 @@ static void stmt_local(void) {
     }
 }
 
-static void stmt_gosub(void) {
+void stmt_gosub(void) {
     lex_next();
     char label[NAME_LEN]; int is_label = 0; int target = 0;
     if (tok == T_LABEL || tok == T_VAR) { s_copy(label, tok_var, NAME_LEN); is_label = 1; lex_next(); }
@@ -725,7 +708,7 @@ static void stmt_gosub(void) {
     if (g_err) gosub_sp--;                        // undefined target: undo push
 }
 
-static void stmt_return(void) {
+void stmt_return(void) {
     lex_next();
     if (gosub_sp <= 0) { err("RETURN without a matching GOSUB"); return; }
     gosub_sp--;
@@ -734,7 +717,7 @@ static void stmt_return(void) {
     g_branch_off  = gosub_stack[gosub_sp].off;
 }
 
-static void stmt_for(void) {
+void stmt_for(void) {
     lex_next();                              // consume FOR
     if (tok != T_VAR) { err("Expected a variable name"); return; }
     char name[NAME_LEN];
@@ -766,7 +749,7 @@ static void stmt_for(void) {
     // Test happens at NEXT, so the body always runs at least once (MS BASIC).
 }
 
-static void stmt_next(void) {
+void stmt_next(void) {
     lex_next();                              // consume NEXT
     char name[NAME_LEN]; name[0] = 0;
     if (tok == T_VAR) { s_copy(name, tok_var, NAME_LEN); lex_next(); }
@@ -792,7 +775,7 @@ static void stmt_next(void) {
 
 // --- EXIT / CONTINUE : break out of / restart the innermost loop -------------
 // Is source position (l1,o1) strictly later than (l2,o2)?
-static int pos_gt(int l1, int o1, int l2, int o2) {
+int pos_gt(int l1, int o1, int l2, int o2) {
     return (l1 > l2) || (l1 == l2 && o1 > o2);
 }
 
@@ -800,7 +783,7 @@ static int pos_gt(int l1, int o1, int l2, int o2) {
 // (NEXT/UNTIL/ENDWHILE) at nesting depth 0. If `past`, resume just after that
 // terminator's whole statement (EXIT leaves the loop); otherwise resume AT the
 // terminator so it executes (CONTINUE runs the loop's test). Sets g_branch.
-static void loop_break_scan(int need, int past) {
+void loop_break_scan(int need, int past) {
     int pc = cur_line_idx;
     int depth = 0;
     for (;;) {
@@ -831,7 +814,7 @@ static void loop_break_scan(int need, int past) {
 // Shared EXIT/CONTINUE core. is_exit: leave the loop (pop its frame, resume after
 // its terminator); else CONTINUE (keep the frame, resume at the terminator's test).
 // want: 0 = innermost loop of any kind, else LOOP_FOR/REPEAT/WHILE.
-static void loop_control(int is_exit, int want) {
+void loop_control(int is_exit, int want) {
     const char *what = is_exit ? "EXIT" : "CONTINUE";
     if (for_sp + repeat_sp + while_sp == 0) { err2(what, " is not inside a loop"); return; }
 
@@ -869,7 +852,7 @@ static void loop_control(int is_exit, int want) {
 }
 
 // EXIT [FOR|REPEAT|WHILE] : leave the innermost (or named) loop.
-static void stmt_exit(void) {
+void stmt_exit(void) {
     lex_next();                                 // consume EXIT
     int want = 0;
     if (tok == T_KW && tok_kw == KW_FOR)         { want = LOOP_FOR;    lex_next(); }
@@ -879,7 +862,7 @@ static void stmt_exit(void) {
 }
 
 // CONTINUE [FOR|REPEAT|WHILE] : jump to the innermost (or named) loop's next test.
-static void stmt_continue(void) {
+void stmt_continue(void) {
     lex_next();                                 // consume CONTINUE
     int want = 0;
     if (tok == T_KW && tok_kw == KW_FOR)         { want = LOOP_FOR;    lex_next(); }
@@ -900,7 +883,7 @@ static void stmt_continue(void) {
 //
 // parse here. Like DIM, this is a declaration executed at run time: the
 // statement has to run before the type can be used.
-static void stmt_type(void) {
+void stmt_type(void) {
     lex_next();                                  // consume TYPE
     char tname[NAME_LEN];
     if (!read_name_word(tname, "Expected a type name")) return;
@@ -944,7 +927,7 @@ static void stmt_type(void) {
 
 // DIM <name> AS <type> : give a record variable storage for `nelem` elements.
 // The current token is AS; on return it is whatever follows the type name.
-static int dim_record(const char *name, int nelem) {
+int dim_record(const char *name, int nelem) {
     lex_next();                                  // consume AS
     char tname[NAME_LEN];
     if (!read_name_word(tname, "Expected a type name")) return 0;
@@ -965,7 +948,7 @@ static int dim_record(const char *name, int nelem) {
     return 1;
 }
 
-static void stmt_dim(void) {
+void stmt_dim(void) {
     lex_next();                              // consume DIM
     for (;;) {
         if (tok != T_VAR) { err("Expected a variable name"); return; }
@@ -1017,7 +1000,7 @@ static void stmt_dim(void) {
     }
 }
 
-static void stmt_input(void) {
+void stmt_input(void) {
     lex_next();                              // consume INPUT
     if (tok == T_HASH) { stmt_input_file(); return; }   // INPUT# ch, var, ...
     if (tok == T_STR) {                      // optional prompt:  INPUT "NAME"; A$
@@ -1056,7 +1039,7 @@ static void stmt_input(void) {
 // x/y are raw framebuffer pixels (origin top-left); b is the button bitmask
 // (bit0=left, bit1=right, bit2=middle). See also the MOUSEX/MOUSEY/MOUSEB
 // functions for reading a single value inside an expression.
-static void stmt_mouse(void) {
+void stmt_mouse(void) {
     lex_next();                              // consume MOUSE
     int px, py, pb;
     con_mouse(&px, &py, &pb);
@@ -1074,7 +1057,7 @@ static void stmt_mouse(void) {
     }
 }
 
-static void run_program(int start_pc, int start_off);
+void run_program(int start_pc, int start_off);
 
 // Print a program line for LIST with the classic look: keywords are shown in
 // UPPERCASE, while variable names, numbers, string literals and REM comments are

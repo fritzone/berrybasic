@@ -40,7 +40,8 @@ LDFLAGS = -T $(KERNEL_DIR)/linker.ld
 
 # Target image = kernel + drivers + the interpreter + the seed target backend.
 TGT_C = $(wildcard $(KERNEL_DIR)/*.c) $(wildcard $(DRIVERS_DIR)/*.c) \
-        $(BASIC_DIR)/basic.c $(SEED_DIR)/seed_target.c
+        $(BASIC_DIR)/basic.c $(wildcard $(BASIC_DIR)/interp_*.c) \
+        $(SEED_DIR)/seed_target.c
 TGT_S = $(wildcard $(KERNEL_DIR)/*.S)
 
 # Objects are flattened into build/ (every source basename is unique).
@@ -82,9 +83,11 @@ $(KERNEL): $(ELF)
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# The interpreter object needs the generated banner header present first (on a
-# clean build the auto-dependency .d does not exist yet).
+# The interpreter objects include conf.h (via interp_base.h); make sure the
+# generated header exists before the first compile (the auto-dependency .d does
+# not exist yet on a clean build).
 $(BUILD_DIR)/basic.o: $(CONF_H)
+$(patsubst $(BASIC_DIR)/%.c,$(BUILD_DIR)/%.o,$(wildcard $(BASIC_DIR)/interp_*.c)): $(CONF_H)
 
 # Pull in the auto-generated header/fragment dependencies (from -MMD). This is
 # what makes a header edit (or a change to one of basic.c's interp_*.inc
@@ -159,7 +162,8 @@ HOSTCC      = cc
 HOST_BIN    = $(BUILD_DIR)/basic_host
 HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -I$(DRIVERS_DIR) -Ithird_party \
               -idirafter podlib/include
-HOST_SRC    = $(BASIC_DIR)/basic.c $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
+HOST_SRC    = $(BASIC_DIR)/basic.c $(wildcard $(BASIC_DIR)/interp_*.c) \
+              $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
               $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/sound_host.c \
               $(HOST_DIR)/gpio_host.c $(HOST_DIR)/i2c_host.c $(HOST_DIR)/ttf_host.c $(HOST_DIR)/gfx_host.c \
               $(DRIVERS_DIR)/usb_hid.c $(HOST_DIR)/main.c

@@ -31,10 +31,12 @@ list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)   # for catch_discove
 # = the interpreter (basic.c) + the host backends it needs + the in-memory
 # console + the Catch2 tests. host/main.c and host/console_host.c are left out:
 # the tests provide their own main (Catch2) and console (test_console.c).
+file(GLOB INTERP_SRC ${CMAKE_CURRENT_SOURCE_DIR}/interp_*.c)
 add_executable(unit_tests
   test.cpp
   test_console.c
   ${CMAKE_CURRENT_SOURCE_DIR}/basic.c
+  ${INTERP_SRC}
   ${REPO}/host/storage_host.c
   ${REPO}/seed/seed_host.c
   ${REPO}/host/image_host.c
@@ -65,9 +67,9 @@ catch_discover_tests(unit_tests)
 option(COVERAGE "instrument the interpreter and add the `coverage` target" OFF)
 if(COVERAGE)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CodeCoverage.cmake)
-  # Instrument only the code under test (basic.c), not the harness or Catch2 —
-  # that keeps the report focused and avoids mixing gcov data across compilers.
-  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/basic.c PROPERTIES
+  # Instrument only the code under test (basic.c + the interp_*.c modules), not
+  # the harness or Catch2 — keeps the report focused and avoids mixing gcov data.
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/basic.c ${INTERP_SRC} PROPERTIES
     COMPILE_OPTIONS "-g;-O0;--coverage")
   target_link_options(unit_tests PRIVATE --coverage)
 

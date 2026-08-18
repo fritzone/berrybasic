@@ -1,16 +1,30 @@
+#include "interp_control.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_list.h"
+#include "interp_events.h"
+#include "interp_files.h"
+#include "interp_hw.h"
+#include "interp_graphics.h"
+#include "interp_pod.h"
+#include "interp_call.h"
 // ===========================================================================
 // BerryBasiC — TRY/CATCH, statement dispatch, event polling, the run loop
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_control.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // --- TRY / CATCH / ENDTRY : structured error handling -----------------------
 // Forward-scan from just after TRY for the matching CATCH (honouring nested
 // TRY blocks). Records its position in *pc/*off (the start of the handler body).
 // Returns 1 on success; raises and returns 0 if there is no CATCH.
-static int find_catch(int *out_pc, int *out_off) {
+int find_catch(int *out_pc, int *out_off) {
     int pc = cur_line_idx;
     int depth = 0;
     for (;;) {
@@ -33,7 +47,7 @@ static int find_catch(int *out_pc, int *out_off) {
 
 // TRY : begin a protected block. Locate its CATCH, snapshot the interpreter
 // state, push a handler, then carry on executing the block.
-static void stmt_try(void) {
+void stmt_try(void) {
     lex_next();                                  // consume TRY
     if (cur_line_idx < 0) { err("TRY can only be used inside a program"); return; }
     if (try_sp >= TRY_MAX) { err("Too many nested TRY blocks"); return; }
@@ -64,7 +78,7 @@ static void stmt_try(void) {
 
 // CATCH reached in normal flow: the protected block finished with no error, so
 // discard the handler and skip past the matching ENDTRY (don't run the handler).
-static void stmt_catch(void) {
+void stmt_catch(void) {
     if (try_open <= 0) { err("CATCH without a matching TRY"); return; }
     if (try_sp > 0) try_sp--;                    // this block succeeded
     lex_next();                                  // consume CATCH
@@ -75,7 +89,7 @@ static void stmt_catch(void) {
 // ENDTRY is only reached as a statement as the join point at the end of a CATCH
 // handler that actually ran (the no-error path skips past it in stmt_catch). If no
 // TRY is lexically open, this is a stray ENDTRY.
-static void stmt_endtry(void) {
+void stmt_endtry(void) {
     if (try_open <= 0) { err("ENDTRY without a matching TRY"); return; }
     try_open--;
     lex_next();                                  // consume ENDTRY
@@ -85,7 +99,7 @@ static void stmt_endtry(void) {
 //   RAISE "message"            (code 0)
 //   RAISE code                 (numeric code, message = "")
 //   RAISE code, "message"
-static void stmt_raise(void) {
+void stmt_raise(void) {
     lex_next();                                  // consume RAISE
     value_t v = eval_expr();
     if (g_err) return;
@@ -115,7 +129,7 @@ static void stmt_raise(void) {
 // If an error is pending and the innermost TRY handler belongs to the current
 // PROC/FN frame, unwind to it: restore the saved stacks/locals, clear the error,
 // and report the CATCH position to resume at (via *pc/*off). Returns 1 if caught.
-static int try_handle_error(int *pc, int *off) {
+int try_handle_error(int *pc, int *off) {
     if (!g_err || try_sp <= 0) return 0;
     try_rec_t *h = &try_stack[try_sp - 1];
     if (h->call_sp != call_sp) return 0;         // handler is in an outer frame: keep unwinding
@@ -135,7 +149,7 @@ static int try_handle_error(int *pc, int *off) {
     return 1;
 }
 
-static void exec_statement(void) {
+void exec_statement(void) {
     scratch_reset();                             // reclaim previous temporaries
     if (tok == T_LABEL) lex_next();              // ".name": a branch label, then run the rest
     if (tok == T_EOL || tok == T_COLON) return;
@@ -337,7 +351,7 @@ static void exec_statement(void) {
 
 // Execute one line of source starting at byte offset `off` (which may hold
 // several ':'-separated statements).
-static void exec_text(const char *text, int off) {
+void exec_text(const char *text, int off) {
     cur_text = text;
     lx = text + off;
     lex_next();
@@ -353,7 +367,7 @@ static void exec_text(const char *text, int off) {
 }
 
 // Build the PROC/FN definition table by scanning the program for "DEF" lines.
-static void scan_defs(void) {
+void scan_defs(void) {
     def_n = 0;
     for (int i = 0; i < prog_n && def_n < DEF_MAX; i++) {
         cur_text = prog[i].text;
@@ -382,7 +396,7 @@ static void scan_defs(void) {
 // Run a registered event handler PROC (parameterless). call_named parses its
 // argument list from the current token, so force T_EOL first to bind zero args;
 // call_named saves and restores the rest of the caller's lexer state itself.
-static void dispatch_handler(const char *name) {
+void dispatch_handler(const char *name) {
     tok = T_EOL;
     call_named(0, name, 0);
 }
@@ -390,7 +404,7 @@ static void dispatch_handler(const char *name) {
 // Check every armed event source and run its handler if it has fired. Called at
 // statement/line boundaries from the run loops. `in_event` blocks re-entry so a
 // handler can't itself be interrupted by another event.
-static void poll_events(void) {
+void poll_events(void) {
     if (in_event || g_err || g_stop) return;
     // Ctrl+C stops a running program (the universal "interrupt"). Drain the
     // keyboard so a stray key can't hide a following Ctrl+C; any other key is
@@ -456,7 +470,7 @@ static void poll_events(void) {
 
 // Execute program lines starting at (pc,off) until ENDPROC / =<expr> (g_return),
 // END (g_stop), end of program, or an error. Used for PROC and FN bodies.
-static void run_body(int pc, int off) {
+void run_body(int pc, int off) {
     g_return = 0;
     while (pc >= 0 && pc < prog_n && !g_err && !g_stop && !g_return) {
         poll_events();                           // fire any events between lines
@@ -476,9 +490,9 @@ static void run_body(int pc, int off) {
     }
 }
 
-static int run_depth;                          // nested run_program depth (for IMPORT)
+int run_depth;                          // nested run_program depth (for IMPORT)
 
-static void run_program_once(int start_pc, int start_off) {
+void run_program_once(int start_pc, int start_off) {
     int outer = (run_depth == 0);
     run_depth++;
     // Only the outermost RUN pulls in modules (and strips them at the end), so a
@@ -556,7 +570,7 @@ static void run_program_once(int start_pc, int start_off) {
 // recursive) so a menu that endlessly chains example->menu->example never grows
 // the C stack. Each program is loaded fresh and run as an outer program, so it
 // gets a clean screen, variables and modules - just like a top-level RUN.
-static void run_chain_queue(void) {
+void run_chain_queue(void) {
     while (chain_qn > 0 && !g_err) {
         char f[64];
         chain_dequeue(f);
@@ -565,7 +579,7 @@ static void run_chain_queue(void) {
     }
 }
 
-static void run_program(int start_pc, int start_off) {
+void run_program(int start_pc, int start_off) {
     run_program_once(start_pc, start_off);
     if (run_depth == 0) run_chain_queue();     // top-level run: honour any CHAIN
 }

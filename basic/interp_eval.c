@@ -1,24 +1,34 @@
+#include "interp_eval.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_stmt.h"
+#include "interp_hw.h"
+#include "interp_pod.h"
+#include "interp_control.h"
+#include "interp_call.h"
 // ===========================================================================
 // BerryBasiC — expression evaluator: functions, primaries, precedence ladder
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_eval.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // PODCAPS("NAME.POD") is evaluated here but implemented in interp_pod.inc, which
 // is #included later (it needs the storage layer); forward-declare it.
-static value_t eval_podcaps(void);
+value_t eval_podcaps(void);
 
 // Byte-equality of two n-byte spans (used by the string search/replace helpers).
-static int mem_eq(const char *a, const char *b, int n) {
+int mem_eq(const char *a, const char *b, int n) {
     for (int i = 0; i < n; i++) if (a[i] != b[i]) return 0;
     return 1;
 }
 
 // Parse an array reference written with empty parentheses, NAME() , as used by
 // SPLIT and JOIN$. Fills *name and leaves the caller to find/create the array.
-static int parse_array_ref(char *name) {
+int parse_array_ref(char *name) {
     if (tok != T_VAR) { err("Expected an array name like parts$()"); return 0; }
     s_copy(name, tok_var, NAME_LEN);
     lex_next();
@@ -26,7 +36,7 @@ static int parse_array_ref(char *name) {
     return expect(T_RP);
 }
 
-static int gpio_guard(void);            // defined with the GPIO statements below
+int gpio_guard(void);            // defined with the GPIO statements below
 
 // Render a number as text under a FORMAT$/PRINT USING template. Returns the
 // output length, or -1 if the template has no digit position at all. Template
@@ -36,7 +46,7 @@ static int gpio_guard(void);            // defined with the GPIO statements belo
 // a leading '-' is the default (sign only when negative). Any other character
 // is literal and copied through. The integer part is never truncated: if it
 // needs more digits than the template provides, the field simply grows.
-static int fmt_number(char *out, const char *tmpl, int tlen, double v) {
+int fmt_number(char *out, const char *tmpl, int tlen, double v) {
     int sign_mode = 0;                       // 0 = sign only if negative, 1 = always
     char prefix[64]; int plen = 0;           // literal text before the digit field
     char suffix[64]; int slen = 0;           // literal text after the digit field
@@ -111,7 +121,7 @@ static int fmt_number(char *out, const char *tmpl, int tlen, double v) {
     return n;
 }
 
-static value_t eval_function(int fn) {
+value_t eval_function(int fn) {
     lex_next();                         // consume function name
 
     // Single-argument math functions: paren-optional, argument is the next factor.
@@ -567,20 +577,20 @@ static value_t eval_function(int fn) {
 }
 
 // Read a CR-terminated string from memory (the BBC $ indirection).
-static value_t mem_read_str(long a) {
+value_t mem_read_str(long a) {
     const unsigned char *p = (const unsigned char *)(uintptr_t)a;
     int n = 0;
     while (n < MAX_STR && p[n] != 0x0D) n++;
     return str_in_scratch((const char *)p, n);
 }
-static void mem_write_str(long a, const char *s, int len) {
+void mem_write_str(long a, const char *s, int len) {
     unsigned char *p = (unsigned char *)(uintptr_t)a;
     if (len > MAX_STR) len = MAX_STR;
     for (int i = 0; i < len; i++) p[i] = (unsigned char)s[i];
     p[len] = 0x0D;                                   // carriage-return terminator
 }
 
-static value_t prim_base(void) {
+value_t prim_base(void) {
     if (g_err) return v_num(0);
     // Unary indirection: ?addr (byte), !addr (word), $addr (string). The operand
     // is a primary, so ?(A+1) needs parentheses; A?1 is the binary form below.
@@ -703,7 +713,7 @@ static value_t prim_base(void) {
 // A primary, plus the binary indirection postfix: base?offset (byte at base+off)
 // and base!offset (word at base+off). Binds tighter than the arithmetic ops, so
 // P%?I + 1 is (P%?I) + 1, and the offset is itself a primary.
-static value_t eval_primary(void) {
+value_t eval_primary(void) {
     value_t a = prim_base();
     while (!g_err && (tok == T_QUERY || tok == T_PLING)) {
         int op = tok;
@@ -720,7 +730,7 @@ static value_t eval_primary(void) {
 
 // Exponentiation, tighter than unary minus (so -2^2 = -4), left-associative.
 // The exponent is a sign-prefixed primary, so 2^-3 and 2^3^2 (=(2^3)^2) work.
-static value_t eval_power(void) {
+value_t eval_power(void) {
     value_t a = eval_primary();
     while (!g_err && tok == T_CARET) {
         lex_next();
@@ -734,7 +744,7 @@ static value_t eval_power(void) {
     return a;
 }
 
-static value_t eval_unary(void) {
+value_t eval_unary(void) {
     if (tok == T_MINUS) { lex_next(); value_t v = eval_unary();
                           if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
                           return v_num(-v.num); }
@@ -748,7 +758,7 @@ static value_t eval_unary(void) {
     return eval_power();
 }
 
-static value_t eval_term(void) {
+value_t eval_term(void) {
     value_t a = eval_unary();
     while (!g_err && (tok == T_STAR || tok == T_SLASH ||
                       (tok == T_KW && (tok_kw == KW_DIV || tok_kw == KW_MOD)))) {
@@ -771,7 +781,7 @@ static value_t eval_term(void) {
     return a;
 }
 
-static value_t eval_add(void) {
+value_t eval_add(void) {
     value_t a = eval_term();
     while (!g_err && (tok == T_PLUS || tok == T_MINUS)) {
         int op = tok; lex_next();
@@ -794,7 +804,7 @@ static value_t eval_add(void) {
     return a;
 }
 
-static int str_cmp(value_t a, value_t b) {
+int str_cmp(value_t a, value_t b) {
     int n = a.len < b.len ? a.len : b.len;
     for (int i = 0; i < n; i++) {
         unsigned char ca = a.str[i], cb = b.str[i];
@@ -805,7 +815,7 @@ static int str_cmp(value_t a, value_t b) {
 }
 
 // Relational comparison. BBC BASIC TRUE is -1 (all bits set), FALSE is 0.
-static value_t eval_compare(void) {
+value_t eval_compare(void) {
     value_t a = eval_add();
     if (tok == T_EQ || tok == T_NE || tok == T_LT ||
         tok == T_GT || tok == T_LE || tok == T_GE) {
@@ -830,7 +840,7 @@ static value_t eval_compare(void) {
     return a;
 }
 
-static value_t eval_and(void) {                   // AND: lower than relational
+value_t eval_and(void) {                   // AND: lower than relational
     value_t a = eval_compare();
     while (!g_err && tok == T_KW && tok_kw == KW_AND) {
         lex_next();
@@ -842,7 +852,7 @@ static value_t eval_and(void) {                   // AND: lower than relational
     return a;
 }
 
-static value_t eval_expr(void) {                  // OR / EOR: lowest precedence
+value_t eval_expr(void) {                  // OR / EOR: lowest precedence
     value_t a = eval_and();
     while (!g_err && tok == T_KW && (tok_kw == KW_OR || tok_kw == KW_EOR)) {
         int kw = tok_kw; lex_next();

@@ -1,17 +1,19 @@
-#include <stdint.h>
-#include "console.h"
-#include "storage.h"
-#include "seed.h"
-#include "pod.h"
-#include "image.h"
-#include "sound.h"
-#include "gpio.h"
-#include "i2c.h"
-#include "ttf.h"
-#include "gfx.h"
-#include "basic.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_list.h"
+#include "interp_events.h"
+#include "interp_files.h"
+#include "interp_hw.h"
+#include "interp_graphics.h"
+#include "interp_pod.h"
+#include "interp_control.h"
+#include "interp_call.h"
 
-#include "conf.h"
 
 // ===========================================================================
 // BerryBasiC - A small BBC-flavoured BASIC interpreter.
@@ -31,49 +33,25 @@
 // = <> < > <= >=, string concatenation. Strings use a GC'd heap.
 // ===========================================================================
 
-#define LINE_LEN     128     // maximum length of a line
-#define MAX_LINES   8192     // total length of a BASIC program
-#define MAX_VARS     512     // total number of allowed variables in a program
-#define NAME_LEN       8     // variable name incl. trailing '$' for strings
-#define MAX_STR      255     // classic BASIC maximum string length
-#define GCHEAP_SIZE 16384    // bytes of string storage for variables (GC'd)
-#define SCRATCH_SIZE 4096    // per-statement scratch for string temporaries
 
-#define BAS_PI     3.14159265358979323846
-#define BAS_HALFPI 1.57079632679489661923
-#define BAS_TWOPI  6.28318530717958647692
-#define BAS_LN2    0.69314718055994530942
 
 // ---------------------------------------------------------------------------
-// The interpreter is one translation unit, split across the interp_*.inc
-// fragments below purely for readability. They are #included — not compiled
-// separately — so every `static` symbol and file-scope global is still shared
-// across the whole interpreter, and definition/forward-declaration order is
-// exactly the source order of the fragments. Keep the include order below:
-// later fragments depend on declarations made in earlier ones.
+// The interpreter is split across interp_*.c modules, each compiled separately.
+// The shared interface lives in headers:
+//   * interp_base.h   - platform/library includes + shared compile-time constants
+//   * interp_types.h  - every data type (sectioned by owning module)
+//   * interp_<mod>.h  - that module's extern globals + documented function protos
+// Each interp_<mod>.c includes its own header plus the headers of the modules it
+// calls into. This file (basic.c) holds only the top-level line handling + REPL,
+// and pulls in every module header since it drives them all.
 // ---------------------------------------------------------------------------
-#include "interp_util.inc"      // helpers, errors, FP math, number formatting
-#include "interp_data.inc"      // program store, values, variables, arrays, strings
-#include "interp_lexer.inc"     // keyword table + lexer
-#include "interp_parse.inc"     // evaluator support helpers
-#include "interp_seed.inc"      // native seeds + collections + service vtable
-#include "interp_eval.inc"      // expression evaluator
-#include "interp_stmt.inc"      // core statements + control flow
-#include "interp_list.inc"      // LIST (plain + pretty)
-#include "interp_events.inc"    // DATA/READ, events, VDU
-#include "interp_files.inc"     // storage commands, modules, CAT, editor
-#include "interp_hw.inc"        // sound, GPIO, I2C statements
-#include "interp_graphics.inc"  // graphics + misc statements
-#include "interp_pod.inc"       // POD executables: loader + RUN/PODLOAD/PODINFO
-#include "interp_control.inc"   // TRY/CATCH, dispatch, run loop
-#include "interp_call.inc"      // PROC / FN call
 
 // ---------------------------------------------------------------------------
 // Top-level line handling and REPL
 // ---------------------------------------------------------------------------
 
 // Returns 1 if the line was executed immediately, 0 if it was stored.
-static int process_line(char *line) {
+int process_line(char *line) {
     char *p = line;
     while (is_space(*p)) p++;
     if (is_digit(*p)) {                         // "<num> <text>" -> store/replace

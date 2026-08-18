@@ -1,12 +1,20 @@
+#include "interp_list.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_seed.h"
+#include "interp_stmt.h"
+#include "interp_events.h"
+#include "interp_files.h"
+#include "interp_pod.h"
 // ===========================================================================
 // BerryBasiC — LIST: plain and pretty-printed (syntax colour + indentation)
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_list.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
-static void list_text(const char *t) {
+void list_text(const char *t) {
     int i = 0;
     while (t[i]) {
         char c = t[i];
@@ -45,21 +53,14 @@ static void list_text(const char *t) {
     }
 }
 
-static int word_is(const char *w);      // "LIST SIMPLE" / OFF-style bareword test
+int word_is(const char *w);      // "LIST SIMPLE" / OFF-style bareword test
 
 // --- pretty LIST: gutter, indentation and syntax colouring ------------------
 // Colours are BBC logical indices (con_colour): on the framebuffer they tint the
 // text, on the host CLI they map to ANSI, and in the unit tests they are a no-op.
-#define LC_LINE  6      // line-number gutter  (cyan)
-#define LC_KW    3      // keywords            (yellow)
-#define LC_STR   2      // string literals     (green)
-#define LC_NUM   5      // numeric literals    (magenta)
-#define LC_NAME  6      // PROC/FN names       (cyan)
-#define LC_REM   4      // REM comments        (blue)
-#define LC_DEF   7      // everything else     (white)
 
-static int is_hexd(char c) { c = up(c); return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); }
-static int num_digits(int n) { int d = 1; if (n < 0) n = -n; while (n >= 10) { n /= 10; d++; } return d; }
+int is_hexd(char c) { c = up(c); return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'); }
+int num_digits(int n) { int d = 1; if (n < 0) n = -n; while (n >= 10) { n /= 10; d++; } return d; }
 
 // Analyse one program line for block indentation. Returns the net change in
 // nesting depth the line makes (openers +1, closers -1), and sets *dedent_first
@@ -67,7 +68,7 @@ static int num_digits(int n) { int d = 1; if (n < 0) n = -n; while (n >= 10) { n
 // ELSE, ...) so the line itself renders one level out. A multi-line IF is one
 // whose last word is THEN; a one-line DEF (a classic FN= or a PROC:...:ENDPROC)
 // nets to zero, so only true multi-line definitions open a block.
-static int line_blocks(const char *t, int *dedent_first) {
+int line_blocks(const char *t, int *dedent_first) {
     *dedent_first = 0;
     int delta = 0, seen = 0, defs = 0, has_eq = 0;
     char last[16]; last[0] = 0;
@@ -108,7 +109,7 @@ static int line_blocks(const char *t, int *dedent_first) {
 // Render a program line with syntax colouring: keywords upper-cased and coloured,
 // strings, numbers, REM comments and PROC/FN names each in their own colour, the
 // rest (variables, operators) in the default. Mirrors list_text's word handling.
-static void list_fancy_text(const char *t) {
+void list_fancy_text(const char *t) {
     int i = 0;
     while (t[i]) {
         char c = t[i];
@@ -182,7 +183,7 @@ static void list_fancy_text(const char *t) {
     }
 }
 
-static void list_file(const char *name, int simple);   // LIST "file" (defined with storage)
+void list_file(const char *name, int simple);   // LIST "file" (defined with storage)
 
 // LIST [SIMPLE] [start][,end] : whole program, a single line (LIST 100), a range
 // (LIST 100,200), from a line (LIST 100,) or up to a line (LIST ,200). By default
@@ -191,7 +192,7 @@ static void list_file(const char *name, int simple);   // LIST "file" (defined w
 // gives the plain "number space text" form (e.g. for copying or a mono terminal).
 // LIST [SIMPLE] "file" lists a program file on the card instead of the one in
 // memory (same pretty/plain forms), with screen paging.
-static void stmt_list(void) {
+void stmt_list(void) {
     lex_next();
     int simple = 0;
     if (word_is("SIMPLE")) { simple = 1; lex_next(); }

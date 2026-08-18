@@ -86,8 +86,12 @@ static int wrapcol = 72;    /* word wrap column; 0 disables wrap */
 #define K_F1      0x101     /* help   */
 #define K_F2      0x102     /* save   */
 #define K_F3      0x103     /* open   */
+#define K_F4      0x104     /* follow the line-number reference under the cursor */
 #define K_F5      0x105     /* run the BASIC program */
+#define K_F6      0x106     /* find next */
 #define K_F7      0x107     /* new folder (in the file dialog) */
+#define K_F8      0x108     /* jump back */
+#define K_F9      0x109     /* PROC/FN outline */
 #define K_F10     0x10A     /* menu   */
 #define K_PGUP    0x10D
 #define K_PGDN    0x10E
@@ -332,6 +336,9 @@ static const char *file_items[] = {
     " New         ", " Open...     ", " Save        ", " Save As...  ", " Quit        ", 0
 };
 static const char *edit_items[] = {
+    " Undo         Ctrl-Z ",
+    " Redo      Sh-Ctrl-Z ",
+    "-",                            /* separator */
     " Cut          Ctrl-X ",
     " Copy         Ctrl-C ",
     " Paste        Ctrl-V ",
@@ -340,29 +347,39 @@ static const char *edit_items[] = {
     " Go to Top           ",
     " Go to Bottom        ",
     "-",                            /* separator */
-    " Auto Number  Ctrl-N ",
+    " Find...      Ctrl-F ",
+    " Find Next    F6     ",
+    " Replace...   Ctrl-R ",
     0
 };
 static const char *help_items[] = {
     " About       ", 0
 };
-static const char *run_items[] = {      /* BASIC-only menu (see menu_visible()) */
-    " Run          F5 ", 0
+static const char *basic_items[] = {    /* BASIC-only menu (see menu_visible()) */
+    " Run             F5     ",
+    " Auto Number     Alt-N  ",
+    "-",                            /* separator */
+    " Procedures...   F9     ",
+    " Go to Line...   Ctrl-G ",
+    " Follow Ref      F4     ",
+    " Jump Back       F8     ",
+    " Check Refs             ",
+    0
 };
 static const struct menu_def {
     const char *title;              /* as drawn on the bar, e.g. " File " */
     const char *const *items;
 } menus[] = {
-    { " File ", file_items },
-    { " Edit ", edit_items },
-    { " Run ",  run_items  },        /* index RUN_MENU: only for BASIC files */
-    { " Help ", help_items },        /* Help stays last, as users expect */
+    { " File ",  file_items  },
+    { " Edit ",  edit_items  },
+    { " Basic ", basic_items },       /* index BASIC_MENU: only for BASIC files */
+    { " Help ",  help_items  },       /* Help stays last, as users expect */
 };
 #define NMENU_ALL ((int)(sizeof menus / sizeof menus[0]))
-#define RUN_MENU  2
+#define BASIC_MENU 2
 
-/* The Run menu is only offered while editing a BASIC program. */
-static int menu_visible(int i) { return i != RUN_MENU || is_basic; }
+/* The Basic menu (Run + Auto Number) is only offered while editing a BASIC file. */
+static int menu_visible(int i) { return i != BASIC_MENU || is_basic; }
 
 /* Column where menu i's title is drawn: titles laid left to right from column 2,
  * skipping any hidden menu so the bar shows no gap. */
@@ -444,6 +461,9 @@ static void draw_status(void)
 /* ----------------------------------------------------------- SELECTION */
 
 static void mark_changed(void);        /* defined in the editing section below */
+static void undo_record(void);         /* snapshot before a discrete edit (undo module) */
+static void undo_record_typing(void);  /* snapshot before a run of typed characters      */
+static void nav_reset(void);           /* clear the reference-jump back stack             */
 
 static int line_index(Line *t)
 {
@@ -541,6 +561,7 @@ static void do_paste(void)
     int n = S->clip_len(), i;
     char *buf;
     if (n <= 0) return;
+    undo_record();
     if (sel_anchor) sel_delete();
     buf = (char *)malloc(n + 1);
     if (!buf) return;
@@ -730,7 +751,7 @@ static void draw_text(void)
          * source line, coloured like the code's own line-number token; otherwise
          * the physical row number. Manual BASIC has gw==0 (no gutter at all). */
         if (gw > 0) {
-            bgrgb(0x00003C);
+            bgrgb(0x0000A0);                 /* a darker shade of the window blue, not black */
             at(win_x1, row);
             if (p && is_basic && auto_num) {
                 int nd = lead_digits(p), k, pad = gw - 1 - nd;
@@ -1018,6 +1039,131 @@ static void go_down(void)
 
 static void mark_changed(void) { changed = 1; }
 
+/* ---------------------------------------------------------- UNDO / REDO */
+/* Snapshot based: before each edit the whole buffer (serialised to text) plus
+ * the cursor position is pushed on the undo stack. Undo/redo swap snapshots
+ * between the two stacks and rebuild the line list. Simple and correct for every
+ * operation - typing, delete, split/join, auto-renumber, replace-all - because
+ * it never has to invert individual edits. Snapshots are malloc'd from the seed
+ * heap, which RUN (F5) wipes, so the stacks are dropped (undo_forget) after a
+ * run. Runs of typed characters coalesce into one undo step. */
+#define UNDO_MAX 48
+
+typedef struct { char *text; int ci, cx, ti, co; } Snapshot;
+static Snapshot undo_stk[UNDO_MAX], redo_stk[UNDO_MAX];
+static int undo_n, redo_n;
+static int undo_group;              /* 1 while coalescing a run of typed characters */
+
+/* The whole buffer as one malloc'd string, lines joined with '\n'. */
+static char *undo_serialize(void)
+{
+    int total = 1, n = 0; Line *p; char *s;
+    for (p = first; p; p = p->next) total += p->len + 1;
+    s = (char *)malloc((size_t)total);
+    if (!s) return 0;
+    for (p = first; p; p = p->next) {
+        if (p != first) s[n++] = '\n';
+        memcpy(s + n, p->s, (size_t)p->len); n += p->len;
+    }
+    s[n] = 0;
+    return s;
+}
+
+/* Push the current buffer + cursor onto stack stk (capped; drops the oldest). */
+static void undo_snap(Snapshot *stk, int *n)
+{
+    char *t = undo_serialize();
+    int i;
+    if (!t) return;                          /* out of memory: just skip this step */
+    if (*n >= UNDO_MAX) {
+        free(stk[0].text);
+        for (i = 1; i < UNDO_MAX; i++) stk[i - 1] = stk[i];
+        (*n)--;
+    }
+    stk[*n].text = t;
+    stk[*n].ci = line_index(cur); stk[*n].cx = curx;
+    stk[*n].ti = line_index(top); stk[*n].co = coloff;
+    (*n)++;
+}
+
+static void redo_drop(void)
+{
+    int i;
+    for (i = 0; i < redo_n; i++) free(redo_stk[i].text);
+    redo_n = 0;
+}
+
+/* Called before a discrete edit; a new edit invalidates the redo history. */
+static void undo_record(void) { undo_snap(undo_stk, &undo_n); redo_drop(); undo_group = 0; }
+
+/* Called before a typed character: only the first of a run snapshots, so undo
+ * removes the whole run at once. The run is broken by any non-typing key (see
+ * the main loop). */
+static void undo_record_typing(void)
+{
+    if (!undo_group) { undo_snap(undo_stk, &undo_n); redo_drop(); }
+    undo_group = 1;
+}
+
+/* Rebuild the line list from a text buffer (like load_file, but from memory). */
+static void undo_rebuild(const char *text)
+{
+    Line *ln;
+    free_all();
+    first = line_alloc();
+    ln = first;
+    while (*text && ln) {
+        char c = *text++;
+        if (c == '\n') ln = line_insert_after(ln, 0);
+        else if (ln->len < MAXLEN) { ln->s[ln->len++] = c; ln->s[ln->len] = 0; }
+    }
+}
+
+static void undo_apply(Snapshot *s)
+{
+    undo_rebuild(s->text);
+    cur = line_at(s->ci); top = line_at(s->ti);
+    curx = s->cx; coloff = s->co; lineno = s->ci + 1;
+    sel_anchor = 0;
+    if (curx > cur->len) curx = cur->len;
+    if (curx < body_off()) curx = body_off();
+    scroll_into_view();
+    mark_changed();
+}
+
+static void do_undo(void)
+{
+    if (undo_n == 0) { message("Nothing to undo."); return; }
+    undo_snap(redo_stk, &redo_n);            /* current -> redo */
+    undo_n--;
+    undo_apply(&undo_stk[undo_n]);
+    free(undo_stk[undo_n].text); undo_stk[undo_n].text = 0;
+    undo_group = 0;
+}
+
+static void do_redo(void)
+{
+    if (redo_n == 0) { message("Nothing to redo."); return; }
+    undo_snap(undo_stk, &undo_n);            /* current -> undo (redo history kept) */
+    redo_n--;
+    undo_apply(&redo_stk[redo_n]);
+    free(redo_stk[redo_n].text); redo_stk[redo_n].text = 0;
+    undo_group = 0;
+}
+
+/* Drop the stacks WITHOUT freeing - the seed heap that held them was reset. */
+static void undo_forget(void) { undo_n = 0; redo_n = 0; undo_group = 0; }
+
+/* Free the stacks and drop them (the buffer is still valid, e.g. before opening
+ * another file). */
+static void undo_clear(void)
+{
+    int i;
+    for (i = 0; i < undo_n; i++) free(undo_stk[i].text);
+    for (i = 0; i < redo_n; i++) free(redo_stk[i].text);
+    undo_forget();
+}
+
 static void do_wrap(void)
 {
     int i, cut;
@@ -1043,6 +1189,7 @@ static void insert_char(int c)
 {
     int i;
     if (cur->len >= MAXLEN) { message("Line too long."); return; }
+    undo_record_typing();
 
     while (curx > cur->len) cur->s[cur->len++] = ' ';
 
@@ -1061,6 +1208,7 @@ static void do_backspace(void)
     int i, join, lo = body_off();
 
     if (curx > lo) {
+        undo_record();
         for (i = curx - 1; i < cur->len; i++) cur->s[i] = cur->s[i + 1];
         cur->len--; curx--;
         mark_changed();
@@ -1074,6 +1222,7 @@ static void do_backspace(void)
         message("Joined line would be too long.");
         return;
     }
+    undo_record();
     join = cur->prev->len;
     memcpy(cur->prev->s + join, cur->s, cur->len);
     cur->prev->len += cur->len;
@@ -1088,6 +1237,7 @@ static void do_delete(void)
     int i;
 
     if (curx < cur->len) {
+        undo_record();
         for (i = curx; i < cur->len; i++) cur->s[i] = cur->s[i + 1];
         cur->len--;
         mark_changed();
@@ -1099,6 +1249,7 @@ static void do_delete(void)
         message("Joined line would be too long.");
         return;
     }
+    undo_record();
     memcpy(cur->s + cur->len, cur->next->s, cur->next->len);
     cur->len += cur->next->len;
     cur->s[cur->len] = 0;
@@ -1311,6 +1462,7 @@ static void autonum_ensure(void)
 static void toggle_autonum(void)
 {
     if (!is_basic) { message("Auto numbering applies to BASIC (.BAS) files."); return; }
+    undo_record();
     auto_num = !auto_num;
     if (auto_num) autonum_ensure();
     coloff = 0;
@@ -1323,6 +1475,7 @@ static void do_enter(void)
 {
     Line *nl;
 
+    undo_record();
     while (curx > cur->len) cur->s[cur->len++] = ' ';
     cur->s[cur->len] = 0;
 
@@ -1556,6 +1709,7 @@ static void help_screen(void);          /* defined below; used by the Help menu 
 
 static void do_new(void)
 {
+    undo_clear(); nav_reset();
     free_all();
     first = line_alloc();
     top = cur = first;
@@ -1571,7 +1725,7 @@ static void do_open(void)
     char path[256];
     if (file_dialog("Open", 0, path, sizeof path)) {
         if (load_file(path) < 0) message("Could not open that file.");
-        else strcpy(filename, path);
+        else { undo_clear(); nav_reset(); strcpy(filename, path); }
     }
 }
 static void do_saveas(void)
@@ -1587,6 +1741,354 @@ static void do_save(void)
     if (!strcmp(filename, "NONAME.TXT")) { do_saveas(); return; }   /* never named yet */
     if (save_file(filename) < 0) message("Could not save.");
     else message("Saved.");
+}
+
+/* ------------------------------------------------------------ SEARCH */
+
+static char find_s[128];        /* current search string (empty = none yet) */
+static char repl_s[128];        /* current replacement string */
+static int  find_len;           /* strlen(find_s), cached */
+
+/* Case-insensitive byte compare (BASIC is case-insensitive; nicer for prose too). */
+static int ci_eq(char a, char b)
+{
+    if (a >= 'a' && a <= 'z') a -= 32;
+    if (b >= 'a' && b <= 'z') b -= 32;
+    return a == b;
+}
+
+/* Does find_s occur in p->s starting exactly at column i? */
+static int match_at(Line *p, int i)
+{
+    int k;
+    if (i + find_len > p->len) return 0;
+    for (k = 0; k < find_len; k++) if (!ci_eq(p->s[i + k], find_s[k])) return 0;
+    return 1;
+}
+
+/* Find the next occurrence of find_s at or after (from, fcol). On success moves
+ * the cursor to the match end, selects the match, scrolls it into view and
+ * returns 1; otherwise returns 0. In BASIC auto-number mode the hidden line
+ * number is skipped so matches land in the code. */
+static int search_from(Line *from, int fcol)
+{
+    Line *p;
+    for (p = from; p; p = p->next) {
+        int bo = body_off_of(p);
+        int i  = (p == from && fcol > bo) ? fcol : bo;
+        for (; i + find_len <= p->len; i++) {
+            if (match_at(p, i)) {
+                sel_anchor = p; sel_acol = i;          /* highlight the match */
+                cur = p; curx = i + find_len;
+                lineno = line_index(p) + 1;
+                scroll_into_view();
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Search forward from just after the cursor, wrapping once to the top. */
+static int search_forward(void)
+{
+    return search_from(cur, curx + 1) || search_from(first, 0);
+}
+
+/* Report "<verb> N occurrence(s)." in a message box. */
+static void report_hits(const char *verb, int n)
+{
+    char m[48]; int k = 0; const char *q;
+    for (q = verb; *q; q++) m[k++] = *q;
+    k += fmt_uint(m + k, n);
+    for (q = (n == 1) ? " occurrence." : " occurrences."; *q; q++) m[k++] = *q;
+    m[k] = 0;
+    message(m);
+}
+
+/* Find... : prompt for a string, then jump to the next occurrence. */
+static void do_find(void)
+{
+    if (!prompt("Find:", find_s, sizeof find_s)) return;
+    find_len = (int)strlen(find_s);
+    if (!find_len) return;
+    if (!search_forward()) message("Not found.");
+}
+
+/* Find Next : repeat the last search (prompting first if there is none). */
+static void find_next(void)
+{
+    if (!find_len) { do_find(); return; }
+    if (!search_forward()) message("Not found.");
+}
+
+/* Replace... : prompt for the search and replacement, then replace every
+ * occurrence (case-insensitive) and report the count. The replacement must be
+ * non-empty (an empty field is treated as cancel). */
+static void do_replace(void)
+{
+    int rlen, count = 0;
+    Line *p;
+    if (!prompt("Replace - find:", find_s, sizeof find_s)) return;
+    find_len = (int)strlen(find_s);
+    if (!find_len) return;
+    if (!prompt("Replace - with:", repl_s, sizeof repl_s)) return;
+    rlen = (int)strlen(repl_s);
+
+    undo_record();
+    for (p = first; p; p = p->next) {
+        int i = body_off_of(p);
+        while (i + find_len <= p->len) {
+            if (match_at(p, i)) {
+                if (p->len - find_len + rlen > MAXLEN) { i++; continue; }  /* would overflow */
+                memmove(p->s + i + rlen, p->s + i + find_len,
+                        (size_t)(p->len - (i + find_len) + 1));            /* incl. NUL */
+                memcpy(p->s + i, repl_s, (size_t)rlen);
+                p->len += rlen - find_len;
+                i += rlen; count++;
+            } else i++;
+        }
+    }
+    if (count) mark_changed();
+    sel_anchor = 0;
+    if (curx > cur->len) curx = cur->len;
+    report_hits("Replaced ", count);
+}
+
+/* ------------------------------------------ BASIC LINE-REFERENCE NAV */
+/* BASIC control flow is line-number based (GOTO/GOSUB/THEN/ELSE/RESTORE, ON..
+ * GOTO). These turn those numbers into navigation: jump to a line, follow the
+ * reference under the cursor (with a back stack), and flag jumps to lines that
+ * do not exist. They reuse the same reference grammar the auto-renumber uses. */
+
+/* The line whose BASIC number == n, or 0. */
+static Line *line_with_num(int n)
+{
+    Line *p;
+    if (n < 0) return 0;
+    for (p = first; p; p = p->next) if (line_num(p) == n) return p;
+    return 0;
+}
+
+/* Move the cursor to the start of line p's code and show it. */
+static void goto_line_ptr(Line *p)
+{
+    cur = p; lineno = line_index(p) + 1;
+    curx = body_off_of(p); coloff = 0;
+    sel_anchor = 0;
+    scroll_into_view();
+}
+
+/* The decimal number the cursor sits on (or just past), or -1. */
+static int num_under_cursor(void)
+{
+    int i = curx, n = 0;
+    if (i > cur->len) i = cur->len;
+    if (!(i < cur->len && is_digit(cur->s[i])) && i > 0 && is_digit(cur->s[i - 1])) i--;
+    if (!(i < cur->len && is_digit(cur->s[i]))) return -1;
+    while (i > 0 && is_digit(cur->s[i - 1])) i--;
+    while (i < cur->len && is_digit(cur->s[i])) n = n * 10 + (cur->s[i++] - '0');
+    return n;
+}
+
+/* Back stack of line indices left by Follow/Go to Line. */
+#define JMP_MAX 32
+static int jmp_stk[JMP_MAX], jmp_sp;
+static void jmp_push(void) { if (jmp_sp < JMP_MAX) jmp_stk[jmp_sp++] = line_index(cur); }
+static void nav_reset(void) { jmp_sp = 0; }
+
+/* message "Line N does not exist." */
+static void msg_no_line(int n)
+{
+    char m[32]; int k = 0; const char *p;
+    for (p = "Line "; *p; p++) m[k++] = *p;
+    k += fmt_uint(m + k, n);
+    for (p = " does not exist."; *p; p++) m[k++] = *p;
+    m[k] = 0; message(m);
+}
+
+/* F4 : jump to the line named by the number under the cursor. */
+static void do_follow_ref(void)
+{
+    int n; Line *t;
+    if (!is_basic) { message("Reference jumps work with BASIC (.BAS) files."); return; }
+    n = num_under_cursor();
+    if (n < 0) { message("Put the cursor on a line number to follow it."); return; }
+    t = line_with_num(n);
+    if (!t) { msg_no_line(n); return; }
+    jmp_push();
+    goto_line_ptr(t);
+}
+
+/* F8 : return to where the last Follow/Go to Line jumped from. */
+static void do_jump_back(void)
+{
+    if (jmp_sp == 0) { message("Nowhere to jump back to."); return; }
+    goto_line_ptr(line_at(jmp_stk[--jmp_sp]));
+}
+
+/* Ctrl-G : prompt for a line number and jump to it. */
+static void do_goto_line(void)
+{
+    char buf[16]; int n = 0; const char *q; Line *t;
+    if (!is_basic) { message("Go to line works with BASIC (.BAS) files."); return; }
+    if (!prompt("Go to line:", buf, sizeof buf)) return;
+    for (q = buf; *q; q++) if (*q >= '0' && *q <= '9') n = n * 10 + (*q - '0');
+    t = line_with_num(n);
+    if (!t) { msg_no_line(n); return; }
+    jmp_push();
+    goto_line_ptr(t);
+}
+
+/* Scan every GOTO/GOSUB/THEN/ELSE/RESTORE (and ON..GOTO list) target; report any
+ * that name a line which does not exist, and jump to the first one. */
+static void do_check_refs(void)
+{
+    Line *p, *bad = 0; int badnum = 0, badcol = 0, count = 0;
+    if (!is_basic) { message("Reference checking works with BASIC (.BAS) files."); return; }
+    for (p = first; p; p = p->next) {
+        const char *s = p->s; int len = p->len, i = num_prefix_len(p);
+        while (i < len) {
+            if (s[i] == '"') { i++; while (i < len && s[i] != '"') i++; if (i < len) i++; continue; }
+            if (s[i] == '\'') break;                         /* rest of line is a comment */
+            if (is_alpha(s[i])) {
+                int j = i;
+                while (j < len && (is_alpha(s[j]) || is_digit(s[j]))) j++;
+                if (is_ref_kw(s + i, j - i)) {
+                    i = j;
+                    for (;;) {                               /* comma-list of line numbers */
+                        while (i < len && s[i] == ' ') i++;
+                        if (i < len && is_digit(s[i])) {
+                            int r = 0, col = i;
+                            while (i < len && is_digit(s[i])) r = r * 10 + (s[i++] - '0');
+                            if (!line_with_num(r)) {
+                                count++;
+                                if (!bad) { bad = p; badnum = r; badcol = col; }
+                            }
+                            while (i < len && s[i] == ' ') i++;
+                            if (i < len && s[i] == ',') { i++; continue; }
+                        }
+                        break;
+                    }
+                } else i = j;
+            } else if (is_digit(s[i])) { while (i < len && is_digit(s[i])) i++; }
+            else i++;
+        }
+    }
+    if (count == 0) { message("All line references are valid."); return; }
+    cur = bad; curx = badcol; lineno = line_index(cur) + 1; coloff = 0; sel_anchor = 0;
+    scroll_into_view();
+    { char m[64]; int k = 0; const char *q;
+      for (q = "Broken reference to line "; *q; q++) m[k++] = *q;
+      k += fmt_uint(m + k, badnum);
+      if (count > 1) {
+          for (q = " (+"; *q; q++) m[k++] = *q;
+          k += fmt_uint(m + k, count - 1);
+          for (q = " more)"; *q; q++) m[k++] = *q;
+      }
+      m[k++] = '.'; m[k] = 0; message(m); }
+}
+
+/* ------------------------------------------------- PROC/FN OUTLINE */
+/* A quick index of the program's procedures and functions: every `DEF PROCname`
+ * / `DEF FNname` (glued BBC form) and `DEF proc NAME` / `DEF fn NAME` (spaced
+ * form). Pick one from a list to jump to its definition. */
+
+#define OUTLINE_MAX 128
+static char outline_lbl[OUTLINE_MAX][40];   /* "<line>  PROCname(args)" */
+static int  outline_ln[OUTLINE_MAX];        /* line index of each DEF   */
+static int  outline_n;
+
+/* Is s[i..] the standalone keyword "DEF" (case-insensitive) followed by space? */
+static int is_def_kw(const char *s, int i, int len)
+{
+    return len - i >= 4 && upc(s[i]) == 'D' && upc(s[i+1]) == 'E' && upc(s[i+2]) == 'F'
+           && s[i+3] == ' ';
+}
+
+/* True if the body at s[i..] starts with PROC or FN (either case = a PROC/FN). */
+static int is_procfn(const char *s, int i, int len)
+{
+    if (len - i >= 4 && upc(s[i])=='P' && upc(s[i+1])=='R' && upc(s[i+2])=='O' && upc(s[i+3])=='C')
+        return 1;
+    if (len - i >= 2 && upc(s[i])=='F' && upc(s[i+1])=='N')
+        return 1;
+    return 0;
+}
+
+/* Collect every DEF PROC/FN into the outline_* arrays. */
+static void outline_scan(void)
+{
+    Line *p; int idx = 0;
+    outline_n = 0;
+    for (p = first; p; p = p->next, idx++) {
+        const char *s = p->s; int len = p->len, i = num_prefix_len(p);
+        int k, num;
+        while (i < len && s[i] == ' ') i++;
+        if (!is_def_kw(s, i, len)) continue;
+        i += 3; while (i < len && s[i] == ' ') i++;    /* past "DEF " */
+        if (!is_procfn(s, i, len)) continue;
+        if (outline_n >= OUTLINE_MAX) break;
+        num = line_num(p);
+        k = 0;
+        if (num >= 0) { k = fmt_uint(outline_lbl[outline_n], num);
+                        outline_lbl[outline_n][k++] = ' '; outline_lbl[outline_n][k++] = ' '; }
+        while (i < len && k < (int)sizeof outline_lbl[0] - 1) outline_lbl[outline_n][k++] = s[i++];
+        while (k > 0 && outline_lbl[outline_n][k-1] == ' ') k--;
+        outline_lbl[outline_n][k] = 0;
+        outline_ln[outline_n] = idx;
+        outline_n++;
+    }
+}
+
+/* Show the collected procedures in a scrollable box; return the chosen index or
+ * -1 on cancel. */
+static int outline_pick(void)
+{
+    int i, sel = 0, top = 0, w = 16, x, y, h;
+    int maxrows = ROWS - 8, rows;
+    if (maxrows < 3) maxrows = 3;
+    rows = outline_n < maxrows ? outline_n : maxrows;
+    for (i = 0; i < outline_n; i++) { int l = (int)strlen(outline_lbl[i]) + 3; if (l > w) w = l; }
+    if (w > COLS - 4) w = COLS - 4;
+    h = rows + 2;
+    x = (COLS - w) / 2; y = (ROWS - h) / 2;
+
+    redraw();
+    for (;;) {
+        int c;
+        draw_box(x, y, w, h, "Procedures");
+        for (i = 0; i < rows; i++) {
+            int idx = top + i;
+            bg(idx == sel ? C_CYAN : C_WHITE); fg(C_BLACK);
+            repeat_ch(x + 1, y + 1 + i, ' ', w - 2);
+            if (idx < outline_n) puts_at(x + 2, y + 1 + i, outline_lbl[idx]);
+        }
+        c = key();
+        if (c == K_ESC)   { redraw(); return -1; }
+        if (c == K_ENTER) { redraw(); return sel; }
+        if (c == K_UP)    { if (sel > 0) sel--; }
+        if (c == K_DOWN)  { if (sel < outline_n - 1) sel++; }
+        if (c == K_PGUP)  { sel -= rows; if (sel < 0) sel = 0; }
+        if (c == K_PGDN)  { sel += rows; if (sel >= outline_n) sel = outline_n - 1; }
+        if (c == K_HOME)  sel = 0;
+        if (c == K_END)   sel = outline_n - 1;
+        if (sel < top) top = sel;
+        if (sel >= top + rows) top = sel - rows + 1;
+    }
+}
+
+/* F9 : list the procedures/functions and jump to the chosen one. */
+static void do_outline(void)
+{
+    int sel;
+    if (!is_basic) { message("The outline is for BASIC (.BAS) files."); return; }
+    outline_scan();
+    if (outline_n == 0) { message("No PROC/FN definitions found."); return; }
+    sel = outline_pick();
+    if (sel < 0) return;
+    jmp_push();
+    goto_line_ptr(line_at(outline_ln[sel]));
 }
 
 /* Run the current BASIC program: save it, run it synchronously on the visible
@@ -1624,6 +2126,7 @@ static int run_current(void)
     S->getkey();                            /* wait for any key */
 
     first = 0;                              /* abandon the dead list (its heap was reset) */
+    undo_forget(); nav_reset();             /* undo snapshots lived in that heap too */
     S->gfx_backbuffer(1);                   /* re-enable the editor's double buffer */
     if (load_file(filename) < 0) {          /* rebuild fresh from disk */
         S->puts("ed: out of memory\n", 18);
@@ -1647,6 +2150,7 @@ static int run_current(void)
 /* Delete the current line (also Ctrl-Y). Never empties the list. */
 static void delete_line(void)
 {
+    undo_record();
     if (cur->next || cur->prev) {
         Line *dead = cur;
         if (cur->next) cur = cur->next; else { cur = cur->prev; lineno--; }
@@ -1670,18 +2174,30 @@ static int menu_action(int menu, int item)
         case 3: do_saveas(); break;
         case 4: return 1;                             /* Quit */
         }
-    } else if (menu == 1) {                           /* Edit (item 3 is the separator) */
+    } else if (menu == 1) {                           /* Edit (items 2, 6, 10 are separators) */
         switch (item) {
-        case 0: if (sel_anchor) { sel_copy(); sel_delete(); } break;  /* Cut   */
-        case 1: sel_copy();     break;                               /* Copy  */
-        case 2: do_paste();     break;                               /* Paste */
-        case 4: delete_line();  break;
-        case 5: goto_top();     break;
-        case 6: goto_bottom();  break;
-        case 8: toggle_autonum(); break;              /* item 7 is the separator */
+        case 0: do_undo();      break;
+        case 1: do_redo();      break;
+        case 3: if (sel_anchor) { undo_record(); sel_copy(); sel_delete(); } break;  /* Cut */
+        case 4: sel_copy();     break;                               /* Copy  */
+        case 5: do_paste();     break;                               /* Paste */
+        case 7: delete_line();  break;
+        case 8: goto_top();     break;
+        case 9: goto_bottom();  break;
+        case 11: do_find();     break;
+        case 12: find_next();   break;
+        case 13: do_replace();  break;
         }
-    } else if (menu == RUN_MENU) {                    /* Run (BASIC only) */
-        if (item == 0) return run_current();
+    } else if (menu == BASIC_MENU) {                  /* Basic (BASIC files only) */
+        switch (item) {
+        case 0: return run_current();                 /* Run          */
+        case 1: toggle_autonum(); break;              /* Auto Number  */
+        case 3: do_outline();     break;              /* item 2 is the separator */
+        case 4: do_goto_line();   break;
+        case 5: do_follow_ref();  break;
+        case 6: do_jump_back();   break;
+        case 7: do_check_refs();  break;
+        }
     } else {                                          /* Help */
         switch (item) {
         case 0: message("ed - a full-screen text editor for BerryBasiC"); break;
@@ -1780,9 +2296,9 @@ static void layout(void)
     if (COLS < 20) COLS = 80;
     if (ROWS < 8)  ROWS = 25;
 
-    win_x1 = 2;
+    win_x1 = 1;                         /* left border hugs column 0 */
     win_y1 = 2;
-    win_x2 = COLS - 3;                  /* border + a right margin */
+    win_x2 = COLS - 2;                  /* right border hugs the last column */
     win_y2 = ROWS - 4;                  /* leave the status bar (ROWS-1) + border */
 
     wrapcol = win_x2 - win_x1;          /* wrap at the window's right edge */
@@ -1828,11 +2344,12 @@ int main(int argc, char **argv)
 
         int mods = S->keymods(), handled = 0;
 
-        /* Alt+letter opens a menu by its first letter (Alt+F/E/H). Left Alt only,
-         * so AltGr (third-legend characters) still types normally. */
+        /* Alt+letter opens a menu by its first letter (Alt+F/E/R/H), and Alt+N
+         * toggles auto-numbering (Ctrl+N is left for the usual "New"). Left Alt
+         * only, so AltGr (third-legend characters) still types normally. */
         if (mods & KMOD_ALT) {
-            int mi = menu_accel(c);
-            if (mi >= 0) quit = run_menu_at(mi);
+            if (c == 'n' || c == 'N') toggle_autonum();
+            else { int mi = menu_accel(c); if (mi >= 0) quit = run_menu_at(mi); }
             handled = 1;
         }
         /* System clipboard. USB gives the plain key + a modifier bit; a serial
@@ -1841,13 +2358,20 @@ int main(int argc, char **argv)
             sel_copy(); handled = 1;                                  /* copy  */
         }
         else if (((mods & KMOD_CTRL) && (c == 'x' || c == 'X')) || ((mods & KMOD_SHIFT) && c == K_DEL) || c == 0x18) {
-            if (sel_anchor) { sel_copy(); sel_delete(); } handled = 1; /* cut   */
+            if (sel_anchor) { undo_record(); sel_copy(); sel_delete(); } handled = 1;  /* cut */
         }
-        else if (((mods & KMOD_CTRL) && (c == 'v' || c == 'V')) || ((mods & KMOD_SHIFT) && c == K_INS) || c == 0x16) {
-            do_paste(); handled = 1;                                  /* paste */
+        else if (((mods & KMOD_CTRL) && (c == 'v' || c == 'V')) || ((mods & KMOD_SHIFT) && c == K_INS)) {
+            do_paste(); handled = 1;                                  /* paste (NB: no raw 0x16
+                                     * fallback - that code IS K_END, which it was swallowing) */
+        }
+        else if ((mods & KMOD_CTRL) && (c == 'z' || c == 'Z')) {      /* Ctrl-Z undo / Ctrl-Shift-Z redo */
+            if (mods & KMOD_SHIFT) do_redo(); else do_undo(); handled = 1;
         }
         else if ((mods & KMOD_CTRL) && (c == 'y' || c == 'Y')) { delete_line(); handled = 1; }  /* Ctrl-Y */
-        else if (((mods & KMOD_CTRL) && (c == 'n' || c == 'N')) || c == 0x0E) { toggle_autonum(); handled = 1; }  /* Ctrl-N */
+        else if ((mods & KMOD_CTRL) && (c == 'f' || c == 'F')) { do_find();    handled = 1; }  /* Ctrl-F */
+        else if ((mods & KMOD_CTRL) && (c == 'r' || c == 'R')) { do_replace(); handled = 1; }  /* Ctrl-R */
+        else if ((mods & KMOD_CTRL) && (c == 'g' || c == 'G')) { do_goto_line(); handled = 1; }  /* Ctrl-G */
+        else if ((mods & KMOD_CTRL) && (c == 'p' || c == 'P')) { do_outline();   handled = 1; }  /* Ctrl-P */
         else if ((mods & KMOD_CTRL) && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { handled = 1; }  /* swallow */
 
         if (!handled) {
@@ -1859,8 +2383,9 @@ int main(int argc, char **argv)
                 if (mods & KMOD_SHIFT) { if (!sel_anchor) { sel_anchor = cur; sel_acol = curx; } }
                 else sel_anchor = 0;
             } else if (sel_anchor && (c == K_BS || c == K_DEL)) {
-                sel_delete(); handled = 1;                 /* delete selection = the edit */
+                undo_record(); sel_delete(); handled = 1;  /* delete selection = the edit */
             } else if (sel_anchor && (c == K_ENTER || c == K_TAB || (c >= 32 && c < 256))) {
+                undo_record(); undo_group = 1;             /* one undo step for delete+insert */
                 sel_delete();                              /* replace: delete then insert */
             }
         }
@@ -1908,6 +2433,22 @@ int main(int argc, char **argv)
             quit = run_current();
             break;
 
+        case K_F4:                      /* follow the line-number reference under the cursor */
+            do_follow_ref();
+            break;
+
+        case K_F6:                      /* find next */
+            find_next();
+            break;
+
+        case K_F8:                      /* jump back */
+            do_jump_back();
+            break;
+
+        case K_F9:                      /* PROC/FN outline */
+            do_outline();
+            break;
+
         case K_F3:
             do_open();
             break;
@@ -1933,6 +2474,10 @@ int main(int argc, char **argv)
                 else if (save_file(filename) < 0) { message("Could not save."); quit = 0; }
             } else if (r != 1) quit = 0;                    /* Cancel / Esc: stay in the editor */
         }                                                   /* Discard (r==1): leave, unsaved */
+
+        /* A run of typed characters coalesces into one undo step; any other key
+         * (movement, edit, command) ends the run so the next char starts fresh. */
+        if (!(c >= 32 && c < 256 && !(mods & (KMOD_CTRL | KMOD_ALT)))) undo_group = 0;
 
         if (curx < body_off()) curx = body_off();           /* never rest inside the gutter number */
         scroll_into_view();

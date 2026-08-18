@@ -1,3 +1,12 @@
+#include "interp_pod.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_files.h"
 // ===========================================================================
 // BerryBasiC — POD executables: the loader and the RUN/PODLOAD/PODFREE/PODINFO/
 // PODCAPS verbs.
@@ -15,24 +24,14 @@
 // declared — every other slot is a refusal stub, so a POD cannot reach for a
 // capability it did not ask for.
 // ===========================================================================
-#define POD_MAX        4                 // resident/running PODs at once
-#define POD_SLOT_SIZE  (2 * 1024 * 1024) // biggest image we host (tcc's is ~0.7 MB)
 
-static unsigned char pod_pool[POD_MAX][POD_SLOT_SIZE] __attribute__((aligned(4096)));
-static unsigned char pod_filebuf[POD_SLOT_SIZE];   // whole-file staging for one load
+unsigned char pod_pool[POD_MAX][POD_SLOT_SIZE] __attribute__((aligned(4096)));
+unsigned char pod_filebuf[POD_SLOT_SIZE];   // whole-file staging for one load
 
-typedef struct {
-    int      used;        // slot occupied
-    int      resident;    // extension kept loaded (its keywords are registered)
-    uint64_t caps;
-    uint32_t image_size, split_off, init_size, entry_off, flags;
-    char     name[16];    // MARK name=, for PODFREE
-    BerryServices svc;      // this POD's capability-gated services table
-} pod_slot_t;
-static pod_slot_t pod_slots[POD_MAX];
+pod_slot_t pod_slots[POD_MAX];
 
 // --- CRC-32C (Castagnoli), matching the writer and the Cortex-A72 crc32cx ---
-static uint32_t pod_crc32c(const unsigned char *p, int n) {
+uint32_t pod_crc32c(const unsigned char *p, int n) {
     uint32_t crc = 0xFFFFFFFFu;
     for (int i = 0; i < n; i++) {
         crc ^= p[i];
@@ -43,18 +42,18 @@ static uint32_t pod_crc32c(const unsigned char *p, int n) {
 }
 
 // Little-endian readers (the file is LE; AArch64 is -mstrict-align so read bytewise).
-static uint16_t pod_rd16(const unsigned char *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static uint32_t pod_rd32(const unsigned char *p) {
+uint16_t pod_rd16(const unsigned char *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+uint32_t pod_rd32(const unsigned char *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-static uint64_t pod_rd64(const unsigned char *p) {
+uint64_t pod_rd64(const unsigned char *p) {
     return (uint64_t)pod_rd32(p) | ((uint64_t)pod_rd32(p + 4) << 32);
 }
-static void pod_wr32(unsigned char *p, uint32_t v) {
+void pod_wr32(unsigned char *p, uint32_t v) {
     p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
     p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
-static void pod_wr64(unsigned char *p, uint64_t v) {
+void pod_wr64(unsigned char *p, uint64_t v) {
     pod_wr32(p, (uint32_t)v); pod_wr32(p + 4, (uint32_t)(v >> 32));
 }
 
@@ -63,67 +62,67 @@ static void pod_wr64(unsigned char *p, uint64_t v) {
 // never calls one (the compiler only lets it reference declared capabilities),
 // but if it does the call is a harmless no-op / failure, never a real service.
 // ---------------------------------------------------------------------------
-static void     pod_dn_puts(const char *a, int b)              { (void)a; (void)b; }
-static void     pod_dn_putc(int a)                             { (void)a; }
-static int      pod_dn_geti(void)                              { return 0; }
-static int      pod_dn_int_i(int a)                            { (void)a; return 0; }
-static int      pod_dn_getnum(const char *a, double *b)        { (void)a; if (b) *b = 0; return 0; }
-static void     pod_dn_setnum(const char *a, double b)         { (void)a; (void)b; }
-static int      pod_dn_getstr(const char *a, char *b, int c)   { (void)a; (void)b; (void)c; return 0; }
-static void     pod_dn_setstr(const char *a, const char *b, int c) { (void)a; (void)b; (void)c; }
-static int      pod_dn_fopen(const char *a, int b)             { (void)a; (void)b; return 0; }
-static int      pod_dn_fread(int a, void *b, int c)            { (void)a; (void)b; (void)c; return -1; }
-static int      pod_dn_fwrite(int a, const void *b, int c)     { (void)a; (void)b; (void)c; return -1; }
-static long     pod_dn_fseek(int a, long b, int c)             { (void)a; (void)b; (void)c; return -1; }
-static void     pod_dn_clear(uint32_t a)                       { (void)a; }
-static void     pod_dn_pixel(int a, int b, uint32_t c)         { (void)a; (void)b; (void)c; }
-static void     pod_dn_rect(int a, int b, int c, int d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
-static int      pod_dn_gmode(int a, int b, int c)              { (void)a; (void)b; (void)c; return -1; }
-static void     pod_dn_gwrite(int a, int b)                    { (void)a; (void)b; }
-static uint32_t pod_dn_timecs(void)                            { return 0; }
-static void    *pod_dn_alloc(unsigned a)                       { (void)a; return 0; }
-static void     pod_dn_free(void *a)                           { (void)a; }
-static void    *pod_dn_realloc(void *a, unsigned b)            { (void)a; (void)b; return 0; }
-static void    *pod_dn_alloca(unsigned a, unsigned b)          { (void)a; (void)b; return 0; }
-static void     pod_dn_icache(const void *a, unsigned long b)  { (void)a; (void)b; }
-static void     pod_dn_blit8(const unsigned char *i, const unsigned int *p, int w, int h, int dx, int dy, int s) { (void)i; (void)p; (void)w; (void)h; (void)dx; (void)dy; (void)s; }
-static int      pod_dn_remove(const char *a)                   { (void)a; return -1; }
-static int      pod_dn_spawn(const char *a, int b, const char *const *c) { (void)a; (void)b; (void)c; return -1; }
-static int      pod_dn_mkdir(const char *a)                    { (void)a; return -1; }
-static int      pod_dn_diropen(const char *a)                  { (void)a; return 0; }   // 0 = failed
-static int      pod_dn_dirread(char *a, int b, int *c, long *d){ (void)a; (void)b; if (c) *c = 0; if (d) *d = 0; return 0; }
-static int      pod_dn_getcwd(char *a, int b)                  { if (a && b > 0) a[0] = 0; return -1; }
-static int      svc_pod_spawn(const char *path, int argc, const char *const *argv);
-static int      svc_pod_mkdir(const char *path) { return stg_mkdir(path); }
+void     pod_dn_puts(const char *a, int b)              { (void)a; (void)b; }
+void     pod_dn_putc(int a)                             { (void)a; }
+int      pod_dn_geti(void)                              { return 0; }
+int      pod_dn_int_i(int a)                            { (void)a; return 0; }
+int      pod_dn_getnum(const char *a, double *b)        { (void)a; if (b) *b = 0; return 0; }
+void     pod_dn_setnum(const char *a, double b)         { (void)a; (void)b; }
+int      pod_dn_getstr(const char *a, char *b, int c)   { (void)a; (void)b; (void)c; return 0; }
+void     pod_dn_setstr(const char *a, const char *b, int c) { (void)a; (void)b; (void)c; }
+int      pod_dn_fopen(const char *a, int b)             { (void)a; (void)b; return 0; }
+int      pod_dn_fread(int a, void *b, int c)            { (void)a; (void)b; (void)c; return -1; }
+int      pod_dn_fwrite(int a, const void *b, int c)     { (void)a; (void)b; (void)c; return -1; }
+long     pod_dn_fseek(int a, long b, int c)             { (void)a; (void)b; (void)c; return -1; }
+void     pod_dn_clear(uint32_t a)                       { (void)a; }
+void     pod_dn_pixel(int a, int b, uint32_t c)         { (void)a; (void)b; (void)c; }
+void     pod_dn_rect(int a, int b, int c, int d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
+int      pod_dn_gmode(int a, int b, int c)              { (void)a; (void)b; (void)c; return -1; }
+void     pod_dn_gwrite(int a, int b)                    { (void)a; (void)b; }
+uint32_t pod_dn_timecs(void)                            { return 0; }
+void    *pod_dn_alloc(unsigned a)                       { (void)a; return 0; }
+void     pod_dn_free(void *a)                           { (void)a; }
+void    *pod_dn_realloc(void *a, unsigned b)            { (void)a; (void)b; return 0; }
+void    *pod_dn_alloca(unsigned a, unsigned b)          { (void)a; (void)b; return 0; }
+void     pod_dn_icache(const void *a, unsigned long b)  { (void)a; (void)b; }
+void     pod_dn_blit8(const unsigned char *i, const unsigned int *p, int w, int h, int dx, int dy, int s) { (void)i; (void)p; (void)w; (void)h; (void)dx; (void)dy; (void)s; }
+int      pod_dn_remove(const char *a)                   { (void)a; return -1; }
+int      pod_dn_spawn(const char *a, int b, const char *const *c) { (void)a; (void)b; (void)c; return -1; }
+int      pod_dn_mkdir(const char *a)                    { (void)a; return -1; }
+int      pod_dn_diropen(const char *a)                  { (void)a; return 0; }   // 0 = failed
+int      pod_dn_dirread(char *a, int b, int *c, long *d){ (void)a; (void)b; if (c) *c = 0; if (d) *d = 0; return 0; }
+int      pod_dn_getcwd(char *a, int b)                  { if (a && b > 0) a[0] = 0; return -1; }
+int      svc_pod_spawn(const char *path, int argc, const char *const *argv);
+int      svc_pod_mkdir(const char *path) { return stg_mkdir(path); }
 // --- refusal stubs for the ABI v4 surface (ungranted -> no-op / harmless) ---
-static double  *pod_dn_numarr(const char *a, int *b)           { (void)a; if (b) *b = 0; return 0; }
-static double  *pod_dn_recarr(const char *a, int *b, int *c)   { (void)a; if (b) *b = 0; if (c) *c = 0; return 0; }
-static int      pod_dn_recfield(const char *a, const char *b)  { (void)a; (void)b; return -1; }
-static int      pod_dn_recget(const char *a, int b, const char *c, char *d, int e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
-static void     pod_dn_recset(const char *a, int b, const char *c, const char *d, int e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
-static long     pod_dn_longi(int a)                            { (void)a; return -1; }
-static int      pod_dn_ii(int a, int b)                        { (void)a; (void)b; return -1; }
-static void     pod_dn_mouse(int *a, int *b, int *c)           { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
-static int      pod_dn_keysdown(int *a, int b)                 { (void)a; (void)b; return -1; }
-static int      pod_dn_aopen(int r)                           { (void)r; return -1; }
-static int      pod_dn_geti0(void)                            { return 0; }
-static int      pod_dn_awrite(const short *s, int f)          { (void)s; return f; }
-static void     pod_dn_aclose(void)                          { }
-static void     pod_dn_scrsz(int *a, int *b)                   { if (a) *a = 0; if (b) *b = 0; }
-static void     pod_dn_glyph(int a, int b, int c, uint32_t d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
-static uint32_t pod_dn_getpix(int a, int b)                    { (void)a; (void)b; return 0; }
-static void     pod_dn_circ(int a, int b, int c, uint32_t d)   { (void)a; (void)b; (void)c; (void)d; }
-static void     pod_dn_fpoly(const int *a, int b, uint32_t c)  { (void)a; (void)b; (void)c; }
-static void     pod_dn_clip4(int a, int b, int c, int d)       { (void)a; (void)b; (void)c; (void)d; }
-static void     pod_dn_void(void)                              { }
-static void     pod_dn_iii(int a, int b, int c)               { (void)a; (void)b; (void)c; }
-static void     pod_dn_pline(const int *a, int b, int c, uint32_t d) { (void)a; (void)b; (void)c; (void)d; }
-static int      pod_dn_fontload(const char *a)                 { (void)a; return 0; }
-static void     pod_dn_gtext(int a, int b, const char *c, int d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
+double  *pod_dn_numarr(const char *a, int *b)           { (void)a; if (b) *b = 0; return 0; }
+double  *pod_dn_recarr(const char *a, int *b, int *c)   { (void)a; if (b) *b = 0; if (c) *c = 0; return 0; }
+int      pod_dn_recfield(const char *a, const char *b)  { (void)a; (void)b; return -1; }
+int      pod_dn_recget(const char *a, int b, const char *c, char *d, int e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
+void     pod_dn_recset(const char *a, int b, const char *c, const char *d, int e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
+long     pod_dn_longi(int a)                            { (void)a; return -1; }
+int      pod_dn_ii(int a, int b)                        { (void)a; (void)b; return -1; }
+void     pod_dn_mouse(int *a, int *b, int *c)           { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
+int      pod_dn_keysdown(int *a, int b)                 { (void)a; (void)b; return -1; }
+int      pod_dn_aopen(int r)                           { (void)r; return -1; }
+int      pod_dn_geti0(void)                            { return 0; }
+int      pod_dn_awrite(const short *s, int f)          { (void)s; return f; }
+void     pod_dn_aclose(void)                          { }
+void     pod_dn_scrsz(int *a, int *b)                   { if (a) *a = 0; if (b) *b = 0; }
+void     pod_dn_glyph(int a, int b, int c, uint32_t d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
+uint32_t pod_dn_getpix(int a, int b)                    { (void)a; (void)b; return 0; }
+void     pod_dn_circ(int a, int b, int c, uint32_t d)   { (void)a; (void)b; (void)c; (void)d; }
+void     pod_dn_fpoly(const int *a, int b, uint32_t c)  { (void)a; (void)b; (void)c; }
+void     pod_dn_clip4(int a, int b, int c, int d)       { (void)a; (void)b; (void)c; (void)d; }
+void     pod_dn_void(void)                              { }
+void     pod_dn_iii(int a, int b, int c)               { (void)a; (void)b; (void)c; }
+void     pod_dn_pline(const int *a, int b, int c, uint32_t d) { (void)a; (void)b; (void)c; (void)d; }
+int      pod_dn_fontload(const char *a)                 { (void)a; return 0; }
+void     pod_dn_gtext(int a, int b, const char *c, int d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
 
 // Fill a services table: every slot a refusal stub, then the granted groups
 // overwritten with the real service callbacks (defined in interp_seed.inc).
-static void pod_build_svc(BerryServices *s, uint64_t caps) {
+void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->abi_version = BERRY_ABI_VERSION;
     s->puts = pod_dn_puts; s->putc = pod_dn_putc; s->getkey = pod_dn_geti; s->inkey = pod_dn_int_i;
     s->get_num = pod_dn_getnum; s->set_num = pod_dn_setnum;
@@ -227,23 +226,13 @@ static void pod_build_svc(BerryServices *s, uint64_t caps) {
 // A parsed POD file. All pointers are into pod_filebuf, valid until the next
 // load. pod_open() fills it (verifying every checksum) or raises and returns 0.
 // ---------------------------------------------------------------------------
-typedef struct {
-    uint64_t caps;
-    uint32_t image_size, split_off, init_size, entry_off, flags, build_epoch;
-    uint16_t abi;
-    const unsigned char *imag; int imag_len;
-    const unsigned char *keyw; int keyw_len;
-    const unsigned char *rloc; int rloc_len;
-    const unsigned char *mark; int mark_len;
-    const unsigned char *need; int need_len;
-} pod_image_t;
 
 // Read a POD file into pod_filebuf and verify it end to end (magic, header CRC,
 // declared file_size, every chunk CRC, payload CRC and the SEAL). Fills *im.
 // Returns 1 on success; on failure raises a BASIC error and returns 0. With
 // silent_missing set, a not-found file returns -1 WITHOUT raising, so a caller
 // probing for an optional file (the /sys command dispatch) can fall through.
-static int pod_open(const char *path, pod_image_t *im, int silent_missing) {
+int pod_open(const char *path, pod_image_t *im, int silent_missing) {
     for (int i = 0; i < (int)sizeof *im; i++) ((char *)im)[i] = 0;
 
     int len = stg_read(path, (char *)pod_filebuf, POD_SLOT_SIZE);
@@ -314,7 +303,7 @@ static int pod_open(const char *path, pod_image_t *im, int silent_missing) {
 
 // Copy a verified image into slot `si`, apply relocations, make it executable,
 // and build its services table. Returns the image base pointer.
-static unsigned char *pod_instantiate(int si, const pod_image_t *im) {
+unsigned char *pod_instantiate(int si, const pod_image_t *im) {
     unsigned char *base = pod_pool[si];
     for (uint32_t i = 0; i < im->image_size; i++) base[i] = 0;       // clears BSS
     for (int i = 0; i < im->imag_len; i++) base[i] = im->imag[i];
@@ -347,14 +336,14 @@ static unsigned char *pod_instantiate(int si, const pod_image_t *im) {
     return base;
 }
 
-static int pod_free_slot(void) {
+int pod_free_slot(void) {
     for (int i = 0; i < POD_MAX; i++) if (!pod_slots[i].used) return i;
     return -1;
 }
 
 // The MARK value for a key (e.g. "name"), copied NUL-terminated into out. MARK
 // is a run of NUL-terminated "key=value" records. Returns 1 if found.
-static int pod_mark_get(const pod_image_t *im, const char *key, char *out, int outsz) {
+int pod_mark_get(const pod_image_t *im, const char *key, char *out, int outsz) {
     if (!im->mark) return 0;
     const unsigned char *p = im->mark, *end = p + im->mark_len;
     while (p < end) {
@@ -386,7 +375,7 @@ static int pod_mark_get(const pod_image_t *im, const char *key, char *out, int o
 // are typed as commands, so a bare name (PODINFO HELLO) is the norm. The keyword
 // is already consumed and the path is the current token, so rewind the cursor to
 // its start and read it raw.
-static int pod_arg_path(char *path, int pathsz) {
+int pod_arg_path(char *path, int pathsz) {
     lx = tok_start;
     return read_path(path, pathsz, ".POD");
 }
@@ -394,7 +383,7 @@ static int pod_arg_path(char *path, int pathsz) {
 // Same .POD default, but from a string *expression* - for PODCAPS(...), which is
 // a value function used inside expressions where a variable (PODCAPS(f$)) or a
 // built path must still evaluate rather than be taken literally.
-static int pod_expr_path(char *path, int pathsz) {
+int pod_expr_path(char *path, int pathsz) {
     value_t v = eval_expr();
     if (g_err) return 0;
     if (!v.is_str) { err("Expected a file name"); return 0; }
@@ -408,17 +397,16 @@ static int pod_expr_path(char *path, int pathsz) {
 // ===========================================================================
 // Running a program POD: RUN "NAME.POD" [, args$], and the /sys command shell.
 // ===========================================================================
-static double g_pod_status;         // exit status of the last program POD
+double g_pod_status;         // exit status of the last program POD
 
 // argv storage for one program run (a POD sees these for the duration of pod_main).
-static char        pod_argbuf[LINE_LEN + 16];
-static const char *pod_argv[40];
-enum { POD_MAX_ARGV = 40 };
+char        pod_argbuf[LINE_LEN + 16];
+const char *pod_argv[40];
 
 // Split a raw command tail into argv[1..], with argv[0] set to `name`. Tokens are
 // whitespace-separated; a "double-quoted" run is one token with the quotes
 // stripped (so file names with spaces survive). Returns argc.
-static int pod_split_args(const char *name, const char *raw) {
+int pod_split_args(const char *name, const char *raw) {
     int argc = 0, w = 0;
     // argv[0] = the command / program name
     pod_argv[argc++] = pod_argbuf + w;
@@ -444,7 +432,7 @@ static int pod_split_args(const char *name, const char *raw) {
 
 // Instantiate an already-verified program POD in a transient slot, run its
 // pod_main(svc, argc, argv), free the slot, and record the exit status.
-static void pod_exec_program(pod_image_t *im, int argc, const char *const *argv) {
+void pod_exec_program(pod_image_t *im, int argc, const char *const *argv) {
     if (im->flags & POD_KIND_EXTENSION) { err("That POD is an extension; use PODLOAD"); return; }
     int si = pod_free_slot();
     if (si < 0) { err("Too many PODs loaded"); return; }
@@ -462,7 +450,7 @@ static void pod_exec_program(pod_image_t *im, int argc, const char *const *argv)
 // code on failure. It saves/restores g_err so a load failure is reported to the
 // caller as a return value rather than aborting the BASIC program; the spawned
 // POD runs in its own slot with its own capability-gated table.
-static int pod_spawn(const char *path, int argc, const char *const *argv) {
+int pod_spawn(const char *path, int argc, const char *const *argv) {
     int saved_err = g_err;
     g_err = 0;
     pod_image_t im;
@@ -479,12 +467,12 @@ static int pod_spawn(const char *path, int argc, const char *const *argv) {
     g_err = saved_err;
     return rc != 0 ? -4 : status;
 }
-static int svc_pod_spawn(const char *path, int argc, const char *const *argv) {
+int svc_pod_spawn(const char *path, int argc, const char *const *argv) {
     return pod_spawn(path, argc, argv);
 }
 
 // basename of a path (after the last '/'), minus any extension, into out.
-static void pod_basename(const char *path, char *out, int outsz) {
+void pod_basename(const char *path, char *out, int outsz) {
     const char *b = path;
     for (const char *q = path; *q; q++) if (*q == '/') b = q + 1;
     int n = 0;
@@ -493,7 +481,7 @@ static void pod_basename(const char *path, char *out, int outsz) {
 }
 
 // RUN "NAME.POD" [, args$] — load and execute a program POD.
-static void pod_run_program(void) {
+void pod_run_program(void) {
     char path[96];
     if (!pod_arg_path(path, sizeof path)) return;
 
@@ -525,7 +513,7 @@ static void pod_run_program(void) {
 // is the raw text after it, up to end of line. Returns 1 if it was a /sys
 // command (ran, or raised a real error); 0 if there is no such command (so the
 // caller falls back to treating the word as a variable).
-static int sys_try_command(const char *name, const char *rawtail) {
+int sys_try_command(const char *name, const char *rawtail) {
     char path[64];
     int p = 0; const char *pre = "/sys/";
     while (*pre) path[p++] = *pre++;
@@ -546,7 +534,7 @@ static int sys_try_command(const char *name, const char *rawtail) {
 // ===========================================================================
 // PODLOAD "NAME.POD" — load an extension POD and register its keywords.
 // ===========================================================================
-static void stmt_podload(void) {
+void stmt_podload(void) {
     lex_next();                                         // consume PODLOAD
     char path[96];
     if (!pod_arg_path(path, sizeof path)) return;
@@ -602,7 +590,7 @@ static void stmt_podload(void) {
 }
 
 // Remove every keyword owned by slot `si` from the shared table (compacting it).
-static void pod_unregister_keywords(int si) {
+void pod_unregister_keywords(int si) {
     int w = 0;
     for (int r = 0; r < seed_kw_n; r++) {
         if (seed_kw_tab[r].is_pod && seed_kw_tab[r].slot == si) continue;   // drop it
@@ -613,7 +601,7 @@ static void pod_unregister_keywords(int si) {
 }
 
 // PODFREE "NAME" — unload a resident extension POD by its (MARK) name.
-static void stmt_podfree(void) {
+void stmt_podfree(void) {
     lex_next();                                         // consume PODFREE
     value_t v = eval_expr();
     if (g_err) return;
@@ -631,7 +619,7 @@ static void stmt_podfree(void) {
 }
 
 // Drop every loaded POD and its keywords (called on NEW).
-static void pod_reset(void) {
+void pod_reset(void) {
     for (int i = 0; i < POD_MAX; i++) {
         if (pod_slots[i].used && pod_slots[i].resident) pod_unregister_keywords(i);
         pod_slots[i].used = 0; pod_slots[i].resident = 0;
@@ -650,12 +638,12 @@ static const struct { uint64_t bit; const char *name; } pod_cap_names[] = {
     { POD_CAP_RAWMEM,"RAWMEM" }, { POD_CAP_CORES,"CORES" }, { POD_CAP_NET,"NET" },
 };
 
-static void pod_puts(const char *s) { int n = 0; while (s[n]) n++; con_putsn(s, n); }
-static void pod_line(const char *label, const char *val) {
+void pod_puts(const char *s) { int n = 0; while (s[n]) n++; con_putsn(s, n); }
+void pod_line(const char *label, const char *val) {
     pod_puts(label); pod_puts(val); con_putc('\n');
 }
 
-static void stmt_podinfo(void) {
+void stmt_podinfo(void) {
     lex_next();                                         // consume PODINFO
     char path[96];
     if (!pod_arg_path(path, sizeof path)) return;
@@ -698,7 +686,7 @@ static void stmt_podinfo(void) {
 
 // = PODCAPS("NAME.POD") — the capability bitmask, for a program that wants to
 // check before running. Current token is PODCAPS.
-static value_t eval_podcaps(void) {
+value_t eval_podcaps(void) {
     lex_next();                                         // consume PODCAPS
     if (!expect(T_LP)) return v_num(0);
     char path[96];

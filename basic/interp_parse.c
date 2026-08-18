@@ -1,10 +1,18 @@
+#include "interp_parse.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_seed.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_pod.h"
+#include "interp_call.h"
 // ===========================================================================
 // BerryBasiC — evaluator support: forward decls, argument & subscript helpers, RND
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_parse.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // ---------------------------------------------------------------------------
 // Expression evaluator (recursive descent), now value-typed (number | string).
@@ -15,19 +23,19 @@
 //   primary := NUM | STR | VAR | func(...) | '(' expr ')'
 // ---------------------------------------------------------------------------
 
-static value_t eval_expr(void);
-static void    call_proc(int is_fn, value_t *retval);   // PROC/FN call (defined later)
-static void    call_named(int is_fn, const char *name, value_t *retval);
-static int     find_fn_def(const char *name);
+value_t eval_expr(void);
+void    call_proc(int is_fn, value_t *retval);   // PROC/FN call (defined later)
+void    call_named(int is_fn, const char *name, value_t *retval);
+int     find_fn_def(const char *name);
 
 // Pull a required numeric/string operand, raising TYPE MISMATCH otherwise.
-static double need_num(void) {
+double need_num(void) {
     value_t v = eval_expr();
     if (g_err) return 0;
     if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return 0; }
     return v.num;
 }
-static value_t need_str(void) {
+value_t need_str(void) {
     value_t v = eval_expr();
     if (g_err) return v_num(0);
     if (!v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
@@ -35,7 +43,7 @@ static value_t need_str(void) {
 }
 
 // Human-readable name of a token type, for "Expected X" error messages.
-static const char *tok_name(int t) {
+const char *tok_name(int t) {
     switch (t) {
         case T_EOL:   return "end of line";
         case T_NUM:   return "a number";
@@ -62,13 +70,13 @@ static const char *tok_name(int t) {
     }
 }
 
-static int expect(int t) {              // consume token t or report what's missing
+int expect(int t) {              // consume token t or report what's missing
     if (tok != t) { err2("Expected ", tok_name(t)); return 0; }
     lex_next();
     return 1;
 }
 
-static value_t str_in_scratch(const char *src, int len) {
+value_t str_in_scratch(const char *src, int len) {
     if (len > MAX_STR) len = MAX_STR;
     char *p = scratch_alloc(len);
     if (!p) return v_num(0);
@@ -77,7 +85,7 @@ static value_t str_in_scratch(const char *src, int len) {
 }
 
 // Parse "(e1[,e2,...])" into subs[], with tok currently at '('. Returns count.
-static int parse_subscripts(int *subs, int *nsub) {
+int parse_subscripts(int *subs, int *nsub) {
     lex_next();                              // consume '('
     int n = 0;
     for (;;) {
@@ -97,7 +105,7 @@ static int parse_subscripts(int *subs, int *nsub) {
 // Resolve an array element reference (tok at '('): parse subscripts, auto-DIM
 // to 0..10 per dimension if the array does not exist, and return the pool index
 // in *idx and the array in *out.
-static int arr_elem(const char *name, int is_str, int *idx, arr_t **out) {
+int arr_elem(const char *name, int is_str, int *idx, arr_t **out) {
     int subs[MAX_DIMS];
     int nsub;
     if (!parse_subscripts(subs, &nsub)) return 0;
@@ -130,7 +138,7 @@ static int arr_elem(const char *name, int is_str, int *idx, arr_t **out) {
 // here: the lexer hands those over as T_LABEL, which is never keyword-matched,
 // so accepting keywords here is what keeps `TYPE point : size` and `p.size`
 // agreeing on the same name. Returns 0 on error, having raised `what`.
-static int read_name_word(char *out, const char *what) {
+int read_name_word(char *out, const char *what) {
     if (tok == T_VAR) { s_copy(out, tok_var, NAME_LEN); lex_next(); return 1; }
     if (tok == T_KW) {
         const char *s = is_seed_kw(tok_kw) ? seed_kw_name(tok_kw - KW_SEED_DYN)
@@ -142,12 +150,11 @@ static int read_name_word(char *out, const char *what) {
 }
 
 // Where a resolved field lives, and what kind it is.
-typedef struct { int f; int slot; int is_str; int is_int; } fieldref_t;
 
 // Parse the element selector of a record reference: '(index)' for an array of
 // records, nothing at all for a scalar one. On entry the current token is just
 // past the variable's name. Returns 0 on error, having raised it.
-static int rec_index(const var_t *v, int *e) {
+int rec_index(const var_t *v, int *e) {
     *e = 0;
     if (tok == T_LP) {
         lex_next();
@@ -166,7 +173,7 @@ static int rec_index(const var_t *v, int *e) {
 // token is whatever followed its name: an optional '(index)' selecting an
 // element, then the '.field' (a T_LABEL - see the lexer). On return the current
 // token is past the field name. Returns 0 on error, having raised it.
-static int rec_field_ref(const var_t *v, fieldref_t *fr) {
+int rec_field_ref(const var_t *v, fieldref_t *fr) {
     int e;
     if (!rec_index(v, &e)) return 0;
     if (tok != T_LABEL) { err("Expected a field name like p.x"); return 0; }
@@ -182,7 +189,7 @@ static int rec_field_ref(const var_t *v, fieldref_t *fr) {
 }
 
 // Read a record field's current value.
-static value_t rec_field_get(const var_t *v) {
+value_t rec_field_get(const var_t *v) {
     fieldref_t fr;
     if (!rec_field_ref(v, &fr)) return v_num(0);
     return fr.is_str ? v_str(rec_strs[fr.slot].sptr, rec_strs[fr.slot].slen)
@@ -196,15 +203,10 @@ static value_t rec_field_get(const var_t *v) {
 
 // A resolved target: a scalar variable, an array element, or a record field.
 // Exactly one of nump/strp is set, according to is_str.
-typedef struct {
-    int        is_str, is_int;
-    double    *nump;
-    strdesc_t *strp;
-} target_t;
 
 // Parse a target at the current token - name, name(subs), p.field, e(3).field -
 // and resolve where its value lives. Returns 0 on error, having raised it.
-static int parse_target(target_t *t) {
+int parse_target(target_t *t) {
     if (tok != T_VAR) { err("Expected a variable name"); return 0; }
     char name[NAME_LEN];
     s_copy(name, tok_var, NAME_LEN);
@@ -237,34 +239,34 @@ static int parse_target(target_t *t) {
     return 1;
 }
 
-static void target_put_num(const target_t *t, double x) {
+void target_put_num(const target_t *t, double x) {
     if (t->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
     *t->nump = trunc_int(t->is_int, x);
 }
-static void target_put_str(const target_t *t, const char *s, int len) {
+void target_put_str(const target_t *t, const char *s, int len) {
     if (!t->is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
     str_store_to(t->strp, s, len);
 }
 
-static long long time_base = 0;     // TIME (centiseconds) = con_micros()/10000 - time_base
-static unsigned long rnd_seed = 22695477UL;
-static double rnd_last = 0.0;
-static double rnd_float(void) {         // pseudo-random in [0.0, 1.0)
+long long time_base = 0;     // TIME (centiseconds) = con_micros()/10000 - time_base
+unsigned long rnd_seed = 22695477UL;
+double rnd_last = 0.0;
+double rnd_float(void) {         // pseudo-random in [0.0, 1.0)
     rnd_seed = rnd_seed * 1103515245UL + 12345UL;
     unsigned long r = (rnd_seed >> 16) & 0x7FFFFFFFUL;
     rnd_last = (double)r / 2147483648.0;   // / 2^31
     return rnd_last;
 }
 
-static value_t eval_primary(void);      // a function argument is a factor (primary)
-static value_t prim_base(void);         // a primary without the ?/! indirection postfix
+value_t eval_primary(void);      // a function argument is a factor (primary)
+value_t prim_base(void);         // a primary without the ?/! indirection postfix
 
 // Parse a single function argument as the next factor: a primary expression,
 // which is either a parenthesised group or a bare value. This makes the
 // single-argument math functions paren-optional, BBC-style (SQR 3 = SQR(3),
 // SQR(3) and SQR(X+1) all work, and SQR binds tighter than the operators around
 // it, so X * SQR 3 / 6 is X * (SQR 3) / 6).
-static double factor_num(void) {
+double factor_num(void) {
     value_t v = eval_primary();
     if (g_err) return 0;
     if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return 0; }
@@ -273,14 +275,14 @@ static double factor_num(void) {
 
 // Parse a file channel operand: the '#' prefix followed by a numeric factor (so
 // BGET#ch+1 is (BGET#ch)+1, and BGET#(a+1) uses parentheses). Returns the channel.
-static int read_channel(void) {
+int read_channel(void) {
     if (tok != T_HASH) { err("Expected '#' before a file channel"); return 0; }
     lex_next();
     return (int)factor_num();
 }
 
 // Copy a BASIC string value into a NUL-terminated C filename buffer.
-static void copy_fname(value_t s, char *out, int outsz) {
+void copy_fname(value_t s, char *out, int outsz) {
     int n = (s.len < outsz - 1) ? s.len : outsz - 1;
     for (int i = 0; i < n; i++) out[i] = s.str[i];
     out[n] = 0;
@@ -296,7 +298,7 @@ static void copy_fname(value_t s, char *out, int outsz) {
 // only when the name contains spaces. Callers must position `lx` just after the
 // keyword with the argument NOT yet lexed (do not lex_next first); a caller whose
 // argument is already the current token rewinds with `lx = tok_start;` first.
-static int read_path(char *out, int outsz, const char *defext) {
+int read_path(char *out, int outsz, const char *defext) {
     while (is_space(*lx)) lx++;
     int n = 0;
     if (*lx == '"') {                            // quoted: literal between the quotes
@@ -328,16 +330,16 @@ static int read_path(char *out, int outsz, const char *defext) {
 // Directory-scan cursor state, shared by DIROPEN / DIRNEXT and the field words
 // DIRNAME$ / DIRSIZE / DIRTYPE / DIRDATE$ / DIRTIME$. Only one scan runs at a
 // time; g_dir_valid says whether g_dirent holds a live entry.
-static stg_dirent g_dirent;
-static int        g_dir_valid;
+stg_dirent g_dirent;
+int        g_dir_valid;
 
-static void fmt_u2(char *p, int v) { p[0] = '0' + (v / 10) % 10; p[1] = '0' + v % 10; }
-static void fmt_date(char *b, int y, int m, int d) {   // "YYYY-MM-DD"
+void fmt_u2(char *p, int v) { p[0] = '0' + (v / 10) % 10; p[1] = '0' + v % 10; }
+void fmt_date(char *b, int y, int m, int d) {   // "YYYY-MM-DD"
     b[0] = '0' + (y / 1000) % 10; b[1] = '0' + (y / 100) % 10;
     b[2] = '0' + (y / 10) % 10;   b[3] = '0' + y % 10;
     b[4] = '-'; fmt_u2(b + 5, m); b[7] = '-'; fmt_u2(b + 8, d); b[10] = 0;
 }
-static void fmt_time(char *b, int h, int m) {          // "HH:MM"
+void fmt_time(char *b, int h, int m) {          // "HH:MM"
     fmt_u2(b, h); b[2] = ':'; fmt_u2(b + 3, m); b[5] = 0;
 }
 

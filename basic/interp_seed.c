@@ -1,10 +1,19 @@
+#include "interp_seed.h"
+#include "interp_util.h"
+#include "interp_data.h"
+#include "interp_lexer.h"
+#include "interp_parse.h"
+#include "interp_eval.h"
+#include "interp_stmt.h"
+#include "interp_files.h"
+#include "interp_pod.h"
+#include "interp_control.h"
 // ===========================================================================
 // BerryBasiC — native seeds: heap, collections (DICT/LIST/TREE), seed-service vtable
 //
-// This file is a fragment of the interpreter and is #included by basic.c.
-// It is NOT a standalone translation unit: it shares the single translation
-// unit's static state and is compiled only as part of basic.c. Do not add it
-// to the build system or compile it on its own.
+// A separately-compiled module of the interpreter. Its cross-module
+// interface is declared in interp_seed.h (extern globals + documented function
+// prototypes) and interp_types.h (the shared data types).
 // ===========================================================================
 // ---------------------------------------------------------------------------
 // Native seeds: small chunks of position-independent AArch64 machine code that
@@ -13,27 +22,25 @@
 // the BerryServices vtable below, which is what keeps them self-contained. See
 // seed/seed.h for the ABI.
 // ---------------------------------------------------------------------------
-enum { SEED_MAX_ARGS = 16 };
 
 // A loaded SEED/CALL seed. There is no fixed number of them and no fixed size:
 // each seed's code is a page-aligned block carved from the run heap and sized to
 // the blob, and the record table grows on demand. Both are wiped on RUN/NEW (a
 // program reloads its own seeds), so seed_recs is reset to 0 there. Handle =
 // record index + 1.
-typedef struct { int used; seed_entry entry; } seed_rec_t;
-static seed_rec_t *seed_recs;          // grown from the run heap; 0 after a reset
-static int         seed_rec_n;         // records touched (high-water within the array)
-static int         seed_rec_cap;       // allocated capacity
+seed_rec_t *seed_recs;          // grown from the run heap; 0 after a reset
+int         seed_rec_n;         // records touched (high-water within the array)
+int         seed_rec_cap;       // allocated capacity
 
-static void *seed_alloc(unsigned nbytes);   // the run-heap allocator, defined below
+void *seed_alloc(unsigned nbytes);   // the run-heap allocator, defined below
 
 // Drop every loaded seed. The blobs and this table live in the run heap, which
 // seed_heap_reset() wipes on RUN/NEW, so we just forget the pointers.
-static void seed_recs_reset(void) { seed_recs = 0; seed_rec_n = 0; seed_rec_cap = 0; }
+void seed_recs_reset(void) { seed_recs = 0; seed_rec_n = 0; seed_rec_cap = 0; }
 
 // Reserve a fresh record and return its index, or -1 on OOM. Reuses a freed slot
 // when one exists, else appends (growing the array from the run heap).
-static int seed_rec_alloc(void) {
+int seed_rec_alloc(void) {
     for (int i = 0; i < seed_rec_n; i++) if (!seed_recs[i].used) return i;
     if (seed_rec_n >= seed_rec_cap) {
         int ncap = seed_rec_cap ? seed_rec_cap * 2 : 8;
@@ -47,15 +54,15 @@ static int seed_rec_alloc(void) {
 
 // A page-aligned executable block from the run heap, sized to nbytes (rounded up
 // to a page). Not individually freed: reclaimed wholesale by the RUN/NEW reset.
-static void *seed_alloc_page(unsigned nbytes) {
+void *seed_alloc_page(unsigned nbytes) {
     unsigned asz = (nbytes + 4095u) & ~4095u;
     char *raw = (char *)seed_alloc(asz + 4096u);        // slack to reach a page boundary
     if (!raw) return 0;
     return (void *)(((unsigned long)raw + 4095u) & ~(unsigned long)4095u);
 }
 
-static char g_seed_retstr[MAX_STR];   // string result staged by set_return_str
-static int  g_seed_retstr_len;        // -1 = the last call set no string
+char g_seed_retstr[MAX_STR];   // string result staged by set_return_str
+int  g_seed_retstr_len;        // -1 = the last call set no string
 
 // --- seed heap -------------------------------------------------------------
 // A general-purpose allocator for seeds (BASIC's own string/array storage is
@@ -63,19 +70,14 @@ static int  g_seed_retstr_len;        // -1 = the last call set no string
 // returns 0 when exhausted. The whole arena is reclaimed at each RUN/NEW, so a
 // seed that forgets to free leaks only within the current run. 16-byte aligned
 // blocks, suitable for doubles and NEON.
-#define SEED_HEAP_SIZE  (48u * 1024u * 1024u)  // shared by seeds and POD programs;
                                                 // tcc-as-a-POD needs elbow room to compile
 
-typedef union seed_hdr_u {
-    struct { union seed_hdr_u *next; unsigned size; } s;  // size in header units
-    long double _align;                                   // force 16-byte units
-} seed_blk;
 
 // 4096-aligned so a page-aligned sub-allocation is a whole number of blocks from
 // the base (native seed code needs a page-aligned load address for ADRP+ADD).
-static seed_blk seed_heap[SEED_HEAP_SIZE / sizeof(seed_blk)] __attribute__((aligned(4096)));
-static seed_blk seed_freelist;        // circular free-list sentinel
-static seed_blk *seed_freep;          // 0 until first use / after a reset
+seed_blk seed_heap[SEED_HEAP_SIZE / sizeof(seed_blk)] __attribute__((aligned(4096)));
+seed_blk seed_freelist;        // circular free-list sentinel
+seed_blk *seed_freep;          // 0 until first use / after a reset
 
 // Session-persistent high-water mark. Native seed code (both SEED/CALL blobs and
 // keyword seeds) has to run from executable RAM; there is no OS page allocator,
@@ -85,15 +87,15 @@ static seed_blk *seed_freep;          // 0 until first use / after a reset
 // DOWN from the top of the arena, past seed_sys_top, which the reset leaves alone;
 // the K&R free-list only ever covers [seed_heap, seed_sys_top). When no keyword
 // seeds are loaded, seed_sys_top is the arena end and the heap behaves as before.
-static seed_blk *seed_sys_top;        // 0 until first use; else the persistent floor
+seed_blk *seed_sys_top;        // 0 until first use; else the persistent floor
 
-static void seed_heap_reset(void) { seed_freep = 0; }     // lazily re-inited
+void seed_heap_reset(void) { seed_freep = 0; }     // lazily re-inited
 
 // Report the run heap's used/total bytes (for the F12 system overlay). Total is
 // the run-heap region [seed_heap, seed_sys_top); free is the sum of the K&R
 // free-list blocks (before first use the whole region is free). Sizes are in
 // header units; ×sizeof(seed_blk) gives bytes.
-static void seed_heap_stats(unsigned long *used, unsigned long *total) {
+void seed_heap_stats(unsigned long *used, unsigned long *total) {
     unsigned long tot = seed_sys_top
         ? (unsigned long)(seed_sys_top - seed_heap)
         : (unsigned long)(sizeof(seed_heap) / sizeof(seed_blk));
@@ -122,7 +124,7 @@ void sys_meminfo(sysmem_t *m) {
     m->dim_total  = (unsigned long)DIM_HEAP_SIZE;
 }
 
-static void seed_heap_init(void) {
+void seed_heap_init(void) {
     if (!seed_sys_top) seed_sys_top = seed_heap + sizeof(seed_heap) / sizeof(seed_blk);
     seed_blk *base = seed_heap;
     base->s.size = (unsigned)(seed_sys_top - seed_heap);   // run heap = below the floor
@@ -137,7 +139,7 @@ static void seed_heap_init(void) {
 // BEFORE the run heap is first used, so moving the floor down here never disturbs
 // a live allocation; if the run heap is already in use we refuse rather than
 // corrupt it (return 0). Never individually freed: it lives for the session.
-static void *seed_persist_page(unsigned nbytes) {
+void *seed_persist_page(unsigned nbytes) {
     if (nbytes == 0) return 0;
     if (seed_freep) return 0;    // run heap already live: only safe before first use (boot)
     if (!seed_sys_top) seed_sys_top = seed_heap + sizeof(seed_heap) / sizeof(seed_blk);
@@ -151,7 +153,7 @@ static void *seed_persist_page(unsigned nbytes) {
     return top;
 }
 
-static void *seed_alloc(unsigned nbytes) {
+void *seed_alloc(unsigned nbytes) {
     if (nbytes == 0) return 0;
     if (!seed_freep) seed_heap_init();
     unsigned need = (nbytes + sizeof(seed_blk) - 1) / sizeof(seed_blk) + 1;  // +header
@@ -167,7 +169,7 @@ static void *seed_alloc(unsigned nbytes) {
     }
 }
 
-static void seed_free(void *ap) {
+void seed_free(void *ap) {
     if (!ap) return;
     seed_blk *bp = (seed_blk *)ap - 1;
     if (bp < seed_heap || bp >= seed_heap + sizeof(seed_heap) / sizeof(seed_blk))
@@ -189,7 +191,7 @@ static void seed_free(void *ap) {
 }
 
 // Usable payload bytes of an allocated block (its header records the size).
-static unsigned seed_block_bytes(void *ap) {
+unsigned seed_block_bytes(void *ap) {
     seed_blk *bp = (seed_blk *)ap - 1;
     if (bp < seed_heap || bp >= seed_heap + sizeof(seed_heap) / sizeof(seed_blk))
         return 0;
@@ -200,7 +202,7 @@ static unsigned seed_block_bytes(void *ap) {
 // that already fits the rounded-up block) keeps the same pointer; otherwise a new
 // block is allocated, the old bytes copied, and the old block freed. On failure
 // the original block is left untouched and 0 is returned (standard semantics).
-static void *seed_realloc(void *ap, unsigned nbytes) {
+void *seed_realloc(void *ap, unsigned nbytes) {
     if (!ap) return seed_alloc(nbytes);
     if (nbytes == 0) { seed_free(ap); return 0; }
     unsigned cur = seed_block_bytes(ap);
@@ -219,7 +221,7 @@ static void *seed_realloc(void *ap, unsigned nbytes) {
 // alignments are plain allocs; for larger ones we over-allocate, split off the
 // unaligned prefix as its own free block, and hand back the aligned remainder
 // (which carries a normal block header, so free/realloc work on it unchanged).
-static void *seed_alloc_aligned(unsigned alignment, unsigned nbytes) {
+void *seed_alloc_aligned(unsigned alignment, unsigned nbytes) {
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) return 0;  // need pow2
     if (alignment <= sizeof(seed_blk)) return seed_alloc(nbytes);
     void *raw = seed_alloc(nbytes + alignment);
@@ -245,15 +247,14 @@ static void *seed_alloc_aligned(unsigned alignment, unsigned nbytes) {
 // ===========================================================================
 
 // A stored value: a number, or a string copied into the general heap.
-typedef struct { int is_str; double num; char *str; int len; } cval_t;
 
-static void cval_clear(cval_t *c) {
+void cval_clear(cval_t *c) {
     if (c->is_str && c->str) seed_free(c->str);
     c->is_str = 0; c->num = 0; c->str = 0; c->len = 0;
 }
 // Overwrite *c with the BASIC value v (a string is copied into the heap so it
 // survives independently of BASIC's own GC heap). Returns 0 (and raises) on OOM.
-static int cval_store(cval_t *c, value_t v) {
+int cval_store(cval_t *c, value_t v) {
     char *p = 0;
     if (v.is_str && v.len > 0) {
         p = (char *)seed_alloc((unsigned)v.len);
@@ -267,19 +268,18 @@ static int cval_store(cval_t *c, value_t v) {
 }
 // Read a stored value as a typed BASIC value. The numeric/string variants raise
 // a type mismatch if the stored value is the other kind (like A vs A$).
-static value_t cval_num(cval_t *c) {
+value_t cval_num(cval_t *c) {
     if (c->is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
     return v_num(c->num);
 }
-static value_t cval_strv(cval_t *c) {
+value_t cval_strv(cval_t *c) {
     if (!c->is_str) { err("Type mismatch: numbers and text can't be mixed"); return v_num(0); }
     return str_in_scratch(c->str, c->len);
 }
 
 // --- LIST: a growable array of values --------------------------------------
-typedef struct { cval_t *item; int len, cap; } list_t;
 
-static int list_reserve(list_t *L, int need) {
+int list_reserve(list_t *L, int need) {
     if (need <= L->cap) return 1;
     int cap = L->cap ? L->cap * 2 : 8;
     while (cap < need) cap *= 2;
@@ -287,7 +287,7 @@ static int list_reserve(list_t *L, int need) {
     if (!n) { err("Out of memory"); return 0; }
     L->item = n; L->cap = cap; return 1;
 }
-static int list_ins(list_t *L, int i, value_t v) {   // insert before index i (0..len)
+int list_ins(list_t *L, int i, value_t v) {   // insert before index i (0..len)
     if (i < 0 || i > L->len) { err("Index out of range"); return 0; }
     if (!list_reserve(L, L->len + 1)) return 0;
     cval_t tmp = {0, 0, 0, 0};
@@ -297,7 +297,7 @@ static int list_ins(list_t *L, int i, value_t v) {   // insert before index i (0
     L->len++;
     return 1;
 }
-static void list_del(list_t *L, int i) {
+void list_del(list_t *L, int i) {
     if (i < 0 || i >= L->len) { err("Index out of range"); return; }
     cval_clear(&L->item[i]);
     for (int k = i; k < L->len - 1; k++) L->item[k] = L->item[k + 1];
@@ -305,10 +305,8 @@ static void list_del(list_t *L, int i) {
 }
 
 // --- DICT: an insertion-ordered array of (key, value) entries --------------
-typedef struct { char *key; int klen; cval_t val; } dent_t;
-typedef struct { dent_t *e; int len, cap; } dict_t;
 
-static int dict_find(dict_t *D, const char *key, int klen) {
+int dict_find(dict_t *D, const char *key, int klen) {
     for (int i = 0; i < D->len; i++) {
         if (D->e[i].klen != klen) continue;
         int eq = 1;
@@ -317,7 +315,7 @@ static int dict_find(dict_t *D, const char *key, int klen) {
     }
     return -1;
 }
-static int dict_set(dict_t *D, const char *key, int klen, value_t v) {
+int dict_set(dict_t *D, const char *key, int klen, value_t v) {
     int i = dict_find(D, key, klen);
     if (i >= 0) return cval_store(&D->e[i].val, v);   // update in place
     if (D->len + 1 > D->cap) {
@@ -339,7 +337,7 @@ static int dict_set(dict_t *D, const char *key, int klen, value_t v) {
     D->len++;
     return 1;
 }
-static void dict_del(dict_t *D, const char *key, int klen) {
+void dict_del(dict_t *D, const char *key, int klen) {
     int i = dict_find(D, key, klen);
     if (i < 0) return;
     if (D->e[i].key) seed_free(D->e[i].key);
@@ -349,15 +347,13 @@ static void dict_del(dict_t *D, const char *key, int klen) {
 }
 
 // --- TREE: a binary search tree keyed by number ----------------------------
-typedef struct tnode { double key; cval_t val; struct tnode *l, *r; } tnode_t;
-typedef struct { tnode_t *root; int count; } tree_t;
 
-static tnode_t *tree_find(tree_t *T, double key) {
+tnode_t *tree_find(tree_t *T, double key) {
     tnode_t *c = T->root;
     while (c) { if (key == c->key) return c; c = key < c->key ? c->l : c->r; }
     return 0;
 }
-static int tree_set(tree_t *T, double key, value_t v) {
+int tree_set(tree_t *T, double key, value_t v) {
     tnode_t **link = &T->root, *par = 0;
     while (*link) {
         par = *link;
@@ -372,7 +368,7 @@ static int tree_set(tree_t *T, double key, value_t v) {
     *link = n; T->count++;
     return 1;
 }
-static void tree_del(tree_t *T, double key) {
+void tree_del(tree_t *T, double key) {
     tnode_t *cur = T->root, *par = 0;
     while (cur && cur->key != key) { par = cur; cur = key < cur->key ? cur->l : cur->r; }
     if (!cur) return;                                 // not found
@@ -392,7 +388,7 @@ static void tree_del(tree_t *T, double key) {
     seed_free(cur);
     T->count--;
 }
-static tnode_t *tree_edge(tree_t *T, int rightmost) {  // min (0) or max (1) node
+tnode_t *tree_edge(tree_t *T, int rightmost) {  // min (0) or max (1) node
     tnode_t *c = T->root;
     if (!c) return 0;
     while (rightmost ? c->r : c->l) c = rightmost ? c->r : c->l;
@@ -400,7 +396,7 @@ static tnode_t *tree_edge(tree_t *T, int rightmost) {  // min (0) or max (1) nod
 }
 // The idx-th node in ascending key order (0-based). Iterative in-order walk with
 // an explicit heap stack, so a degenerate (deep) tree can't overflow the C stack.
-static tnode_t *tree_index(tree_t *T, int idx) {
+tnode_t *tree_index(tree_t *T, int idx) {
     if (idx < 0 || idx >= T->count) { err("Index out of range"); return 0; }
     tnode_t **stk = (tnode_t **)seed_alloc((unsigned)(T->count * sizeof(tnode_t *)));
     if (!stk) { err("Out of memory"); return 0; }
@@ -417,16 +413,14 @@ static tnode_t *tree_index(tree_t *T, int idx) {
 }
 
 // --- handle pool ------------------------------------------------------------
-#define COLL_MAX 64
-enum { CT_FREE = 0, CT_DICT, CT_LIST, CT_TREE };
-static struct { int type; void *obj; } colls[COLL_MAX];
+coll_t colls[COLL_MAX];
 
 // Drop every handle. The objects' memory lives in the general heap, which is
 // wiped by seed_heap_reset() on RUN/NEW, so we just clear the table alongside it.
-static void coll_reset(void) {
+void coll_reset(void) {
     for (int i = 0; i < COLL_MAX; i++) { colls[i].type = CT_FREE; colls[i].obj = 0; }
 }
-static double coll_new(int type, unsigned objsize) {
+double coll_new(int type, unsigned objsize) {
     for (int i = 0; i < COLL_MAX; i++) if (colls[i].type == CT_FREE) {
         char *o = (char *)seed_alloc(objsize);
         if (!o) { err("Out of memory"); return 0; }
@@ -439,7 +433,7 @@ static double coll_new(int type, unsigned objsize) {
 }
 // Resolve a handle, requiring a particular type (0 = any). Raises on a bad or
 // wrong-typed handle and returns 0.
-static void *coll_get(double h, int type) {
+void *coll_get(double h, int type) {
     int i = (int)h;
     if (i < 1 || i > COLL_MAX || colls[i - 1].type == CT_FREE) { err("Not a collection"); return 0; }
     if (type && colls[i - 1].type != type) {
@@ -448,7 +442,7 @@ static void *coll_get(double h, int type) {
     }
     return colls[i - 1].obj;
 }
-static int coll_size_of(int type, void *o) {
+int coll_size_of(int type, void *o) {
     if (type == CT_LIST) return ((list_t *)o)->len;
     if (type == CT_DICT) return ((dict_t *)o)->len;
     if (type == CT_TREE) return ((tree_t *)o)->count;
@@ -456,17 +450,17 @@ static int coll_size_of(int type, void *o) {
 }
 
 // --- service callbacks the seed may invoke (names are uppercase + suffix) ---
-static int bas_getkey(void);                      // GET / INKEY, defined just below:
-static int bas_inkey(int cs);                     //   a seed reads the same key stream
+int bas_getkey(void);                      // GET / INKEY, defined just below:
+int bas_inkey(int cs);                     //   a seed reads the same key stream
 
-static void svc_putc(int c)                       { con_putc((char)c); }
-static void svc_puts(const char *s, int len)      { con_putsn(s, len); }
-static void svc_vdu(int b)                         { con_vdu(b); }   // VDU control stream
-static void svc_screen_size(int *c, int *r)        { if (c) *c = con_cols(); if (r) *r = con_rows(); }
-static void svc_con_font(int *w, int *h)           { sgfx_font(w, h); }
-static void svc_con_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg) { sgfx_glyph(px, py, ch, fg, bg); }
-static int  svc_dir_open(const char *path)         { return stg_diropen(path) == 0 ? 1 : 0; }
-static int  svc_dir_read(char *name, int namesz, int *is_dir, long *size) {
+void svc_putc(int c)                       { con_putc((char)c); }
+void svc_puts(const char *s, int len)      { con_putsn(s, len); }
+void svc_vdu(int b)                         { con_vdu(b); }   // VDU control stream
+void svc_screen_size(int *c, int *r)        { if (c) *c = con_cols(); if (r) *r = con_rows(); }
+void svc_con_font(int *w, int *h)           { sgfx_font(w, h); }
+void svc_con_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg) { sgfx_glyph(px, py, ch, fg, bg); }
+int  svc_dir_open(const char *path)         { return stg_diropen(path) == 0 ? 1 : 0; }
+int  svc_dir_read(char *name, int namesz, int *is_dir, long *size) {
     stg_dirent e;
     int r = stg_dirnext(&e);
     if (r != 1) return 0;                                 // 0 = end (or error)
@@ -475,49 +469,49 @@ static int  svc_dir_read(char *name, int namesz, int *is_dir, long *size) {
     if (size)   *size   = e.size;
     return 1;
 }
-static int  svc_getcwd(char *buf, int sz) {
+int  svc_getcwd(char *buf, int sz) {
     const char *c = stg_cwd(); int i = 0;
     if (!buf || sz <= 0) return -1;
     for (; c && c[i] && i < sz - 1; i++) buf[i] = c[i];
     buf[i] = 0;
     return i;
 }
-static int  svc_chdir(const char *path)            { return stg_chdir(path); }
-static void svc_clip_set(const char *d, int n)     { con_clip_set(d, n); }
-static int  svc_clip_get(char *b, int max)         { return con_clip_get(b, max); }
-static int  svc_clip_len(void)                     { return con_clip_len(); }
-static void svc_icache_sync(const void *a, unsigned long n) { icache_sync(a, n); }
-static int  svc_getkey(void)                      { return bas_getkey(); }
-static int  svc_inkey(int cs)                     { return bas_inkey(cs); }
+int  svc_chdir(const char *path)            { return stg_chdir(path); }
+void svc_clip_set(const char *d, int n)     { con_clip_set(d, n); }
+int  svc_clip_get(char *b, int max)         { return con_clip_get(b, max); }
+int  svc_clip_len(void)                     { return con_clip_len(); }
+void svc_icache_sync(const void *a, unsigned long n) { icache_sync(a, n); }
+int  svc_getkey(void)                      { return bas_getkey(); }
+int  svc_inkey(int cs)                     { return bas_inkey(cs); }
 // The call is the poll: nothing services the mouse while a seed runs, so a seed
 // wanting a live pointer calls this in its own loop. Raw framebuffer pixels,
 // exactly as BASIC's MOUSEX/MOUSEY and the gfx_* drawing calls see them.
-static void svc_mouse(int *x, int *y, int *b)     { con_mouse(x, y, b); }
+void svc_mouse(int *x, int *y, int *b)     { con_mouse(x, y, b); }
 // Double buffering: the same back buffer (and the same on/off state) BASIC's
 // BUFFER/FLIP use, so a seed and a program can't each have their own idea of it.
-static int  svc_gfx_backbuffer(int on)            { return con_backbuffer(on); }
-static void svc_gfx_flip(void)                    { con_flip(); }
-static int  svc_gfx_buffered(void)                { return con_buffered(); }
+int  svc_gfx_backbuffer(int on)            { return con_backbuffer(on); }
+void svc_gfx_flip(void)                    { con_flip(); }
+int  svc_gfx_buffered(void)                { return con_buffered(); }
 // Modifier/lock state: not a key, so getkey/inkey can never carry it.
-static int  svc_keymods(void)                     { return con_keymods(); }
-static int  svc_keys_down(int *out, int max)      { return con_keys_down(out, max); }
-static int  svc_audio_open(int rate)              { return snd_pcm_open(rate); }
-static int  svc_audio_avail(void)                 { return snd_pcm_avail(); }
-static int  svc_audio_write(const short *s, int f){ return snd_pcm_write(s, f); }
-static void svc_audio_close(void)                 { snd_pcm_close(); }
+int  svc_keymods(void)                     { return con_keymods(); }
+int  svc_keys_down(int *out, int max)      { return con_keys_down(out, max); }
+int  svc_audio_open(int rate)              { return snd_pcm_open(rate); }
+int  svc_audio_avail(void)                 { return snd_pcm_avail(); }
+int  svc_audio_write(const short *s, int f){ return snd_pcm_write(s, f); }
+void svc_audio_close(void)                 { snd_pcm_close(); }
 // The BASIC graphics mode (1 or 2). gfx_* drawing is always device pixels; this
 // lets a seed convert coordinates BASIC passed in its current mode.
-static int  svc_gfx_mode(void)                    { return con_gfx_mode(); }
+int  svc_gfx_mode(void)                    { return con_gfx_mode(); }
 
 // A key that the ON KEY event consumed while detecting the press, held for the
 // handler (or the next GET) to read. GET/INKEY go through these wrappers so the
 // key that triggered the event is the one the handler reads back.
-static int g_pending_key = -1;
-static int bas_getkey(void) {
+int g_pending_key = -1;
+int bas_getkey(void) {
     if (g_pending_key >= 0) { int k = g_pending_key; g_pending_key = -1; return k; }
     return con_getkey();
 }
-static int bas_inkey(int cs) {
+int bas_inkey(int cs) {
     if (g_pending_key >= 0) { int k = g_pending_key; g_pending_key = -1; return k; }
     return con_inkey(cs);
 }
@@ -525,7 +519,7 @@ static int bas_inkey(int cs) {
 // A record variable has no scalar value of its own, so it is not a number and
 // not a string: these four report "not found" for one rather than handing back
 // the unused num/s members. Records are reached through the rec_* services.
-static int svc_get_num(const char *name, double *out) {
+int svc_get_num(const char *name, double *out) {
     for (int i = 0; i < var_n; i++)
         if (s_eq(vars[i].name, name) && !vars[i].is_str && !vars[i].is_rec) {
             *out = vars[i].num; return 1;
@@ -533,11 +527,11 @@ static int svc_get_num(const char *name, double *out) {
     *out = 0;
     return 0;
 }
-static void svc_set_num(const char *name, double val) {
+void svc_set_num(const char *name, double val) {
     var_t *v = var_find(name);
     if (v && !v->is_str && !v->is_rec) v->num = trunc_int(v->is_int, val);
 }
-static int svc_get_str(const char *name, char *buf, int buflen) {
+int svc_get_str(const char *name, char *buf, int buflen) {
     for (int i = 0; i < var_n; i++)
         if (s_eq(vars[i].name, name) && vars[i].is_str && !vars[i].is_rec) {
             int n = vars[i].s.slen, c = n < buflen ? n : buflen;
@@ -546,11 +540,11 @@ static int svc_get_str(const char *name, char *buf, int buflen) {
         }
     return 0;
 }
-static void svc_set_str(const char *name, const char *buf, int len) {
+void svc_set_str(const char *name, const char *buf, int len) {
     var_t *v = var_find(name);
     if (v && v->is_str && !v->is_rec) str_store(v, buf, len);
 }
-static double *svc_num_array(const char *name, int *out_len) {
+double *svc_num_array(const char *name, int *out_len) {
     arr_t *a = arr_find(name);
     if (!a || a->is_str) { if (out_len) *out_len = 0; return 0; }
     if (out_len) *out_len = a->total;
@@ -561,12 +555,12 @@ static double *svc_num_array(const char *name, int *out_len) {
 // The same zero-copy bargain as num_array, for TYPE records: an element's
 // numeric fields are contiguous, so a record array is a strided double array.
 
-static const var_t *svc_rec_find(const char *name) {
+const var_t *svc_rec_find(const char *name) {
     const var_t *v = var_lookup(name);
     return (v && v->is_rec) ? v : 0;
 }
 
-static double *svc_rec_array(const char *name, int *nelem, int *stride) {
+double *svc_rec_array(const char *name, int *nelem, int *stride) {
     const var_t *v = svc_rec_find(name);
     if (!v) { if (nelem) *nelem = 0; if (stride) *stride = 0; return 0; }
     if (nelem)  *nelem  = v->nelem;
@@ -574,7 +568,7 @@ static double *svc_rec_array(const char *name, int *nelem, int *stride) {
     return &rec_nums[v->roff_num];                 // pool never moves
 }
 
-static int svc_rec_field(const char *name, const char *field) {
+int svc_rec_field(const char *name, const char *field) {
     const var_t *v = svc_rec_find(name);
     if (!v) return -1;
     const type_t *ty = &types[v->rtype];
@@ -585,7 +579,7 @@ static int svc_rec_field(const char *name, const char *field) {
 
 // Resolve a text field to its descriptor; 0 if the record/element/field is not
 // one. Shared by the two string services below.
-static strdesc_t *svc_rec_str_slot(const char *name, int elem, const char *field) {
+strdesc_t *svc_rec_str_slot(const char *name, int elem, const char *field) {
     const var_t *v = svc_rec_find(name);
     if (!v || elem < 0 || elem >= v->nelem) return 0;
     const type_t *ty = &types[v->rtype];
@@ -594,7 +588,7 @@ static strdesc_t *svc_rec_str_slot(const char *name, int elem, const char *field
     return &rec_strs[rec_str_slot(v, elem, f)];
 }
 
-static int svc_rec_get_str(const char *name, int elem, const char *field,
+int svc_rec_get_str(const char *name, int elem, const char *field,
                            char *buf, int buflen) {
     const strdesc_t *d = svc_rec_str_slot(name, elem, field);
     if (!d) return 0;
@@ -603,103 +597,103 @@ static int svc_rec_get_str(const char *name, int elem, const char *field,
     return n;                                      // full length, even if truncated
 }
 
-static void svc_rec_set_str(const char *name, int elem, const char *field,
+void svc_rec_set_str(const char *name, int elem, const char *field,
                             const char *buf, int len) {
     strdesc_t *d = svc_rec_str_slot(name, elem, field);
     if (d) str_store_to(d, buf, len);
 }
-static void svc_set_return_str(const char *buf, int len) {
+void svc_set_return_str(const char *buf, int len) {
     if (len > MAX_STR) len = MAX_STR;
     for (int i = 0; i < len; i++) g_seed_retstr[i] = buf[i];
     g_seed_retstr_len = len;
 }
-static uint32_t svc_time_cs(void) { return (uint32_t)(con_micros() / 10000ULL); }
-static void *svc_alloc(unsigned nbytes) { return seed_alloc(nbytes); }
-static void  svc_free(void *ptr)        { seed_free(ptr); }
-static void *svc_realloc(void *ptr, unsigned nbytes) { return seed_realloc(ptr, nbytes); }
-static void *svc_alloc_aligned(unsigned a, unsigned n) { return seed_alloc_aligned(a, n); }
+uint32_t svc_time_cs(void) { return (uint32_t)(con_micros() / 10000ULL); }
+void *svc_alloc(unsigned nbytes) { return seed_alloc(nbytes); }
+void  svc_free(void *ptr)        { seed_free(ptr); }
+void *svc_realloc(void *ptr, unsigned nbytes) { return seed_realloc(ptr, nbytes); }
+void *svc_alloc_aligned(unsigned a, unsigned n) { return seed_alloc_aligned(a, n); }
 
 // GPIO passthroughs (see gpio.h). The driver validates the pin range itself, so
 // these are thin; on the host build every gpio_* is a stub and gpio_available()
 // is 0, which a seed can test via svc->gpio_avail().
-static int  svc_gpio_avail(void)                       { return gpio_available(); }
-static int  svc_gpio_mode(int pin, int mode, int alt)  { return gpio_set_mode(pin, mode, alt); }
-static int  svc_gpio_pull(int pin, int pull)           { return gpio_set_pull(pin, pull); }
-static void svc_gpio_write(int pin, int level)         { gpio_write(pin, level); }
-static int  svc_gpio_read(int pin)                     { return gpio_read(pin); }
-static void svc_gpio_set(uint32_t mask)                { gpio_set_mask(mask); }
-static void svc_gpio_clr(uint32_t mask)                { gpio_clr_mask(mask); }
-static uint32_t svc_gpio_level(void)                   { return gpio_read_all(); }
-static int  svc_gpio_wait(int pin, int edge, int cs)   { return gpio_wait_edge(pin, edge, cs); }
+int  svc_gpio_avail(void)                       { return gpio_available(); }
+int  svc_gpio_mode(int pin, int mode, int alt)  { return gpio_set_mode(pin, mode, alt); }
+int  svc_gpio_pull(int pin, int pull)           { return gpio_set_pull(pin, pull); }
+void svc_gpio_write(int pin, int level)         { gpio_write(pin, level); }
+int  svc_gpio_read(int pin)                     { return gpio_read(pin); }
+void svc_gpio_set(uint32_t mask)                { gpio_set_mask(mask); }
+void svc_gpio_clr(uint32_t mask)                { gpio_clr_mask(mask); }
+uint32_t svc_gpio_level(void)                   { return gpio_read_all(); }
+int  svc_gpio_wait(int pin, int edge, int cs)   { return gpio_wait_edge(pin, edge, cs); }
 
 // SD-card files: thin adapters over the storage channel API (see storage.h),
 // which the seed <stdio.h> is built on. All of this shares the file channels and
 // filesystem (long names included) with BASIC's OPENIN/OPENOUT.
-static int svc_file_open(const char *name, int mode) {
+int svc_file_open(const char *name, int mode) {
     int m = (mode == SEED_FOPEN_WRITE)  ? STG_M_WRITE
           : (mode == SEED_FOPEN_UPDATE) ? STG_M_UPDATE : STG_M_READ;
     return stg_open(name, m);                         // channel > 0, or 0 on failure
 }
-static int svc_file_close(int fh) { return stg_close(fh); }
-static int svc_file_read(int fh, void *buf, int n) {
+int svc_file_close(int fh) { return stg_close(fh); }
+int svc_file_read(int fh, void *buf, int n) {
     int r = stg_readn(fh, buf, n);                    // bulk (sector-run) read
     return r < 0 ? 0 : r;                             // short count at EOF (stdio semantics)
 }
-static int svc_file_write(int fh, const void *buf, int n) {
+int svc_file_write(int fh, const void *buf, int n) {
     const unsigned char *p = buf;
     for (int i = 0; i < n; i++) { int r = stg_putb(fh, p[i]); if (r < 0) return i > 0 ? i : r; }
     return n;
 }
-static long svc_file_seek(int fh, long off, int whence) {
+long svc_file_seek(int fh, long off, int whence) {
     long base = (whence == 1) ? stg_tell(fh) : (whence == 2) ? stg_size(fh) : 0;
     if (base < 0) return base;
     long pos = base + off;
     int r = stg_seek(fh, pos);
     return r < 0 ? (long)r : pos;
 }
-static long svc_file_size(int fh)   { return stg_size(fh); }
-static int  svc_file_eof(int fh)    { return stg_eof(fh); }
-static int  svc_file_remove(const char *name) { return stg_delete(name); }
+long svc_file_size(int fh)   { return stg_size(fh); }
+int  svc_file_eof(int fh)    { return stg_eof(fh); }
+int  svc_file_remove(const char *name) { return stg_delete(name); }
 
 // Format a double exactly as PRINT/STR$ do, so a seed's printf %f matches BASIC.
-static int svc_fmt_num(double v, char *out) { return dbl_to_str(out, v); }
+int svc_fmt_num(double v, char *out) { return dbl_to_str(out, v); }
 
 // --- graphics + TrueType text for seeds (ABI v7) ---------------------------
 // Device-pixel drawing forwards to gfx.h (framebuffer target / host no-op);
 // font management reuses the same ttf.h engine as BASIC's GTEXT.
-static int  svc_gfx_avail(void)  { return sgfx_avail(); }
-static int  svc_gfx_width(void)  { return sgfx_width(); }
-static int  svc_gfx_height(void) { return sgfx_height(); }
-static void svc_gfx_clear(uint32_t rgb) { sgfx_clear(rgb); }
-static void svc_gfx_putpixel(int x, int y, uint32_t rgb) { sgfx_putpixel(x, y, rgb); }
-static uint32_t svc_gfx_getpixel(int x, int y) { return sgfx_getpixel(x, y); }
-static void svc_gfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_line(x1, y1, x2, y2, rgb); }
-static void svc_gfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_fillrect(x1, y1, x2, y2, rgb); }
-static void svc_gfx_blit8(const unsigned char *idx, const unsigned int *pal, int w, int h, int dx, int dy, int scale) { sgfx_blit8(idx, pal, w, h, dx, dy, scale); }
-static void svc_gfx_circle(int cx, int cy, int r, uint32_t rgb) { sgfx_circle(cx, cy, r, rgb); }
-static void svc_gfx_fillcircle(int cx, int cy, int r, uint32_t rgb) { sgfx_fillcircle(cx, cy, r, rgb); }
-static void svc_gfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_ellipse(cx, cy, rx, ry, rgb); }
-static void svc_gfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_fillellipse(cx, cy, rx, ry, rgb); }
-static void svc_gfx_fillpoly(const int *xy, int npts, uint32_t rgb) { sgfx_fillpoly(xy, npts, rgb); }
-static void svc_gfx_line_style(int w, int j, int c) { sgfx_line_style(w, j, c); }
-static void svc_gfx_polyline(const int *pts, int n, int cl, uint32_t rgb) { sgfx_polyline(pts, n, cl, rgb); }
-static void svc_gfx_flood(int x, int y, uint32_t rgb) { sgfx_flood(x, y, rgb); }
-static void svc_gfx_clip(int x1, int y1, int x2, int y2) { sgfx_clip(x1, y1, x2, y2); }
-static void svc_gfx_noclip(void) { sgfx_noclip(); }
-static int  svc_font_load(const char *name) { return ttf_load(name); }
-static int  svc_font_select(int handle) { return ttf_select(handle); }
-static void svc_font_size(int px) { ttf_set_size(px); }
-static void svc_font_style(int b, int i, int u) { ttf_set_style(b, i, u); }
-static void svc_gfx_text(int x, int y, const char *s, int len, uint32_t rgb) { sgfx_text(x, y, s, len, rgb); }
-static int  svc_text_width(const char *s, int len) { return ttf_text_width(s, len); }
-static int  svc_text_height(void) { return ttf_line_height(); }
+int  svc_gfx_avail(void)  { return sgfx_avail(); }
+int  svc_gfx_width(void)  { return sgfx_width(); }
+int  svc_gfx_height(void) { return sgfx_height(); }
+void svc_gfx_clear(uint32_t rgb) { sgfx_clear(rgb); }
+void svc_gfx_putpixel(int x, int y, uint32_t rgb) { sgfx_putpixel(x, y, rgb); }
+uint32_t svc_gfx_getpixel(int x, int y) { return sgfx_getpixel(x, y); }
+void svc_gfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_line(x1, y1, x2, y2, rgb); }
+void svc_gfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) { sgfx_fillrect(x1, y1, x2, y2, rgb); }
+void svc_gfx_blit8(const unsigned char *idx, const unsigned int *pal, int w, int h, int dx, int dy, int scale) { sgfx_blit8(idx, pal, w, h, dx, dy, scale); }
+void svc_gfx_circle(int cx, int cy, int r, uint32_t rgb) { sgfx_circle(cx, cy, r, rgb); }
+void svc_gfx_fillcircle(int cx, int cy, int r, uint32_t rgb) { sgfx_fillcircle(cx, cy, r, rgb); }
+void svc_gfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_ellipse(cx, cy, rx, ry, rgb); }
+void svc_gfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { sgfx_fillellipse(cx, cy, rx, ry, rgb); }
+void svc_gfx_fillpoly(const int *xy, int npts, uint32_t rgb) { sgfx_fillpoly(xy, npts, rgb); }
+void svc_gfx_line_style(int w, int j, int c) { sgfx_line_style(w, j, c); }
+void svc_gfx_polyline(const int *pts, int n, int cl, uint32_t rgb) { sgfx_polyline(pts, n, cl, rgb); }
+void svc_gfx_flood(int x, int y, uint32_t rgb) { sgfx_flood(x, y, rgb); }
+void svc_gfx_clip(int x1, int y1, int x2, int y2) { sgfx_clip(x1, y1, x2, y2); }
+void svc_gfx_noclip(void) { sgfx_noclip(); }
+int  svc_font_load(const char *name) { return ttf_load(name); }
+int  svc_font_select(int handle) { return ttf_select(handle); }
+void svc_font_size(int px) { ttf_set_size(px); }
+void svc_font_style(int b, int i, int u) { ttf_set_style(b, i, u); }
+void svc_gfx_text(int x, int y, const char *s, int len, uint32_t rgb) { sgfx_text(x, y, s, len, rgb); }
+int  svc_text_width(const char *s, int len) { return ttf_text_width(s, len); }
+int  svc_text_height(void) { return ttf_line_height(); }
 
 // spawn/mkdir round out the unified ABI. A seed cannot launch another POD (that
 // path needs the loader context the /sys shell has), so spawn is refused with
 // -1; mkdir maps straight to storage, which the interpreter fully supports.
-static int  svc_spawn(const char *path, int argc, const char *const *argv)
+int  svc_spawn(const char *path, int argc, const char *const *argv)
                                         { (void)path; (void)argc; (void)argv; return -1; }
-static int  svc_mkdir(const char *path) { return stg_mkdir(path); }
+int  svc_mkdir(const char *path) { return stg_mkdir(path); }
 
 /* run_basic: run a BASIC program synchronously, on the visible screen, returning
  * when it stops - so a tool like the editor can repaint itself afterwards (its
@@ -708,16 +702,23 @@ static int  svc_mkdir(const char *path) { return stg_mkdir(path); }
  * more tokens once it returns, so re-entering the run loop here is safe. g_err is
  * saved/restored so the program's own error (already reported by the run) does
  * not leak into the caller's immediate-mode context. */
-static int  load_bas_file(const char *name);                /* interp_files.inc   */
-static void run_program_once(int start_pc, int start_off);  /* interp_control.inc */
-static int  svc_run_basic(const char *path) {
+int  load_bas_file(const char *name);                /* interp_files.inc   */
+void run_program_once(int start_pc, int start_off);  /* interp_control.inc */
+int  svc_run_basic(const char *path) {
     int saved_err;
+    char saved_cwd[128];
+    const char *cw;
     if (!path || !path[0]) return -1;
     if (load_bas_file(path) < 0) return -2;
     saved_err = g_err; g_err = 0;
+    cw = stg_cwd();                          // remember the directory to return to
+    s_copy(saved_cwd, cw ? cw : "/", sizeof saved_cwd);
     con_backbuffer(0);          // draw to the visible screen, not an unshown back buffer
     con_cls();                  // a clean screen for the program's output
-    run_program_once(0, 0);     // run as a top-level program (reports its own errors)
+    run_program(0, 0);          // run as a top-level program AND honour CHAIN - the
+                                // program may launch others (e.g. the example browser
+                                // menu.bas CHAINs the demo the user picks); reports errors
+    stg_chdir(saved_cwd);       // a program may CD; put the caller (the editor) back
     g_err = saved_err;
     return 0;
 }
@@ -726,7 +727,7 @@ static int  svc_run_basic(const char *path) {
 // correct no matter how BerryServices grows or is reordered (a positional list
 // silently mis-assigns on any struct change - see the history of this file).
 // A field left out here is simply 0/NULL.
-static const BerryServices g_svc = {
+const BerryServices g_svc = {
     .abi_version = BERRY_ABI_VERSION,
     .putc = svc_putc, .puts = svc_puts, .getkey = svc_getkey, .inkey = svc_inkey,
     .get_num = svc_get_num, .set_num = svc_set_num,
@@ -780,7 +781,7 @@ static const BerryServices g_svc = {
 // token), invoke the seed, and return its numeric result. String arguments are
 // snapshotted into scratch so they stay valid even if the seed triggers GC by
 // writing a variable. g_seed_retstr[_len] receives any string result.
-static double seed_run_collect(void) {
+double seed_run_collect(void) {
     double h = need_num();
     if (g_err) return 0;
     int slot = (int)h - 1;
@@ -829,26 +830,18 @@ static double seed_run_collect(void) {
 // extensions are inherently few (the whole language has ~100 keywords), and
 // unlike the seed code it must persist across RUN yet grow at PODLOAD time, which
 // a top-of-heap bump cannot do safely once the run heap is live.
-#define SEED_KW_MAX 256
 
 // A dynamic (runtime-registered) keyword. Both native seeds (from /seed at
 // startup) and POD extensions (PODLOAD) live in this one table, so the lexer and
 // dispatch treat them alike. is_pod picks the backend: a native seed runs from
 // its persistent code block via `entry`; a POD keyword runs from pod_entry
 // (inside a resident POD image) through its own capability-gated pod_svc.
-typedef struct {
-    char name[16]; int kind; int minargs; int maxargs;
-    int is_pod;              // 0 = native seed, 1 = POD keyword
-    int slot;               // POD: pod_pool index (PODFREE drops its keywords). native: -1
-    const void *entry;      // native seed: entry pointer into its persistent block
-    const void *pod_entry, *pod_svc;
-} seed_kw_t;
 
-static seed_kw_t  seed_kw_tab[SEED_KW_MAX];
-static int        seed_kw_n = 0;
+seed_kw_t  seed_kw_tab[SEED_KW_MAX];
+int        seed_kw_n = 0;
 
 // Find a registered keyword by (already upper-cased) name; -1 if none.
-static int seed_kw_lookup(const char *name) {
+int seed_kw_lookup(const char *name) {
     for (int i = 0; i < seed_kw_n; i++)
         if (s_eq(name, seed_kw_tab[i].name)) return i;
     return -1;
@@ -858,7 +851,7 @@ static int seed_kw_lookup(const char *name) {
 // kw_spelling() for built-ins: a type or field may be named after a keyword,
 // and a seed-registered one is no different (a seed adding PARTICLE must not
 // stop you writing TYPE particle).
-static const char *seed_kw_name(int idx) {
+const char *seed_kw_name(int idx) {
     if (idx < 0 || idx >= seed_kw_n) return 0;
     return seed_kw_tab[idx].name;
 }
@@ -867,7 +860,7 @@ static const char *seed_kw_name(int idx) {
 // including .bss, stamped by tcc -seed) when it is known, else the blob length
 // plus a 16 KB zeroed margin for a gcc-built seed's .bss (matching the old fixed
 // slot, which zeroed 16 KB). Rounded up to a page.
-static unsigned seed_footprint(const struct seed_header *hdr, int len) {
+unsigned seed_footprint(const struct seed_header *hdr, int len) {
     unsigned foot = hdr->image_size ? hdr->image_size : (unsigned)len + 16384u;
     if (foot < (unsigned)len) foot = (unsigned)len;
     return (foot + 4095u) & ~4095u;
@@ -876,7 +869,7 @@ static unsigned seed_footprint(const struct seed_header *hdr, int len) {
 // Validate a loaded .sed blob and, if it registers a keyword, copy it into a
 // persistent code block and add it to the table. Returns 1 if a keyword was
 // installed.
-static int seed_kw_register(const char *blob, int len) {
+int seed_kw_register(const char *blob, int len) {
     if (len < (int)(sizeof(struct seed_header) + sizeof(struct seed_keyword))) return 0;
     struct seed_header hdr;                         // copy bytewise (-mstrict-align)
     for (int i = 0; i < (int)sizeof(hdr); i++) ((char *)&hdr)[i] = blob[i];
@@ -923,7 +916,7 @@ static int seed_kw_register(const char *blob, int len) {
 
 // Snapshot one evaluated value into a berry_arg (strings copied to GC-stable
 // scratch, valid for the duration of the call).
-static int seed_fill_arg(berry_arg *a, value_t v) {
+int seed_fill_arg(berry_arg *a, value_t v) {
     if (v.is_str) {
         value_t snap = str_in_scratch(v.str, v.len);
         if (g_err) return 0;
@@ -937,7 +930,7 @@ static int seed_fill_arg(berry_arg *a, value_t v) {
 // Gather the argument list for a seed keyword. paren=1 reads NAME(a, b, ...);
 // paren=0 reads the bare statement form NAME a, b, ... up to end of statement.
 // Returns the count, or -1 on error (with g_err set).
-static int seed_gather_args(berry_arg *argv, int max, int paren) {
+int seed_gather_args(berry_arg *argv, int max, int paren) {
     int argc = 0;
     if (paren) {
         if (!expect(T_LP)) return -1;
@@ -959,7 +952,7 @@ static int seed_gather_args(berry_arg *argv, int max, int paren) {
 
 // Invoke a registered keyword's seed with the gathered args. Returns its numeric
 // result in *out (string results are staged in g_seed_retstr). 0 ok, -1 on error.
-static int seed_kw_invoke(seed_kw_t *k, berry_arg *argv, int argc, double *out) {
+int seed_kw_invoke(seed_kw_t *k, berry_arg *argv, int argc, double *out) {
     if (argc < k->minargs || argc > k->maxargs) { err("Wrong number of arguments"); return -1; }
     g_seed_retstr_len = -1;
     *out = 0;
@@ -974,7 +967,7 @@ static int seed_kw_invoke(seed_kw_t *k, berry_arg *argv, int argc, double *out) 
 }
 
 // Function form: x = NAME(args) / a$ = NAME$(args). Current token is the keyword.
-static value_t eval_seed_keyword(int id) {
+value_t eval_seed_keyword(int id) {
     seed_kw_t *k = &seed_kw_tab[id - KW_SEED_DYN];
     lex_next();                                            // consume the keyword
     berry_arg argv[SEED_MAX_ARGS];
@@ -989,7 +982,7 @@ static value_t eval_seed_keyword(int id) {
 }
 
 // Statement form: NAME arg, arg. Current token is the keyword; result discarded.
-static void exec_seed_keyword(int id) {
+void exec_seed_keyword(int id) {
     seed_kw_t *k = &seed_kw_tab[id - KW_SEED_DYN];
     lex_next();                                            // consume the keyword
     berry_arg argv[SEED_MAX_ARGS];
