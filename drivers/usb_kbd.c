@@ -611,16 +611,20 @@ static void kbd_sync_leds(void) {
 int usb_kbd_getchar(void) {
     if (!kbd_ready) return 0;
 
+    uint32_t now = TIMER_CLO;
     int r = dwc2_xfer(1, kbd_devaddr, kbd_ep, 1 /*IN*/, EP_INTR,
                       kbd_mps, kbd_pid, kbd_report, kbd_mps, kbd_lowspeed);
 
-    if (r == -4) { kbd_sync_leds(); return 0; }   // NAK = no key; a good moment
+    // NAK = the held state is unchanged; no new report, but a held key may be due
+    // for an auto-repeat.
+    if (r == -4) { kbd_sync_leds(); return hid_repeat(now); }
     if (r < 0) return 0;
 
     kbd_pid = (kbd_pid == PID_DATA0) ? PID_DATA1 : PID_DATA0;
 
-    int k = hid_report_key(kbd_report, kbd_prev);
+    int k = hid_report_key(kbd_report, kbd_prev, now);
     kbd_sync_leds();                              // a lock key may have toggled
+    if (!k) k = hid_repeat(now);                  // a same-state report: maybe a repeat
     return k;
 }
 

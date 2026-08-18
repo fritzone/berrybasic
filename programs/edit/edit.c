@@ -1941,6 +1941,9 @@ int main(int argc, char **argv)
 
     free_all();
     S->gfx_backbuffer(0);               /* back to direct drawing */
+    S->gfx_clear(0x000000);             /* wipe the WHOLE framebuffer (vdu 12 only clears
+                                         * the text cell grid, leaving the partial bottom
+                                         * row still painted blue) */
     S->vdu(12);                         /* clear + home the text console for BASIC */
     return 0;
 }

@@ -285,7 +285,21 @@ static int lock_key(uint8_t kc) {
 static int g_keys_down[HID_KEYS_MAX];
 static int g_keys_n;
 
-int hid_report_key(const uint8_t report[8], uint8_t prev[8]) {
+// ---------------------------------------------------------------------------
+// Typematic auto-repeat. A held key sends no further HID reports (SET_IDLE 0),
+// so repeat is synthesised from time: the last freshly-pressed key becomes the
+// repeat key; after HID_REPEAT_DELAY it re-emits every HID_REPEAT_RATE until it
+// is released (or another key takes over). hid_report_key() maintains the state
+// as reports arrive; the backends call hid_repeat() from their poll to collect
+// the repeats. Time is passed in (microseconds) so this file stays free of any
+// hardware - it is shared by both backends and the host build.
+#define HID_REPEAT_DELAY 400000u                 // hold this long before repeating
+#define HID_REPEAT_RATE   45000u                 // then repeat this often (~22/s)
+
+static int      g_rep_key  = 0;                  // key to auto-repeat (0 = none)
+static uint32_t g_rep_next = 0;                  // timestamp (us) of the next repeat
+
+int hid_report_key(const uint8_t report[8], uint8_t prev[8], uint32_t now_us) {
     int out = 0;
     g_mod = report[0];                           // refresh the modifier snapshot
     g_keys_n = 0;
@@ -302,7 +316,26 @@ int hid_report_key(const uint8_t report[8], uint8_t prev[8]) {
         if (!out) out = hid_to_key(kc, g_mod);   // first newly-pressed key wins
     }
     for (int k = 0; k < 8; k++) prev[k] = report[k];
+
+    // Typematic bookkeeping: a fresh press (re)arms repeat on that key; with no
+    // fresh press, keep repeating only while that same key is still held.
+    if (out) {
+        g_rep_key = out;
+        g_rep_next = now_us + HID_REPEAT_DELAY;
+    } else if (g_rep_key) {
+        int still = 0;
+        for (int i = 0; i < g_keys_n; i++) if (g_keys_down[i] == g_rep_key) { still = 1; break; }
+        if (!still) g_rep_key = 0;                // released: stop repeating
+    }
     return out;
+}
+
+// Return an auto-repeat key if one is due (else 0). now_us = a microsecond clock.
+int hid_repeat(uint32_t now_us) {
+    if (!g_rep_key) return 0;
+    if ((int32_t)(now_us - g_rep_next) < 0) return 0;   // not time yet (wrap-safe)
+    g_rep_next = now_us + HID_REPEAT_RATE;
+    return g_rep_key;
 }
 
 // Copy the currently-held keys (BerryBasiC key codes) into out; returns count.

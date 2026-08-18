@@ -877,7 +877,9 @@ static int key_pop(void) {
 // bulk-transfer wait, so a HID report that lands mid-bulk-transfer is not lost.
 static void handle_hid_event(int sid, int eid, int cc) {
     if (kbd_ep_st.ready && sid == kbd_ep_st.slot && eid == kbd_ep_st.dci) {
-        if (cc == 1 || cc == 13) key_push(hid_report_key(kbd_ep_st.buf, kbd_prev));
+        if (cc == 1 || cc == 13)
+            key_push(hid_report_key(kbd_ep_st.buf, kbd_prev,
+                                    *(volatile uint32_t *)0xFE003004UL));
         hid_rearm(&kbd_ep_st);
     } else if (mou_ep_st.ready && sid == mou_ep_st.slot && eid == mou_ep_st.dci) {
         if (cc == 1 || cc == 13) {
@@ -1160,7 +1162,9 @@ int xhci_kbd_getchar(void) {
     if (!kbd_ep_st.ready) return 0;
     xhci_pump();
     xhci_sync_leds();                     // a lock key may have toggled
-    return key_pop();
+    int k = key_pop();
+    if (!k) k = hid_repeat(*(volatile uint32_t *)0xFE003004UL);   // held key auto-repeat
+    return k;
 }
 
 // --- mouse (real hardware) --------------------------------------------------

@@ -70,9 +70,15 @@ const char *hid_layout_code(void);
 
 // Given a fresh 8-byte boot report and the caller's previous-report buffer,
 // return the first newly-pressed key (0 if none). Also refreshes the modifier
-// snapshot and applies the lock keys (which toggle a lock and produce no key).
+// snapshot and applies the lock keys (which toggle a lock and produce no key),
+// and arms typematic auto-repeat (see hid_repeat). now_us is a microsecond clock.
 // Updates prev[].
-int hid_report_key(const uint8_t report[8], uint8_t prev[8]);
+int hid_report_key(const uint8_t report[8], uint8_t prev[8], uint32_t now_us);
+
+// Auto-repeat: returns the held key again when a repeat is due, else 0. Backends
+// call this from their key poll (including when no new report arrived), so a key
+// held with no release event keeps producing characters. now_us = the same clock.
+int hid_repeat(uint32_t now_us);
 
 // The set of keys currently held down (BerryBasiC key codes), refreshed on each
 // report - so a game can distinguish a held movement key from a released one.
