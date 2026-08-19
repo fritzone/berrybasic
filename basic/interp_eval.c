@@ -9,6 +9,7 @@
 #include "interp_pod.h"
 #include "interp_control.h"
 #include "interp_call.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — expression evaluator: functions, primaries, precedence ladder
 //
@@ -649,6 +650,7 @@ value_t prim_base(void) {
             case KW_POS:   lex_next(); return v_num(con_pos());
             case KW_VPOS:  lex_next(); return v_num(con_vpos());
             case KW_ERR:   lex_next(); return v_num(g_errcode);
+            case KW_DBGLINE: lex_next(); return v_num(dbg_line_value());
             case KW_ERRS:  { lex_next();
                              int n = 0; while (g_errmsg[n]) n++;
                              return str_in_scratch(g_errmsg, n); }

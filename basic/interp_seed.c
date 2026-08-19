@@ -8,6 +8,7 @@
 #include "interp_files.h"
 #include "interp_pod.h"
 #include "interp_control.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — native seeds: heap, collections (DICT/LIST/TREE), seed-service vtable
 //
@@ -775,6 +776,22 @@ const BerryServices g_svc = {
     .audio_open = svc_audio_open, .audio_avail = svc_audio_avail,
     .audio_write = svc_audio_write, .audio_close = svc_audio_close,
     .run_basic = svc_run_basic,
+    // v25: the debugger group (seeds are ungated, so they get all of it).
+    .dbg_attach = dbg_svc_attach, .dbg_detach = dbg_svc_detach,
+    .dbg_break_line = dbg_svc_break_line, .dbg_break_proc = dbg_svc_break_proc,
+    .dbg_break_kw = dbg_svc_break_kw, .dbg_break_every = dbg_svc_break_every,
+    .dbg_clear = dbg_svc_clear, .dbg_list_breaks = dbg_svc_list_breaks,
+    .dbg_cont = dbg_do_cont, .dbg_step = dbg_do_step,
+    .dbg_step_over = dbg_do_step_over, .dbg_step_out = dbg_do_step_out, .dbg_abort = dbg_do_abort,
+    .dbg_watch = dbg_svc_watch, .dbg_break_error = dbg_svc_break_error,
+    .dbg_break_line_if = dbg_svc_break_line_if,
+    .dbg_trace_to = dbg_svc_trace_to, .dbg_trace_off = dbg_svc_trace_off,
+    .dbg_where = dbg_svc_where, .dbg_eval = dbg_eval_expr,
+    .dbg_set_num = dbg_svc_set_num, .dbg_set_str = dbg_svc_set_str,
+    .dbg_var_count = dbg_svc_var_count, .dbg_var_at = dbg_svc_var_at,
+    .dbg_stack_depth = dbg_svc_stack_depth, .dbg_stack_frame = dbg_svc_stack_frame,
+    .dbg_line_count = dbg_svc_line_count, .dbg_line_at = dbg_svc_line_at,
+    .dbg_run = dbg_svc_run,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma

@@ -85,6 +85,9 @@ enum {
     KW_CASE, KW_OF, KW_WHEN, KW_OTHERWISE, KW_ENDCASE, // CASE selection
     KW_EXIT, KW_CONTINUE,                              // loop control (break / continue)
     KW_TRY, KW_CATCH, KW_ENDTRY, KW_RAISE,             // structured error handling
+    KW_TRACE, KW_BREAK, KW_UNBREAK, KW_WATCH, KW_SHOW, // debugger statements
+    KW_CONT, KW_BACKTRACE, KW_SET, KW_DBGLINE,         // (STEP reuses KW_STEP; DBGLINE is a value)
+    KW_PROFILE,                                        // PROFILE ON|OFF | PROFILE (report)
     KW_DEF, KW_PROC, KW_FN, KW_ENDPROC, KW_LOCAL,     // procedures & functions
     KW_TYPE, KW_ENDTYPE, KW_AS,                       // user-defined types (records)
     KW_IMPORT,                                        // IMPORT "module": pull in its PROC/FN

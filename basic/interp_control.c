@@ -13,6 +13,7 @@
 #include "interp_graphics.h"
 #include "interp_pod.h"
 #include "interp_call.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — TRY/CATCH, statement dispatch, event polling, the run loop
 //
@@ -154,6 +155,10 @@ void exec_statement(void) {
     if (tok == T_LABEL) lex_next();              // ".name": a branch label, then run the rest
     if (tok == T_EOL || tok == T_COLON) return;
     if (tok == T_KW) {
+        // Debugger keyword hook: fires before dispatch so any keyword - PRINT,
+        // GOTO, a reserved word - can be a breakpoint, and STEP STMT can pause
+        // between ':'-separated statements. Costs one branch when disarmed.
+        if (dbg_active && (dbg_step_stmt || dbg_kw_armed(tok_kw))) dbg_kw_hook(tok_kw);
         if (is_seed_kw(tok_kw)) { exec_seed_keyword(tok_kw); return; }   // seed keyword as a command
         switch (tok_kw) {
             case KW_PRINT: stmt_print();   return;
@@ -180,6 +185,16 @@ void exec_statement(void) {
             case KW_CATCH:    stmt_catch();    return;
             case KW_ENDTRY:   stmt_endtry();   return;
             case KW_RAISE:    stmt_raise();    return;
+            case KW_TRACE:    stmt_trace();    return;
+            case KW_BREAK:    stmt_break();    return;
+            case KW_UNBREAK:  stmt_unbreak();  return;
+            case KW_WATCH:    stmt_watch();    return;
+            case KW_SHOW:     stmt_show();     return;
+            case KW_STEP:     stmt_step();     return;   // STEP as a statement = debug step
+            case KW_CONT:     stmt_cont();     return;
+            case KW_BACKTRACE:stmt_backtrace();return;
+            case KW_SET:      stmt_dbgset();   return;
+            case KW_PROFILE:  stmt_profile();  return;
             case KW_ENDIF: lex_next();     return;   // block-IF join point: no-op
             case KW_ELSE:  stmt_else_block(); return;   // end of a block-IF THEN branch
             case KW_CLS:   lex_next(); con_cls();   return;
@@ -315,6 +330,7 @@ void exec_statement(void) {
             case KW_NEW:   lex_next(); prog_n = 0; clear_vars();
                            seed_recs_reset();
                            pod_reset();
+                           dbg_reset();            // a different program: forget breakpoints
                            seed_heap_reset(); coll_reset();
                            con_set_gfx_mode(1);   // back to the default coordinate regime
                            con_line_width(1); con_line_join(CON_JOIN_MITER); con_line_cap(CON_CAP_BUTT);
@@ -405,7 +421,7 @@ void dispatch_handler(const char *name) {
 // statement/line boundaries from the run loops. `in_event` blocks re-entry so a
 // handler can't itself be interrupted by another event.
 void poll_events(void) {
-    if (in_event || g_err || g_stop) return;
+    if (in_event || g_err || g_stop || dbg_in_hook) return;  // never fire events mid-stop
     // Ctrl+C stops a running program (the universal "interrupt"). Drain the
     // keyboard so a stray key can't hide a following Ctrl+C; any other key is
     // left in g_pending_key for the program's next GET / INKEY (so Esc and the
@@ -477,6 +493,7 @@ void run_body(int pc, int off) {
         if (g_err || g_stop || g_return) break;
         cur_line_idx = pc;
         g_runline = prog[pc].num;
+        if (dbg_active) dbg_line_hook(pc, off);  // debugger: pause point before the line
         g_branch = 0;
         exec_text(prog[pc].text, off);
         off = 0;
@@ -497,7 +514,7 @@ void run_program_once(int start_pc, int start_off) {
     run_depth++;
     // Only the outermost RUN pulls in modules (and strips them at the end), so a
     // program that itself issues RUN doesn't re-import on top of the loaded set.
-    if (outer) { main_n = prog_n; import_modules(); }
+    if (outer) { main_n = prog_n; import_modules(); dbg_run_begin(); }
     g_stop = 0;
     gosub_sp = 0;
     for_sp = 0;
@@ -530,6 +547,7 @@ void run_program_once(int start_pc, int start_off) {
         if (g_err || g_stop) break;
         cur_line_idx = pc;
         g_runline = prog[pc].num;
+        if (dbg_active) dbg_line_hook(pc, off);  // debugger: pause point before the line
         g_branch = 0;
         g_return = 0;
         exec_text(prog[pc].text, off);

@@ -7,6 +7,7 @@
 #include "interp_eval.h"
 #include "interp_stmt.h"
 #include "interp_control.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — PROC / FN call
 //
@@ -203,7 +204,9 @@ void call_named(int is_fn, const char *name, value_t *retval) {
     }
 
     if (ok) {
+        if (dbg_active) dbg_call_hook(name, is_fn);   // debugger: PROC/FN entry + frame push
         run_body(defs[d].line, body_off);
+        if (dbg_active) dbg_ret_hook(name);           // debugger: pop the frame
         if (is_fn && defs[d].newstyle && !g_err) {    // return = the NAME variable
             var_t *rv = fn_ret_slot[fn_ret_sp - 1];
             fn_retval = rv->is_str ? str_in_scratch(rv->s.sptr, rv->s.slen)

@@ -20,8 +20,8 @@
 // `screen_size`; v17 appended `con_font`/`con_glyph`; v18 appended the directory
 // browsing set (dir_open/dir_read/getcwd/chdir); v19 appended the clipboard
 // (clip_set/clip_get/clip_len); v20 appended icache_sync; v21-23 blit/keys/audio;
-// v24 appended run_basic.
-#define BERRY_ABI_VERSION 24u
+// v24 appended run_basic; v25 appended the debugger group (dbg_*, POD_CAP_DEBUG).
+#define BERRY_ABI_VERSION 25u
 
 // Modes for the file_open service.
 #define BERRY_FOPEN_READ   0
@@ -37,6 +37,30 @@ typedef struct berry_arg {
     const char  *str;      // not NUL-terminated; .len is authoritative
     int          len;
 } berry_arg;
+
+// --- debugger hook context (ABI 25) ---------------------------------------
+// The snapshot a front-end's on_stop callback receives each time execution
+// pauses. `event` says why. It is valid only for the duration of the callback
+// (its `name`/`errmsg` point into interpreter storage); copy anything to keep.
+enum {
+    BERRY_DBG_LINE = 0,   // paused before a program line
+    BERRY_DBG_STMT,       // paused before a statement keyword (STEP STMT)
+    BERRY_DBG_KEYWORD,    // paused at a keyword breakpoint (e.g. every PRINT)
+    BERRY_DBG_CALL,       // entering a PROC/FN (name set)
+    BERRY_DBG_RET,        // leaving a PROC/FN (name set)
+    BERRY_DBG_WRITE,      // a watched variable was written (name set)
+    BERRY_DBG_ERROR       // the program raised an error (post-mortem; errmsg set)
+};
+typedef struct dbg_ctx {
+    int  event;           // BERRY_DBG_*
+    int  line;            // current user line number (or -1 in immediate mode)
+    int  line_idx;        // index into the program table
+    int  off;             // byte offset within the line
+    int  kw;              // keyword id (KEYWORD event), else -1
+    const char *name;     // PROC/FN name (CALL/RET) or variable (WRITE), else 0
+    int  depth;           // current PROC/FN call depth
+    const char *errmsg;   // error text (ERROR event), else 0
+} dbg_ctx;
 
 // The services table. Grouped by facility; `abi_version` is always first. The
 // POD loader fills only the groups a POD's capabilities grant and leaves every
@@ -271,6 +295,45 @@ typedef struct BerryServices {
     // the calling POD exits (the CHAIN mechanism), so a tool like the editor can
     // save and run the current program. Returns 0 if queued, <0 on error.
     int  (*run_basic)(const char *path);
+
+    // v25: debugger (POD_CAP_DEBUG). A front-end (a debugger POD, or `ed`)
+    // attaches one on_stop callback; the interpreter calls it, on its own stack
+    // mid-execution, each time the program pauses. Inside on_stop the front-end
+    // reads state (dbg_where/dbg_eval/dbg_var_*/dbg_stack_*, plus get_num/get_str
+    // under CAP_VARS), draws, reads keys, then calls exactly one resume function
+    // (dbg_cont/step/step_over/step_out/abort) and returns. See the debugger
+    // interface docs. Breakpoints are set by user line number and re-resolved at
+    // each run; a condition ("" = none) is a BASIC expression evaluated in the
+    // paused context; `ignore` skips that many hits before stopping.
+    void (*dbg_attach)(void (*on_stop)(const dbg_ctx *));
+    void (*dbg_detach)(void);
+    int  (*dbg_break_line)(int line);              // 0 ok, <0 no such line
+    int  (*dbg_break_proc)(const char *name);      // break when PROC/FN is called
+    int  (*dbg_break_kw)(const char *keyword);     // break before a keyword by name
+    void (*dbg_break_every)(int on);               // single-step: stop every line
+    void (*dbg_clear)(int line);                   // remove a line bp; line 0 = all
+    int  (*dbg_list_breaks)(int *lines, int max);  // -> count of line breakpoints
+    void (*dbg_cont)(void);                        // resume decisions: call one,
+    void (*dbg_step)(void);                        //   then return from on_stop
+    void (*dbg_step_over)(void);
+    void (*dbg_step_out)(void);
+    void (*dbg_abort)(void);                        // raise "Stopped by user"
+    int  (*dbg_watch)(const char *var, const char *cond);   // break on write
+    void (*dbg_break_error)(int on);                         // post-mortem on error
+    int  (*dbg_break_line_if)(int line, const char *cond, int ignore);
+    void (*dbg_trace_to)(int file_handle, int include_calls);  // non-stop line log
+    void (*dbg_trace_off)(void);
+    int  (*dbg_where)(dbg_ctx *out);               // fill the current stop context
+    int  (*dbg_eval)(const char *expr, double *num, char *str, int slen);  // ->0/1 str
+    int  (*dbg_set_num)(const char *name, double v);
+    int  (*dbg_set_str)(const char *name, const char *s, int n);
+    int  (*dbg_var_count)(void);                   // enumerate variables (LIST)
+    int  (*dbg_var_at)(int i, char *name, int namelen, int *is_str, int *is_arr);
+    int  (*dbg_stack_depth)(void);                 // PROC/FN call stack, 0 = innermost
+    int  (*dbg_stack_frame)(int i, char *name, int namelen, int *call_line);
+    int  (*dbg_line_count)(void);                  // program source access
+    int  (*dbg_line_at)(int idx, int *number, char *text, int textlen);
+    int  (*dbg_run)(const char *path);             // arm + run a program for debugging
 } BerryServices;
 
 // The one services pointer the berry-libc reads. A POD's crt0 sets it before

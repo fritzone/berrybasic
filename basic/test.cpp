@@ -1905,3 +1905,195 @@ TEST_CASE("LIST indents a TYPE block") {
     REQUIRE_THAT(out, ContainsSubstring("  name$, score"));   // fields indented one level
     REQUIRE_THAT(out, ContainsSubstring("30 ENDTYPE"));       // closer back at column 0
 }
+
+// ---------------------------------------------------------------------------
+// Debugger (interp_debug.c). The BASIC front-end (ON DEBUG PROC) gives fully
+// deterministic tests: the handler observes DBGLINE / a counter, then CONT.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("debugger: line breakpoint stops each time it is reached") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK 40\n"
+        "30 FOR I=1 TO 2\n"
+        "40 PRINT \"x\"\n"
+        "50 NEXT\n"
+        "60 END\n"
+        "70 DEF PROCd\n"
+        "80 PRINT \"@\";DBGLINE\n"
+        "90 CONT\n"
+        "100 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("@40"));
+    // Two iterations => two stops.
+    size_t first = out.find("@40");
+    REQUIRE(first != std::string::npos);
+    REQUIRE(out.find("@40", first + 1) != std::string::npos);
+}
+
+TEST_CASE("debugger: keyword breakpoint reaches every PRINT") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK KEYWORD \"PRINT\"\n"
+        "30 PRINT \"a\"\n"
+        "40 X=1\n"
+        "50 PRINT \"b\"\n"
+        "60 END\n"
+        "70 DEF PROCd\n"
+        "80 PRINT \"<\";DBGLINE;\">\"\n"
+        "90 CONT\n"
+        "100 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("<30>"));   // before PRINT on line 30
+    REQUIRE_THAT(out, ContainsSubstring("<50>"));   // before PRINT on line 50
+}
+
+TEST_CASE("debugger: conditional breakpoint only stops when true") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK 40 IF I=2\n"
+        "30 FOR I=1 TO 3\n"
+        "40 REM body\n"
+        "50 NEXT\n"
+        "60 END\n"
+        "70 DEF PROCd\n"
+        "80 PRINT \"stop I=\";I\n"
+        "90 CONT\n"
+        "100 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("stop I=2"));
+    REQUIRE_THAT(out, !ContainsSubstring("stop I=1"));
+    REQUIRE_THAT(out, !ContainsSubstring("stop I=3"));
+}
+
+TEST_CASE("debugger: watchpoint fires on write") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 WATCH X\n"
+        "30 X=1\n"
+        "40 X=9\n"
+        "50 END\n"
+        "60 DEF PROCd\n"
+        "70 PRINT \"X now \";X\n"
+        "80 CONT\n"
+        "90 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("X now 1"));
+    REQUIRE_THAT(out, ContainsSubstring("X now 9"));
+}
+
+TEST_CASE("debugger: break on error drops in at the failing line") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK ERROR\n"
+        "30 PRINT \"before\"\n"
+        "40 X=1/0\n"
+        "50 PRINT \"after\"\n"
+        "60 DEF PROCd\n"
+        "70 PRINT \"caught at \";DBGLINE\n"
+        "80 CONT\n"
+        "90 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("before"));
+    REQUIRE_THAT(out, ContainsSubstring("caught at 40"));
+    REQUIRE_THAT(out, ContainsSubstring("Division by zero"));  // error still propagates
+    REQUIRE_THAT(out, !ContainsSubstring("after"));            // it is not "continued past"
+}
+
+TEST_CASE("debugger: SET changes a variable while stopped") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK 40\n"
+        "30 X=5\n"
+        "40 PRINT \"X=\";X\n"
+        "50 END\n"
+        "60 DEF PROCd\n"
+        "70 SET X = 99\n"
+        "80 CONT\n"
+        "90 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("X=99"));   // the write took effect in the live program
+}
+
+TEST_CASE("debugger: BREAK PROC stops on entry") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK PROC sq\n"
+        "30 PROCsq(4)\n"
+        "40 END\n"
+        "50 DEF PROCsq(n)\n"
+        "60 PRINT \"sq=\";n*n\n"
+        "70 ENDPROC\n"
+        "80 DEF PROCd\n"
+        "90 PRINT \"entering a proc\"\n"
+        "100 CONT\n"
+        "110 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("entering a proc"));
+    REQUIRE_THAT(out, ContainsSubstring("sq=16"));
+}
+
+TEST_CASE("debugger: UNBREAK ALL disarms, program runs normally") {
+    std::string out = run(
+        "10 ON DEBUG PROC d\n"
+        "20 BREAK 40\n"
+        "30 UNBREAK ALL\n"
+        "40 PRINT \"ran\"\n"
+        "50 END\n"
+        "60 DEF PROCd\n"
+        "70 PRINT \"should not appear\"\n"
+        "80 CONT\n"
+        "90 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("ran"));
+    REQUIRE_THAT(out, !ContainsSubstring("should not appear"));
+}
+
+TEST_CASE("debugger: DBGLINE is 0 when not stopped") {
+    REQUIRE_THAT(run("10 PRINT DBGLINE"), ContainsSubstring("0"));
+}
+
+TEST_CASE("debugger: a program that never debugs is unaffected") {
+    REQUIRE_THAT(run("10 FOR I=1 TO 3\n20 PRINT I\n30 NEXT"),
+                 ContainsSubstring("1"));
+}
+
+TEST_CASE("debugger: TRACE TO logs every line to a file") {
+    // Trace to a file, then read it back with the file words.
+    std::string out = run(
+        "10 TRACE TO \"TRACE.LOG\"\n"
+        "20 PRINT \"a\"\n"
+        "30 PRINT \"b\"\n"
+        "40 TRACE OFF\n"
+        "50 F=OPENIN(\"TRACE.LOG\")\n"
+        "60 REPEAT: PRINT CHR$(BGET#F);: UNTIL EOF#F\n"
+        "70 CLOSE#F");
+    REQUIRE_THAT(out, ContainsSubstring("[20]"));   // line 20 was logged
+    REQUIRE_THAT(out, ContainsSubstring("[30]"));
+}
+
+TEST_CASE("debugger: PROFILE counts line executions") {
+    std::string out = run_raw(
+        "10 FOR I=1 TO 5\n"
+        "20 X=X+I\n"
+        "30 NEXT\n"
+        "40 END\n"
+        "PROFILE ON\n"
+        "RUN\n"
+        "PROFILE\n");
+    REQUIRE_THAT(out, ContainsSubstring("hits"));      // the report header
+    REQUIRE_THAT(out, ContainsSubstring("X=X+I"));     // the profiled line's source
+}
+
+TEST_CASE("debugger: PROFILE with no run reports nothing collected") {
+    REQUIRE_THAT(run_raw("10 PRINT 1\nPROFILE\n"),
+                 ContainsSubstring("No profile data"));
+}
+
+TEST_CASE("debugger: TRACE TO with CALLS logs PROC entry and return") {
+    std::string out = run(
+        "10 TRACE TO \"C.LOG\",CALLS\n"
+        "20 PROCfoo\n"
+        "30 TRACE OFF\n"
+        "40 F=OPENIN(\"C.LOG\")\n"
+        "50 REPEAT: PRINT CHR$(BGET#F);: UNTIL EOF#F\n"
+        "60 CLOSE#F\n"
+        "70 END\n"
+        "80 DEF PROCfoo\n"
+        "90 PRINT \"x\"\n"
+        "100 ENDPROC");
+    REQUIRE_THAT(out, ContainsSubstring("> PROCFOO"));   // entry logged
+    REQUIRE_THAT(out, ContainsSubstring("< PROCFOO"));   // return logged
+}

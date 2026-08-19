@@ -2639,6 +2639,109 @@ A worked button example:
 60 ENDPROC
 ```
 
+# Debugging
+
+***BerryBasiC*** has a built-in debugger. It can pause a running program, step through it a line (or a statement) at a time, inspect and change variables while stopped, break on a line, on a `PROC`/`FN` call, on any keyword (even `PRINT`), on a write to a variable, or on an error, and log every line it runs to a file. The same machinery drives three front-ends: the built-in console stepper (no setup - just `TRACE ON` or `BREAK`), a full-screen debugger you launch with `debug PROG.BAS`, and the debugger built into the `ed` editor (set breakpoints in the gutter, then **Basic ▸ Debug**). This section covers the BASIC surface; the graphical front-ends are in *Native Code and Toolchain*.
+
+## Turning it on
+
+`TRACE ON` arms the debugger and single-steps: it stops before the very next line. `TRACE OFF` disarms it. With nothing else set, a stop shows the current line and waits for one key:
+
+| Key | Action |
+|---|---|
+| `space` / `s` | step **into** the next line |
+| `o` | step **over** (run a `PROC`/`FN` call on this line without descending) |
+| `u` | step **out** (run to where the current `PROC`/`FN` returns) |
+| `c` | continue freely (to the next breakpoint, or the end) |
+| `v` | list the variables |
+| `b` | print the call stack |
+| `q` | abort the program (raises `Stopped by user`) |
+
+## Breakpoints
+
+| Statement | Meaning |
+|---|---|
+| `BREAK line` | stop before that line, each time it is reached |
+| `BREAK line IF expr` | stop only when `expr` is true (evaluated in the program's own context) |
+| `BREAK line EVERY n` | stop on every `n`-th hit |
+| `BREAK line AFTER n` | stop only after `n` hits have passed |
+| `BREAK PROC name` | stop when a `PROC`/`FN` is called |
+| `BREAK KEYWORD "PRINT"` | stop before every use of a keyword (any keyword, by name) |
+| `BREAK ERROR` | drop into the debugger at the line that raises an error, with state still live |
+| `UNBREAK line` | remove a line breakpoint |
+| `UNBREAK ALL` | remove every breakpoint |
+| `UNBREAK ERROR` | stop breaking on errors |
+
+Breakpoints persist across `RUN` (so you can `BREAK 20 : RUN`); `NEW` clears them.
+
+## Watchpoints
+
+`WATCH var` stops the moment `var` is written, so you can catch *what changes a value* rather than guessing where. `WATCH var IF expr` narrows it to writes where a condition holds. `SHOW var` is a display-only watch: the variable is printed at every stop but never causes one.
+
+```basic
+10 WATCH total
+20 FOR I = 1 TO 5 : total = total + I : NEXT
+```
+
+## While stopped
+
+At a stop you can read and change the live program state. `DBGLINE` is the line the program is stopped on (0 when it is running normally); `ERR` and `ERR$` hold the code and message at a `BREAK ERROR` stop. `SET var = expr` changes a variable in place; `STEP`, `STEP OVER`, `STEP OUT` and `CONT` resume; `BACKTRACE` prints the `PROC`/`FN` call stack.
+
+## A handler in BASIC - `ON DEBUG`
+
+`ON DEBUG PROC handler` registers a `PROC` that runs at every stop, so you can instrument a program without leaving BASIC. The handler can read any variable, print, even change values, then `STEP` or `CONT` to decide how to resume - a breakpoint with an action, in a few lines of BASIC.
+
+```basic
+10 ON DEBUG PROC log
+20 BREAK 60
+30 FOR I = 1 TO 3
+40   T = T + I
+50 NEXT
+60 PRINT "sum so far: "; T
+70 END
+80 DEF PROClog
+90   PRINT "  [line "; DBGLINE; " T="; T; "]"
+100  CONT
+110 ENDPROC
+```
+
+## Tracing to a file
+
+`TRACE TO "file"` logs every line as it runs to a file and keeps running (it never stops), until `TRACE OFF`. Add `,CALLS` to also log `PROC`/`FN` entry and return (`> PROCname (from line N)` on the way in, `< PROCname` on the way out). This coexists with breakpoints - you can trace to a file and still stop at a breakpoint.
+
+```basic
+10 TRACE TO "RUN.LOG", CALLS
+20 GOSUB 100
+30 TRACE OFF
+```
+
+`STEP STMT` (instead of plain `STEP`) stops between the `:`-separated statements on a line, not just at each line.
+
+## Profiling - where the time goes
+
+`PROFILE ON` arms a per-line profiler; it then counts how many times each line runs and how long each one takes, across the next `RUN`. `PROFILE OFF` disarms it. `PROFILE` (on its own) prints the report - the executed lines with their hit counts and total time, hottest first - so you can see where a slow program actually spends its time. Each `RUN` starts a fresh count.
+
+```basic
+10 FOR I = 1 TO 1000
+20   T = T + FNslow(I)
+30 NEXT
+40 END
+50 DEF FNslow(n) = n*n + SQR(n)
+```
+```
+PROFILE ON
+RUN
+PROFILE
+```
+prints something like:
+```
+  line     hits        ms  source
+    20     1000     4.021  T = T + FNslow(I)
+    50     1000     3.110  DEF FNslow(n) = n*n + SQR(n)
+    10     1000     0.240  FOR I = 1 TO 1000
+```
+The profiler shares the interpreter's line hook, so it costs nothing when it is off.
+
 # BGI: The BerryBasiC Graphics Interface
 
 ***BerryBasiC*** has **two graphics coordinate modes**, chosen with `MODE`. `MODE 1` (the default) uses BBC-style **logical coordinates**: x runs 0 to 1279, y runs 0 to 1023, with the origin at the **bottom-left** (y increases upwards - the opposite of the mouse's pixel coordinates), and the whole logical space is scaled onto the panel so a program looks the same at any resolution. `MODE 2` is **native**: coordinates are physical framebuffer pixels at the current resolution, with the origin at the **top-left** and y increasing downwards - the convention every modern graphics API, the mouse, and the seed graphics all use. The two modes are compared in *MODE* below; everything else in this chapter (colours, shapes, sprites, text, buffering) works identically in both. Unless a section says otherwise, its examples are written for the default `MODE 1`.

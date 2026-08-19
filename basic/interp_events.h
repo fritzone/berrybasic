@@ -50,6 +50,9 @@ void on_mouse (void);
 // the very key that fired the event (it is held in g_pending_key).
 void on_key (void);
 
+// ON DEBUG PROC name | ON DEBUG OFF : register/clear a BASIC debugger handler.
+void on_debug (void);
+
 // ON PIN p [RISING|FALLING] PROC name   |   ON PIN p OFF   |   ON PIN OFF
 void on_pin (void);
 

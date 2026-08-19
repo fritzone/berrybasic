@@ -7,6 +7,7 @@
 #include "interp_eval.h"
 #include "interp_stmt.h"
 #include "interp_files.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — POD executables: the loader and the RUN/PODLOAD/PODFREE/PODINFO/
 // PODCAPS verbs.
@@ -119,6 +120,22 @@ void     pod_dn_iii(int a, int b, int c)               { (void)a; (void)b; (void
 void     pod_dn_pline(const int *a, int b, int c, uint32_t d) { (void)a; (void)b; (void)c; (void)d; }
 int      pod_dn_fontload(const char *a)                 { (void)a; return 0; }
 void     pod_dn_gtext(int a, int b, const char *c, int d, uint32_t e) { (void)a; (void)b; (void)c; (void)d; (void)e; }
+// --- refusal stubs for the debugger surface (ABI v25, ungranted CAP_DEBUG) ---
+void pod_dn_dbgattach(void (*a)(const dbg_ctx *))       { (void)a; }
+int  pod_dn_dbg_i_i(int a)                              { (void)a; return -1; }
+int  pod_dn_dbg_s(const char *a)                        { (void)a; return -1; }
+int  pod_dn_dbg_ss(const char *a, const char *b)        { (void)a; (void)b; return -1; }
+void pod_dn_dbg_v_i(int a)                              { (void)a; }
+int  pod_dn_dbg_list(int *a, int b)                     { (void)a; (void)b; return 0; }
+int  pod_dn_dbg_lineif(int a, const char *b, int c)     { (void)a; (void)b; (void)c; return -1; }
+void pod_dn_dbg_traceto(int a, int b)                   { (void)a; (void)b; }
+int  pod_dn_dbg_where(dbg_ctx *a)                       { (void)a; return -1; }
+int  pod_dn_dbg_eval(const char *a, double *b, char *c, int d) { (void)a; if (b) *b = 0; (void)c; (void)d; return -1; }
+int  pod_dn_dbg_setnum(const char *a, double b)         { (void)a; (void)b; return -1; }
+int  pod_dn_dbg_setstr(const char *a, const char *b, int c) { (void)a; (void)b; (void)c; return -1; }
+int  pod_dn_dbg_varat(int a, char *b, int c, int *d, int *e) { (void)a; if (b && c > 0) b[0] = 0; if (d) *d = 0; if (e) *e = 0; return -1; }
+int  pod_dn_dbg_frame(int a, char *b, int c, int *d)    { (void)a; if (b && c > 0) b[0] = 0; if (d) *d = 0; return -1; }
+int  pod_dn_dbg_lineat(int a, int *b, char *c, int d)   { (void)a; if (b) *b = 0; if (c && d > 0) c[0] = 0; return -1; }
 
 // Fill a services table: every slot a refusal stub, then the granted groups
 // overwritten with the real service callbacks (defined in interp_seed.inc).
@@ -167,6 +184,22 @@ void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->screen_size = pod_dn_scrsz;
     s->con_font = pod_dn_scrsz; s->con_glyph = pod_dn_glyph;
     s->clip_set = pod_dn_puts; s->clip_get = pod_dn_getcwd; s->clip_len = pod_dn_geti;
+    // v25 debugger defaults: all refusals until CAP_DEBUG grants the real ones.
+    s->dbg_attach = pod_dn_dbgattach; s->dbg_detach = pod_dn_void;
+    s->dbg_break_line = pod_dn_dbg_i_i; s->dbg_break_proc = pod_dn_dbg_s;
+    s->dbg_break_kw = pod_dn_dbg_s; s->dbg_break_every = pod_dn_dbg_v_i;
+    s->dbg_clear = pod_dn_dbg_v_i; s->dbg_list_breaks = pod_dn_dbg_list;
+    s->dbg_cont = pod_dn_void; s->dbg_step = pod_dn_void;
+    s->dbg_step_over = pod_dn_void; s->dbg_step_out = pod_dn_void; s->dbg_abort = pod_dn_void;
+    s->dbg_watch = pod_dn_dbg_ss; s->dbg_break_error = pod_dn_dbg_v_i;
+    s->dbg_break_line_if = pod_dn_dbg_lineif;
+    s->dbg_trace_to = pod_dn_dbg_traceto; s->dbg_trace_off = pod_dn_void;
+    s->dbg_where = pod_dn_dbg_where; s->dbg_eval = pod_dn_dbg_eval;
+    s->dbg_set_num = pod_dn_dbg_setnum; s->dbg_set_str = pod_dn_dbg_setstr;
+    s->dbg_var_count = pod_dn_geti; s->dbg_var_at = pod_dn_dbg_varat;
+    s->dbg_stack_depth = pod_dn_geti; s->dbg_stack_frame = pod_dn_dbg_frame;
+    s->dbg_line_count = pod_dn_geti; s->dbg_line_at = pod_dn_dbg_lineat;
+    s->dbg_run = pod_dn_dbg_s;
 
     if (caps & POD_CAP_CONSOLE) {
         s->puts = svc_puts; s->putc = svc_putc; s->getkey = svc_getkey; s->inkey = svc_inkey;
@@ -220,6 +253,23 @@ void pod_build_svc(BerryServices *s, uint64_t caps) {
         s->getcwd = svc_getcwd; s->chdir = svc_chdir;
     }
     if (caps & POD_CAP_KEYWORD) s->set_return_str = svc_set_return_str;
+    if (caps & POD_CAP_DEBUG) {
+        s->dbg_attach = dbg_svc_attach; s->dbg_detach = dbg_svc_detach;
+        s->dbg_break_line = dbg_svc_break_line; s->dbg_break_proc = dbg_svc_break_proc;
+        s->dbg_break_kw = dbg_svc_break_kw; s->dbg_break_every = dbg_svc_break_every;
+        s->dbg_clear = dbg_svc_clear; s->dbg_list_breaks = dbg_svc_list_breaks;
+        s->dbg_cont = dbg_do_cont; s->dbg_step = dbg_do_step;
+        s->dbg_step_over = dbg_do_step_over; s->dbg_step_out = dbg_do_step_out; s->dbg_abort = dbg_do_abort;
+        s->dbg_watch = dbg_svc_watch; s->dbg_break_error = dbg_svc_break_error;
+        s->dbg_break_line_if = dbg_svc_break_line_if;
+        s->dbg_trace_to = dbg_svc_trace_to; s->dbg_trace_off = dbg_svc_trace_off;
+        s->dbg_where = dbg_svc_where; s->dbg_eval = dbg_eval_expr;
+        s->dbg_set_num = dbg_svc_set_num; s->dbg_set_str = dbg_svc_set_str;
+        s->dbg_var_count = dbg_svc_var_count; s->dbg_var_at = dbg_svc_var_at;
+        s->dbg_stack_depth = dbg_svc_stack_depth; s->dbg_stack_frame = dbg_svc_stack_frame;
+        s->dbg_line_count = dbg_svc_line_count; s->dbg_line_at = dbg_svc_line_at;
+        s->dbg_run = dbg_svc_run;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -636,6 +686,7 @@ static const struct { uint64_t bit; const char *name; } pod_cap_names[] = {
     { POD_CAP_GPIO,"GPIO" }, { POD_CAP_I2C,"I2C" }, { POD_CAP_TIME,"TIME" },
     { POD_CAP_HEAP,"HEAP" }, { POD_CAP_KEYWORD,"KEYWORD" }, { POD_CAP_SPAWN,"SPAWN" },
     { POD_CAP_RAWMEM,"RAWMEM" }, { POD_CAP_CORES,"CORES" }, { POD_CAP_NET,"NET" },
+    { POD_CAP_DEBUG,"DEBUG" },
 };
 
 void pod_puts(const char *s) { int n = 0; while (s[n]) n++; con_putsn(s, n); }

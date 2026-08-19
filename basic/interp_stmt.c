@@ -8,6 +8,7 @@
 #include "interp_events.h"
 #include "interp_pod.h"
 #include "interp_control.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — statements: control flow, PRINT/LET/IF, loops, FOR, DIM, INPUT
 //
@@ -401,6 +402,8 @@ void stmt_let(int had_let) {
         if (v.is_str) { err("Type mismatch: numbers and text can't be mixed"); return; }
         var->num = trunc_int(var->is_int, v.num);
     }
+    // Debugger watchpoint: fires after the store, so the front-end sees the new value.
+    if (dbg_active && dbg_watch_armed(name)) dbg_write_hook(name, var->is_str, var->num);
 }
 
 // Unary indirection poke statement: ?addr = v (byte), !addr = v (word),

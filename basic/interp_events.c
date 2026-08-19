@@ -7,6 +7,7 @@
 #include "interp_stmt.h"
 #include "interp_hw.h"
 #include "interp_control.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — DATA/READ/RESTORE, event handlers (ON TIMER/PIN/MOUSE), VDU
 //
@@ -148,6 +149,18 @@ void on_key(void) {
     ev_key.active = 1;
 }
 
+// ON DEBUG PROC name   |   ON DEBUG OFF
+// Registers a BASIC PROC as the debugger's stop handler: it runs (reading any
+// variable, printing, changing state) at each breakpoint/step, then a STEP/CONT
+// inside it decides how to resume. A lightweight, native-code-free front-end.
+void on_debug(void) {
+    lex_next();                                  // consume DEBUG
+    if (word_is("OFF")) { lex_next(); dbg_on_stop_proc[0] = 0; dbg_refresh_active(); return; }
+    char nm[NAME_LEN]; if (!read_handler_proc(nm)) return;
+    s_copy(dbg_on_stop_proc, nm, NAME_LEN);
+    dbg_refresh_active();
+}
+
 // ON PIN p [RISING|FALLING] PROC name   |   ON PIN p OFF   |   ON PIN OFF
 void on_pin(void) {
     lex_next();                                  // consume PIN
@@ -208,6 +221,7 @@ void stmt_on(void) {
     if (tok == T_KW && tok_kw == KW_MOUSE) { on_mouse(); return; }
     if (word_is("TIMER"))                  { on_timer(); return; }
     if (word_is("KEY"))                    { on_key();   return; }
+    if (word_is("DEBUG"))                  { on_debug(); return; }
     int sel = (int)need_num();
     if (g_err) return;
     if (tok != T_KW || (tok_kw != KW_GOTO && tok_kw != KW_GOSUB)) { err("Expected GOTO or GOSUB after ON"); return; }

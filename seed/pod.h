@@ -69,6 +69,7 @@
 #define POD_CAP_RAWMEM   (1ull << 12)
 #define POD_CAP_CORES    (1ull << 13)
 #define POD_CAP_NET      (1ull << 14)
+#define POD_CAP_DEBUG    (1ull << 15)   // attach the debugger (dbg_* services)
 
 // The fixed 64-byte header, little-endian.  The loader reads the file bytewise
 // into this (AArch64 is -mstrict-align), so the struct is only a field map; do

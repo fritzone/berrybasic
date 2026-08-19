@@ -23,6 +23,8 @@ POD_NEEDS(CAP_FILES,    "FILES=loads and saves the file being edited")
 POD_NEEDS(CAP_DIRS,     "DIRS=the Open/Save dialogs browse folders and make new ones")
 POD_NEEDS(CAP_HEAP,     "HEAP=holds the text being edited")
 POD_NEEDS(CAP_SPAWN,    "SPAWN=Run runs the current BASIC program")
+POD_NEEDS(CAP_DEBUG,    "DEBUG=Debug steps through the program with breakpoints")
+POD_NEEDS(CAP_VARS,     "VARS=the debugger shows variable values")
 
 /* ---------------------------------------------------------------- CONFIG */
 
@@ -189,9 +191,18 @@ static int gutter_w = 5;      /* line-number gutter width in cells (recomputed) 
 static int is_basic = 0;      /* current file looks like a BASIC program          */
 static int auto_num = 1;      /* BASIC auto line-numbering: gutter + managed nums  */
 
+/* Debugger breakpoints the editor owns, as BASIC line numbers. They show as a
+ * dot in the gutter and are handed to the interpreter's debugger when Debug
+ * runs the program. Pure editor state until then (see run_debug). */
+#define MAX_BREAKS 64
+static int brk_lines[MAX_BREAKS];
+static int brk_n = 0;
+static int has_brk(int ln) { for (int i = 0; i < brk_n; i++) if (brk_lines[i] == ln) return 1; return 0; }
+
 /* BASIC line-number / body split (defined with the drawing code below, but used
  * earlier by the status bar). See body_off_of() for what it means. */
 static int body_off(void);
+static int line_num(Line *p);        /* the BASIC line number of p, or -1 */
 
 static int insert_mode = 1;
 static int changed;
@@ -356,14 +367,18 @@ static const char *help_items[] = {
     " About       ", 0
 };
 static const char *basic_items[] = {    /* BASIC-only menu (see menu_visible()) */
-    " Run             F5     ",
-    " Auto Number     Alt-N  ",
-    "-",                            /* separator */
-    " Procedures...   F9     ",
-    " Go to Line...   Ctrl-G ",
-    " Follow Ref      F4     ",
-    " Jump Back       F8     ",
-    " Check Refs             ",
+    " Run             F5     ",     /* 0 */
+    " Debug           Ctrl-D ",     /* 1 */
+    " Toggle Break    Ctrl-B ",     /* 2 */
+    " Clear Breaks           ",     /* 3 */
+    "-",                            /* 4 separator */
+    " Auto Number     Alt-N  ",     /* 5 */
+    "-",                            /* 6 separator */
+    " Procedures...   F9     ",     /* 7 */
+    " Go to Line...   Ctrl-G ",     /* 8 */
+    " Follow Ref      F4     ",     /* 9 */
+    " Jump Back       F8     ",     /* 10 */
+    " Check Refs             ",     /* 11 */
     0
 };
 static const struct menu_def {
@@ -633,7 +648,9 @@ static void update_gutter(void)
         while (t >= 10) { t /= 10; d++; }
     }
     if (d < 3) d = 3;
-    gutter_w = d + 1;                           /* digits + one trailing space */
+    /* digits + one trailing space, and for BASIC a leading column reserved for
+     * the breakpoint marker so the '*' never overwrites the first digit. */
+    gutter_w = d + 1 + (is_basic ? 1 : 0);
 }
 
 /* Does the filename end in ".BAS" (any case)?  Then it is syntax-coloured. */
@@ -769,6 +786,11 @@ static void draw_text(void)
                 fgrgb(0x8090C0);
                 for (i = 0; i < gw; i++) out(' ');
             }
+        }
+
+        /* a breakpoint dot in the leftmost gutter cell (over the number padding) */
+        if (gw > 0 && p && is_basic && has_brk(line_num(p))) {
+            bgrgb(0x0000A0); fgrgb(0xFF4040); at(win_x1, row); out('*');
         }
 
         if (p && is_basic) { hl_basic(p->s, p->len, clsbuf); hl_on = 1; }
@@ -2147,6 +2169,191 @@ static int run_current(void)
     return 0;                               /* stay in the editor */
 }
 
+/* ------------------------------------------------------------ DEBUGGER
+ * The editor is a CAP_DEBUG front-end: it collects gutter breakpoints, then
+ * Debug arms them in the interpreter and runs the program, pausing into the
+ * on_stop overlay below. Because RUN wipes the seed heap our line list lives
+ * in, the overlay draws the source from the interpreter (dbg_line_at), not from
+ * our own (now-dead) buffer - the same discipline run_current already follows. */
+
+static void toggle_break(void)
+{
+    int ln;
+    if (!is_basic) { message("Breakpoints work with BASIC (.BAS) files."); return; }
+    ln = line_num(cur);
+    if (ln < 0) { message("This line has no line number to break on."); return; }
+    for (int i = 0; i < brk_n; i++)
+        if (brk_lines[i] == ln) {                       /* already set: toggle it off */
+            for (int j = i; j < brk_n - 1; j++) brk_lines[j] = brk_lines[j + 1];
+            brk_n--; return;
+        }
+    if (brk_n < MAX_BREAKS) brk_lines[brk_n++] = ln;
+    else message("Too many breakpoints.");
+}
+static void clear_breaks(void) { brk_n = 0; message("All breakpoints cleared."); }
+
+static int dbg_view;    /* the overlay's cursor line (index into the program table) */
+
+/* Small unsigned -> decimal helper (fmt_uint is defined later; keep local). */
+static void dbg_num(int v, char *out)
+{
+    char t[12]; int n = 0;
+    if (v < 0) { *out++ = '-'; v = -v; }
+    if (v == 0) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    int i = 0; while (n) out[i++] = t[--n]; out[i] = 0;
+}
+
+static const char *dbg_event_name(int ev)
+{
+    switch (ev) {
+        case BERRY_DBG_ERROR:   return "error";
+        case BERRY_DBG_CALL:    return "call";
+        case BERRY_DBG_WRITE:   return "write";
+        case BERRY_DBG_KEYWORD: return "keyword";
+        default:                return "stopped";
+    }
+}
+
+static void dbg_draw(const dbg_ctx *c)
+{
+    int total = S->dbg_line_count();
+    int nrows = ROWS - 4;
+    int cur_idx = c->line_idx, top, r;
+
+    if (dbg_view < 0 || dbg_view >= total) dbg_view = cur_idx;
+    top = dbg_view - nrows / 2;
+    if (top > total - nrows) top = total - nrows;
+    if (top < 0) top = 0;
+
+    bg(C_BLACK); fg(C_WHITE); cls();
+    bgrgb(0x0000A0); fgrgb(0xFFFF80);
+    puts_at(0, 0, " ed debug   F7 step  F8 over  F6 out  F5 cont  F9 break  q quit");
+
+    for (r = 0; r < nrows; r++) {
+        int idx = top + r, row = r + 1, number = 0;
+        char text[128], ns[12];
+        if (idx < 0 || idx >= total) continue;
+        if (S->dbg_line_at(idx, &number, text, sizeof text) < 0) continue;
+        bgrgb(idx == cur_idx ? 0x0000A0 : (idx == dbg_view ? 0x243244 : 0x000000));
+        fgrgb(0x808080);
+        at(0, row);
+        if (has_brk(number)) { fgrgb(0xFF4040); out('*'); } else out(' ');
+        if (idx == cur_idx) { fgrgb(0xFFFF80); out('>'); } else out(' ');
+        dbg_num(number, ns);
+        fgrgb(0x60D0F0);
+        { int k = 0; while (ns[k]) out((unsigned char)ns[k++]); out(' '); }
+        fgrgb(idx == cur_idx ? 0xFFFFFF : 0xC0C0C0);
+        { int k = 0; while (text[k] && k < COLS - 12) out((unsigned char)text[k++]); }
+    }
+
+    /* status + a compact variables strip */
+    bgrgb(0x0000A0); fgrgb(0xFFFFFF);
+    { char st[96], ns[12]; int p;
+      dbg_num(c->line, ns);
+      strcpy(st, " "); strcat(st, dbg_event_name(c->event));
+      strcat(st, " at line "); strcat(st, ns);
+      if (c->event == BERRY_DBG_ERROR && c->errmsg) { strcat(st, ": "); strncat(st, c->errmsg, 40); }
+      for (p = (int)strlen(st); p < COLS; p++) st[p] = ' '; st[COLS] = 0;
+      puts_at(0, ROWS - 2, st);
+    }
+    { char vars[160]; int nv = S->dbg_var_count(), shown = 0; vars[0] = 0;
+      strcpy(vars, " ");
+      for (int i = 0; i < nv && shown < 6 && (int)strlen(vars) < COLS - 14; i++) {
+          char name[16], val[40]; int isstr = 0, isarr = 0;
+          if (S->dbg_var_at(i, name, sizeof name, &isstr, &isarr) < 0) continue;
+          if (isarr) continue;
+          if (isstr) { char b[24]; int n = S->get_str(name, b, sizeof b - 1);
+                       if (n < 0) n = 0; if (n > 23) n = 23; b[n] = 0;
+                       strcat(vars, name); strcat(vars, "=\""); strcat(vars, b); strcat(vars, "\" "); }
+          else { double v = 0; char nb[32]; S->get_num(name, &v); S->fmt_num(v, nb);
+                 strcat(vars, name); strcat(vars, "="); strcat(vars, nb); strcat(vars, " "); }
+          shown++;
+      }
+      bgrgb(0x000000); fgrgb(0xA0E0A0);
+      puts_at(0, ROWS - 1, vars);
+    }
+}
+
+static void ed_on_stop(const dbg_ctx *c)
+{
+    dbg_view = c->line_idx;
+    for (;;) {
+        dbg_draw(c);
+        int k = key();                       /* key() flips the back buffer then reads */
+        int nrows = ROWS - 4;
+        switch (k) {
+            case K_F7: case 's':               S->dbg_step();      return;
+            case K_F8: case 'o':               S->dbg_step_over(); return;
+            case K_F6: case 'u':               S->dbg_step_out();  return;
+            case K_F5: case 'c': case K_ENTER: S->dbg_cont();      return;
+            case 'q': case K_ESC:              S->dbg_abort();     return;
+            case K_UP:   if (dbg_view > 0) dbg_view--; break;
+            case K_DOWN: if (dbg_view < S->dbg_line_count() - 1) dbg_view++; break;
+            case K_PGUP: dbg_view -= nrows; if (dbg_view < 0) dbg_view = 0; break;
+            case K_PGDN: dbg_view += nrows;
+                         if (dbg_view > S->dbg_line_count() - 1) dbg_view = S->dbg_line_count() - 1; break;
+            case K_F9: {                       /* toggle a breakpoint on the cursor line */
+                int number = 0; char t[8];
+                if (S->dbg_line_at(dbg_view, &number, t, sizeof t) == 0) {
+                    if (has_brk(number)) { S->dbg_clear(number);
+                        for (int i = 0; i < brk_n; i++) if (brk_lines[i] == number) {
+                            for (int j = i; j < brk_n - 1; j++) brk_lines[j] = brk_lines[j + 1]; brk_n--; break; } }
+                    else if (brk_n < MAX_BREAKS) { S->dbg_break_line(number); brk_lines[brk_n++] = number; }
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+/* Debug: like Run, but arm the debugger with the editor's breakpoints first. */
+static int run_debug(void)
+{
+    int ci, ti, si, scurx, scoloff, sselc;
+
+    if (!is_basic) { message("Debug works with BASIC (.BAS) files."); return 0; }
+    if (!S->dbg_run || !S->dbg_attach) { message("The debugger is unavailable."); return 0; }
+    if (!strcmp(filename, "NONAME.TXT")) {
+        do_saveas();
+        if (!strcmp(filename, "NONAME.TXT")) return 0;
+    } else if (save_file(filename) < 0) {
+        message("Could not save; not debugged.");
+        return 0;
+    }
+    changed = 0;
+
+    ci = line_index(cur); ti = line_index(top);
+    si = sel_anchor ? line_index(sel_anchor) : -1;
+    scurx = curx; scoloff = coloff; sselc = sel_acol;
+
+    S->dbg_attach(ed_on_stop);
+    S->dbg_break_error(1);                  /* also drop in on an uncaught error */
+    if (brk_n == 0) S->dbg_break_every(1);  /* no breakpoints set: single-step from the top */
+    else { S->dbg_clear(0); for (int i = 0; i < brk_n; i++) S->dbg_break_line(brk_lines[i]); }
+
+    dbg_view = -1;
+    S->dbg_run(filename);                   /* runs on the visible screen, calling ed_on_stop */
+    S->dbg_detach();
+
+    { static const char *pause = "\n[ press a key to return to the editor ]\n";
+      S->puts(pause, (int)strlen(pause)); S->getkey(); }
+
+    first = 0;                              /* the list's heap was reset by the run */
+    undo_forget(); nav_reset();
+    S->gfx_backbuffer(1);
+    if (load_file(filename) < 0) { S->puts("ed: out of memory\n", 18); return 1; }
+    cur = line_at(ci); top = line_at(ti);
+    sel_anchor = (si >= 0) ? line_at(si) : 0; sel_acol = sselc;
+    curx = scurx; coloff = scoloff; lineno = ci + 1;
+    if (curx > cur->len) curx = cur->len;
+    if (curx < body_off()) curx = body_off();
+    bg(C_BLUE); fg(C_WHITE); cls();
+    scroll_into_view(); redraw();
+    return 0;
+}
+
 /* Delete the current line (also Ctrl-Y). Never empties the list. */
 static void delete_line(void)
 {
@@ -2190,13 +2397,16 @@ static int menu_action(int menu, int item)
         }
     } else if (menu == BASIC_MENU) {                  /* Basic (BASIC files only) */
         switch (item) {
-        case 0: return run_current();                 /* Run          */
-        case 1: toggle_autonum(); break;              /* Auto Number  */
-        case 3: do_outline();     break;              /* item 2 is the separator */
-        case 4: do_goto_line();   break;
-        case 5: do_follow_ref();  break;
-        case 6: do_jump_back();   break;
-        case 7: do_check_refs();  break;
+        case 0: return run_current();                 /* Run           */
+        case 1: return run_debug();                   /* Debug         */
+        case 2: toggle_break();   break;              /* Toggle Break  */
+        case 3: clear_breaks();   break;              /* Clear Breaks  */
+        case 5: toggle_autonum(); break;              /* Auto Number (4,6 separators) */
+        case 7: do_outline();     break;
+        case 8: do_goto_line();   break;
+        case 9: do_follow_ref();  break;
+        case 10: do_jump_back();  break;
+        case 11: do_check_refs(); break;
         }
     } else {                                          /* Help */
         switch (item) {
@@ -2372,6 +2582,8 @@ int main(int argc, char **argv)
         else if ((mods & KMOD_CTRL) && (c == 'r' || c == 'R')) { do_replace(); handled = 1; }  /* Ctrl-R */
         else if ((mods & KMOD_CTRL) && (c == 'g' || c == 'G')) { do_goto_line(); handled = 1; }  /* Ctrl-G */
         else if ((mods & KMOD_CTRL) && (c == 'p' || c == 'P')) { do_outline();   handled = 1; }  /* Ctrl-P */
+        else if ((mods & KMOD_CTRL) && (c == 'd' || c == 'D')) { quit = run_debug();   handled = 1; }  /* Ctrl-D debug */
+        else if ((mods & KMOD_CTRL) && (c == 'b' || c == 'B')) { toggle_break();       handled = 1; }  /* Ctrl-B breakpoint */
         else if ((mods & KMOD_CTRL) && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { handled = 1; }  /* swallow */
 
         if (!handled) {

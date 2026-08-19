@@ -53,6 +53,7 @@ typedef unsigned long long pod_u64;
 #define CAP_RAWMEM   (1ull << 12)  /* read/write memory outside its own image  */
 #define CAP_CORES    (1ull << 13)  /* dispatch work to worker cores            */
 #define CAP_NET      (1ull << 14)  /* reserved for networking                  */
+#define CAP_DEBUG    (1ull << 15)  /* attach the debugger (dbg_* services)     */
 
 /* -------------------------------------------------------------------------- *
  * Header flags (POD_KIND is bit 0 of the header `flags`).

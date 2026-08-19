@@ -3,6 +3,7 @@
 #include "interp_lexer.h"
 #include "interp_seed.h"
 #include "interp_stmt.h"
+#include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — helpers, error state, floating-point math, number formatting
 //
@@ -80,6 +81,13 @@ void err(const char *msg) {
     set_errmsg(msg);
     g_errcode = 0;           // built-in error: no user code
     g_errline = g_runline;
+    // Debugger post-mortem: if break-on-error is armed and no TRY will catch it,
+    // drop into the debugger at the failing line with state still live. dbg_stop
+    // clears g_err around its own work; restore it so the error still propagates.
+    if (dbg_active && dbg_break_on_error && try_sp == 0 && !dbg_in_hook) {
+        dbg_error_hook();
+        if (!g_err) { g_err = 1; set_errmsg(msg); g_errline = g_runline; }
+    }
     if (try_sp > 0) { g_err_reported = 0; return; }  // a TRY may report it: defer
     con_putc('\n');
     con_puts(msg);
