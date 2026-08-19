@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# Convert a raw bitmap font into drivers/font_data.c (the glyph table the kernel
-# links in). The font file is 256 glyphs, each `height` bytes, one byte per row
-# with the most-significant bit on the left (the .F08 / .F16 format). The glyph
-# height is derived from the file size (size / 256), so the same tool handles an
-# 8-pixel-tall .F08 or a 16-pixel-tall .F16.
+# Convert a raw bitmap font into font_data.c (the glyph table the kernel links
+# in), written into build/ by default. The font file is 256 glyphs, each `height`
+# bytes, one byte per row with the most-significant bit on the left (the .F08 /
+# .F16 format). The glyph height is derived from the file size (size / 256), so
+# the same tool handles an 8-pixel-tall .F08 or a 16-pixel-tall .F16. There is no
+# committed copy of font_data.c; tools/configure.sh calls this with build/font_data.c.
 #
-# Usage:  tools/genfont.sh fonts/NAME.Fxx [drivers/font_data.c]
+# Usage:  tools/genfont.sh fonts/NAME.Fxx [build/font_data.c]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FONT="${1:?usage: genfont.sh fonts/NAME.Fxx [out.c]}"
-OUT="${2:-$ROOT/drivers/font_data.c}"
+OUT="${2:-$ROOT/build/font_data.c}"
 
 [ -f "$FONT" ] || { echo "error: font '$FONT' not found"; exit 1; }
 

@@ -25,7 +25,9 @@ OUT="${1:-$ROOT/berrybasic-sd.img}"
 SIZE_MB="${2:-256}"
 FW_DIR="$ROOT/firmware"
 KERNEL="$ROOT/build/kernel8.img"
-CONFIG="$ROOT/boot/config.txt"
+# Prefer the configured config.txt in build/ (written by tools/configure.sh);
+# fall back to the committed default in boot/ when no configuration was made.
+if [ -f "$ROOT/build/config.txt" ]; then CONFIG="$ROOT/build/config.txt"; else CONFIG="$ROOT/boot/config.txt"; fi
 
 # Layout (sectors of 512 B; 2048 sectors = 1 MiB):
 #   gap   : LBA 0..2047            (MBR + alignment)

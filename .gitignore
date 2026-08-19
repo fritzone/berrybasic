@@ -1,8 +1,8 @@
 build/*
 berrybasic-sd.img
 sd.img
-# generated: copyright banner + build info header (see tools/genconf.sh)
-basic/conf.h
+# (conf.h - the copyright banner + build-info header - is generated into build/,
+#  covered by build/* above; see tools/genconf.sh)
 # generated: mirror of podlib/include/berry_services.h for the POD compiler (see Makefile)
 third_party/tinycc/include/berry_services.h
 # generated: mirror of podlib/include/seed.h so `tcc -seed` finds it on the machine

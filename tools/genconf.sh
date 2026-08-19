@@ -2,11 +2,12 @@
 # ---------------------------------------------------------------------------
 # genconf.sh <output-conf.h>
 #
-# Generates basic/conf.h: the startup COPYRIGHT_MESSAGE (the usual banner)
-# expanded with build information (version, build date, git revision). It is
-# #included by basic/basic.c and shared by every build of the interpreter
-# (bare-metal kernel, host harness, and the CMake unit tests), so all three
-# regenerate it the same way.
+# Generates conf.h: the startup COPYRIGHT_MESSAGE (the usual banner) expanded
+# with build information (version, build date, git revision). It is #included by
+# basic/basic.c and shared by every build of the interpreter (bare-metal kernel,
+# host harness, and the CMake unit tests), so all three regenerate it the same
+# way. The output path is passed in - each build writes it into its own BUILD
+# directory (never the tracked source tree), so a build never dirties git.
 #
 # The file is rewritten ONLY when its contents actually change, so a rebuild of
 # basic.o is not forced on every `make` (the date is day-granular; the git

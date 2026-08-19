@@ -11,10 +11,12 @@ endif()
 set(REPO ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # basic.c #includes the generated "conf.h" (copyright banner + build info).
-# Generate it at configure time so a bare `cmake` build works without the
-# Makefile; the same tools/genconf.sh is used by the kernel and host builds.
+# Generate it at configure time into the CMake BUILD directory (never the source
+# tree, so a test build does not dirty git); the same tools/genconf.sh is used by
+# the kernel and host builds. ${CMAKE_CURRENT_BINARY_DIR} is added to the include
+# path below so basic.c's #include "conf.h" finds it.
 execute_process(
-  COMMAND ${REPO}/tools/genconf.sh ${CMAKE_CURRENT_SOURCE_DIR}/conf.h
+  COMMAND ${REPO}/tools/genconf.sh ${CMAKE_CURRENT_BINARY_DIR}/conf.h
   WORKING_DIRECTORY ${REPO})
 
 # --- Catch2 v3 --------------------------------------------------------------
@@ -51,6 +53,7 @@ add_executable(unit_tests
 target_compile_definitions(unit_tests PRIVATE
   FONT_TTF_PATH="${REPO}/fonts/Philosopher-Regular.ttf")
 target_include_directories(unit_tests PRIVATE
+  ${CMAKE_CURRENT_BINARY_DIR}    # the generated conf.h lives here
   ${REPO}/include ${REPO}/basic ${REPO}/seed ${REPO}/drivers ${REPO}/third_party)
 # berry_services.h + seed.h live in podlib/include, which is also a freestanding
 # libc; add it via -idirafter so the system headers (this is a hosted test build)
