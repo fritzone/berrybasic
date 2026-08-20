@@ -20,8 +20,9 @@
 // `screen_size`; v17 appended `con_font`/`con_glyph`; v18 appended the directory
 // browsing set (dir_open/dir_read/getcwd/chdir); v19 appended the clipboard
 // (clip_set/clip_get/clip_len); v20 appended icache_sync; v21-23 blit/keys/audio;
-// v24 appended run_basic; v25 appended the debugger group (dbg_*, POD_CAP_DEBUG).
-#define BERRY_ABI_VERSION 25u
+// v24 appended run_basic; v25 appended the debugger group (dbg_*, POD_CAP_DEBUG);
+// v26 appended screen_save/screen_restore (CAP_GRAPHICS).
+#define BERRY_ABI_VERSION 26u
 
 // Modes for the file_open service.
 #define BERRY_FOPEN_READ   0
@@ -334,6 +335,13 @@ typedef struct BerryServices {
     int  (*dbg_line_count)(void);                  // program source access
     int  (*dbg_line_at)(int idx, int *number, char *text, int textlen);
     int  (*dbg_run)(const char *path);             // arm + run a program for debugging
+
+    // v26: save/restore the whole visible screen to a private stash separate from
+    // the double buffer (CAP_GRAPHICS). A full-screen program stashes a debugged
+    // program's output - text or graphics, any mode - with screen_save, draws its
+    // own UI over the front, and shows the output again with screen_restore.
+    void (*screen_save)(void);
+    void (*screen_restore)(void);
 } BerryServices;
 
 // The one services pointer the berry-libc reads. A POD's crt0 sets it before

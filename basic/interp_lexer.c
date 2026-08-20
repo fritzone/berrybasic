@@ -142,6 +142,14 @@ const char *kw_spelling(int id) {
     return 0;
 }
 
+// True if `name` (already upper-cased, with any $/% suffix) is a built-in
+// keyword's spelling - so it may not be used as a variable/PROC/FN name.
+int name_is_reserved(const char *name) {
+    for (int i = 0; i < kwcount; i++)
+        if (s_eq(name, kwtab[i].name)) return 1;
+    return 0;
+}
+
 const char *cur_text;           // text of the line currently executing (see cur_line_idx)
 const char *lx;                 // lexer cursor into the current line
 const char *tok_start;          // start of the current token (for re-branching)

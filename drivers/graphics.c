@@ -103,6 +103,33 @@ void gfx_flip(void) {
 
 int gfx_buffered(void) { return buffered; }
 
+// --- saved screen (for the editor's Alt+F5 output view) ---------------------
+// A stash of the whole visible screen, separate from the double buffer, so a POD
+// (the editor) can snapshot a running program's output - text OR graphics, any
+// mode - and show it again on demand while it draws its own UI over the front.
+static uint32_t saved_store[BACK_CAP] __attribute__((aligned(16)));
+static int      saved_valid = 0;
+
+// Copy the visible front surface into the saved store.
+void gfx_screen_save(void) {
+    for (uint32_t y = 0; y < front_height; y++) {
+        uint32_t *s = front_buf   + (uint64_t)y * front_pitch_words;
+        uint32_t *d = saved_store + (uint64_t)y * front_width;
+        for (uint32_t x = 0; x < front_width; x++) d[x] = s[x];
+    }
+    saved_valid = 1;
+}
+
+// Copy the saved store back onto the visible front surface (no-op if none saved).
+void gfx_screen_restore(void) {
+    if (!saved_valid) return;
+    for (uint32_t y = 0; y < front_height; y++) {
+        uint32_t *d = front_buf   + (uint64_t)y * front_pitch_words;
+        uint32_t *s = saved_store + (uint64_t)y * front_width;
+        for (uint32_t x = 0; x < front_width; x++) d[x] = s[x];
+    }
+}
+
 // Fast nearest-neighbour blit of a w*h 8-bit indexed image (palette already in
 // framebuffer pixel format) onto the ACTIVE surface, scaled by `scale`, top-left
 // at (dx,dy), clipped to the surface. One call pushes a whole paletted frame (a

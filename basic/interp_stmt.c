@@ -954,9 +954,15 @@ int dim_record(const char *name, int nelem) {
 void stmt_dim(void) {
     lex_next();                              // consume DIM
     for (;;) {
-        if (tok != T_VAR) { err("Expected a variable name"); return; }
         char name[NAME_LEN];
-        s_copy(name, tok_var, NAME_LEN);
+        if (tok == T_VAR) {
+            s_copy(name, tok_var, NAME_LEN);
+        } else if (tok == T_KW && kw_spelling(tok_kw)) {
+            // A reserved word can't be a variable name (e.g. `DIM buffer 100` -
+            // BUFFER is a keyword). Say so clearly instead of "Expected a name".
+            err2("Reserved word, can't be a variable name: ", kw_spelling(tok_kw));
+            return;
+        } else { err("Expected a variable name"); return; }
         int isstr = name_is_str(name);
         lex_next();
 

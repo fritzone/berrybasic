@@ -206,6 +206,10 @@ int svc_gfx_backbuffer (int on);
 // BerryServices wrapper exposing "gfx_flip" to seeds and PODs.
 void svc_gfx_flip (void);
 
+// Save/restore the whole visible screen to a private stash (v26, CAP_GRAPHICS).
+void svc_screen_save (void);
+void svc_screen_restore (void);
+
 // BerryServices wrapper exposing "gfx_buffered" to seeds and PODs.
 int svc_gfx_buffered (void);
 

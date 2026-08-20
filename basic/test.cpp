@@ -2097,3 +2097,22 @@ TEST_CASE("debugger: TRACE TO with CALLS logs PROC entry and return") {
     REQUIRE_THAT(out, ContainsSubstring("> PROCFOO"));   // entry logged
     REQUIRE_THAT(out, ContainsSubstring("< PROCFOO"));   // return logged
 }
+
+TEST_CASE("reserved words are rejected as names") {
+    // BUFFER is the double-buffer keyword, so it can't be a variable name -
+    // report that clearly instead of a confusing "Expected a variable name".
+    REQUIRE_THAT(run("10 DIM buffer 16\n"),
+                 ContainsSubstring("Reserved word"));
+    // A non-reserved name in the same idiom works fine.
+    REQUIRE_THAT(run("10 DIM mem 16\n20 ?mem = 65\n30 mem?1 = 66\n"
+                     "40 PRINT ?mem; mem?1"),
+                 ContainsSubstring("6566"));
+    // PROC/FN names are a separate, prefixed namespace, so a keyword spelling
+    // is fine there: PROClist is unambiguous and must keep working.
+    REQUIRE_THAT(run("10 PROClist\n20 END\n30 DEF PROClist\n40 PRINT \"ok\"\n"
+                     "50 ENDPROC"),
+                 ContainsSubstring("ok"));
+    // ...while the BUFFER command itself still works.
+    REQUIRE_THAT(run("10 BUFFER ON\n20 PRINT \"ok\"\n30 BUFFER OFF"),
+                 ContainsSubstring("ok"));
+}

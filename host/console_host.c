@@ -128,6 +128,8 @@ static int host_buffered = 0;
 int  con_backbuffer(int on) { host_buffered = on ? 1 : 0; return 0; }
 void con_flip(void) {}
 int  con_buffered(void) { return host_buffered; }
+void con_screen_save(void) {}
+void con_screen_restore(void) {}
 void con_newsprite(long a, int w, int h) { (void)a; (void)w; (void)h; }
 int  con_target_sprite(long a) { (void)a; return 0; }
 void con_target_screen(void) {}

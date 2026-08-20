@@ -34,6 +34,7 @@ int is_seed_kw (int id);
 // nothing else is legal. Aliases (COLOUR/COLOR) resolve to whichever is listed
 // first, which is all a name needs.
 const char *kw_spelling (int id);
+int name_is_reserved (const char *name);
 
 // Lex next.
 void lex_next (void);

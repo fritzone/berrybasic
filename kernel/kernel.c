@@ -1451,6 +1451,8 @@ int con_backbuffer(int on) {
 }
 void con_flip(void) { if (fb_ready) { gfx_flip(); sysmon_after_flip(); } }
 int  con_buffered(void) { return gfx_buffered(); }
+void con_screen_save(void)    { if (fb_ready) gfx_screen_save(); }
+void con_screen_restore(void) { if (fb_ready) gfx_screen_restore(); }
 
 // --- high-level shape commands (BBC logical coordinates) --------------------
 // All draw in the current graphics foreground (logical or truecolour) and honour

@@ -492,6 +492,8 @@ void svc_mouse(int *x, int *y, int *b)     { con_mouse(x, y, b); }
 // BUFFER/FLIP use, so a seed and a program can't each have their own idea of it.
 int  svc_gfx_backbuffer(int on)            { return con_backbuffer(on); }
 void svc_gfx_flip(void)                    { con_flip(); }
+void svc_screen_save(void)                 { con_screen_save(); }
+void svc_screen_restore(void)              { con_screen_restore(); }
 int  svc_gfx_buffered(void)                { return con_buffered(); }
 // Modifier/lock state: not a key, so getkey/inkey can never carry it.
 int  svc_keymods(void)                     { return con_keymods(); }
@@ -792,6 +794,7 @@ const BerryServices g_svc = {
     .dbg_stack_depth = dbg_svc_stack_depth, .dbg_stack_frame = dbg_svc_stack_frame,
     .dbg_line_count = dbg_svc_line_count, .dbg_line_at = dbg_svc_line_at,
     .dbg_run = dbg_svc_run,
+    .screen_save = svc_screen_save, .screen_restore = svc_screen_restore,
 };
 
 // Parse "handle [, arg ...]" (tok at the handle, stops on the first non-comma

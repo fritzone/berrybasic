@@ -380,7 +380,10 @@ static void fmt_val(const char *name, int isstr, char *out, int outsz)
         out[0] = '"'; strncpy(out + 1, b, outsz - 3);
         int L = (int)strlen(out); out[L] = '"'; out[L + 1] = 0;
     } else {
-        double v = 0; S->get_num(name, &v); S->fmt_num(v, out);
+        double v = 0; S->get_num(name, &v);
+        int n = S->fmt_num(v, out);      /* fmt_num returns the length, no NUL */
+        if (n < 0) n = 0; if (n > outsz - 1) n = outsz - 1;
+        out[n] = 0;
     }
 }
 

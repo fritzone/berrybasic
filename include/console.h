@@ -95,6 +95,12 @@ int  con_backbuffer(int on);
 void con_flip(void);
 int  con_buffered(void);
 
+// Save/restore the whole visible screen to a private stash (separate from the
+// double buffer). A full-screen program (the editor) uses this to stash a
+// running program's output and show it again on demand while drawing its own UI.
+void con_screen_save(void);
+void con_screen_restore(void);
+
 // --- render-to-sprite -------------------------------------------------------
 // con_newsprite initialises a DIM buffer as a w*h fully transparent sprite.
 // con_target_sprite redirects all drawing into that sprite (coordinates become

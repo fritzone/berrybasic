@@ -341,7 +341,7 @@ SEEDCORE_PKT = $(BUILD_DIR)/lib/SEEDCORE.PKT
 # marks a self-contained pod_main POD (built with `tcc -pod`); otherwise it is a
 # pod-libc program (linked with the runtime by podcc.sh). To add one, drop
 # programs/<name>/<name>.c and add it here. `edit` -> ED.POD (EDIT is a keyword).
-APP_LIST = edit:ED grow:GROW show:SHOW echo:ECHO:bare seedrun:SEEDRUN debug:DEBUG
+APP_LIST = edit:ED grow:GROW show:SHOW echo:ECHO:bare seedrun:SEEDRUN debug:DEBUG help:HELP helpview:HVIEW
 app_dir  = $(word 1,$(subst :, ,$(1)))
 app_pod  = $(word 2,$(subst :, ,$(1)))
 app_bare = $(word 3,$(subst :, ,$(1)))

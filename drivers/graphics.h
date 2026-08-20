@@ -27,6 +27,11 @@ int  gfx_backbuffer(int on);
 void gfx_flip(void);
 int  gfx_buffered(void);
 
+// Save/restore the whole visible screen to a private stash (separate from the
+// double buffer), so a POD can stash a program's output and show it on demand.
+void gfx_screen_save(void);
+void gfx_screen_restore(void);
+
 // Render-to-sprite: gfx_set_target points every primitive at an off-screen WxH
 // surface (tightly packed, pitch = w); gfx_reset_target restores the screen
 // (front or back buffer). Used by SPRITETARGET.

@@ -2144,6 +2144,7 @@ static int run_current(void)
 
     S->run_basic(filename);                 /* blocks on the visible screen until it stops */
 
+    S->screen_save();                       /* stash the output so Alt+F5 can show it later */
     S->puts(pause, (int)strlen(pause));     /* let the user read the output */
     S->getkey();                            /* wait for any key */
 
@@ -2211,101 +2212,259 @@ static const char *dbg_event_name(int ev)
         case BERRY_DBG_CALL:    return "call";
         case BERRY_DBG_WRITE:   return "write";
         case BERRY_DBG_KEYWORD: return "keyword";
-        default:                return "stopped";
+        default:                return "paused";
     }
 }
+
+/* Format one variable's value the way the panel shows it. */
+static void dbg_fmt_val(const char *name, int isstr, char *out, int outsz)
+{
+    if (isstr) {
+        char b[40]; int n = S->get_str(name, b, sizeof b - 1);
+        if (n < 0) n = 0; if (n > (int)sizeof b - 1) n = sizeof b - 1; b[n] = 0;
+        out[0] = '"'; strncpy(out + 1, b, outsz - 3);
+        int L = (int)strlen(out); out[L] = '"'; out[L + 1] = 0;
+    } else {
+        double v = 0; S->get_num(name, &v);
+        int n = S->fmt_num(v, out);      /* fmt_num returns the length, no NUL */
+        if (n < 0) n = 0; if (n > outsz - 1) n = outsz - 1;
+        out[n] = 0;
+    }
+}
+
+/* The debugger view, drawn INSIDE the editor's own chrome so it feels like the
+ * editor paused, not a separate program: the real menu bar, the blue framed
+ * window with the filename in its title, the gutter (cyan line numbers + red
+ * breakpoint dots) and syntax highlighting exactly as when editing, a docked
+ * Watch panel on the right, and the editor's status bar showing debug controls.
+ * The source is read from the interpreter (dbg_line_at) because RUN wiped our
+ * own line buffer - but it is the same program we just saved, drawn the same. */
+#define DBG_PANEL_W 26
 
 static void dbg_draw(const dbg_ctx *c)
 {
-    int total = S->dbg_line_count();
-    int nrows = ROWS - 4;
-    int cur_idx = c->line_idx, top, r;
+    int total  = S->dbg_line_count();
+    int cur_idx = c->line_idx;
+    int panelw = (COLS >= 64) ? DBG_PANEL_W : 0;         /* too narrow -> no panel */
+    int dvx    = panelw ? (win_x2 - panelw) : (win_x2 + 1);
+    int codeR  = panelw ? (dvx - 1) : win_x2;            /* rightmost code column */
+    int nrows  = win_y2 - win_y1 + 1;
+    unsigned char clsbuf[MAXLEN + 1];
 
+    /* gutter width from the widest line number: 1 marker col + digits + 1 space,
+     * matching the editor's own gutter formula. */
+    int maxnum = 0;
+    for (int i = 0; i < total; i++) { int nn = 0; char t[8];
+        if (S->dbg_line_at(i, &nn, t, sizeof t) == 0 && nn > maxnum) maxnum = nn; }
+    int nd = 1; { int t = maxnum; while (t >= 10) { t /= 10; nd++; } }
+    int gw = nd + 2;
+
+    /* scroll so the current line (and the nav cursor) stay visible */
     if (dbg_view < 0 || dbg_view >= total) dbg_view = cur_idx;
-    top = dbg_view - nrows / 2;
-    if (top > total - nrows) top = total - nrows;
-    if (top < 0) top = 0;
+    int topi = dbg_view - nrows / 2;
+    if (cur_idx < topi)          topi = cur_idx;
+    if (cur_idx >= topi + nrows) topi = cur_idx - nrows + 1;
+    if (topi > total - nrows)    topi = total - nrows;
+    if (topi < 0)                topi = 0;
 
-    bg(C_BLACK); fg(C_WHITE); cls();
-    bgrgb(0x0000A0); fgrgb(0xFFFF80);
-    puts_at(0, 0, " ed debug   F7 step  F8 over  F6 out  F5 cont  F9 break  q quit");
+    /* editor chrome */
+    bg(C_BLUE); cls();
+    draw_menubar();
+    draw_frame();
+    if (panelw) { bgrgb(pal[C_BLUE]); fg(C_WHITE);
+                  at(dvx, win_y1 - 1); out(203); at(dvx, win_y2 + 1); out(202); }  /* T-junctions */
 
-    for (r = 0; r < nrows; r++) {
-        int idx = top + r, row = r + 1, number = 0;
-        char text[128], ns[12];
-        if (idx < 0 || idx >= total) continue;
-        if (S->dbg_line_at(idx, &number, text, sizeof text) < 0) continue;
-        bgrgb(idx == cur_idx ? 0x0000A0 : (idx == dbg_view ? 0x243244 : 0x000000));
-        fgrgb(0x808080);
-        at(0, row);
-        if (has_brk(number)) { fgrgb(0xFF4040); out('*'); } else out(' ');
-        if (idx == cur_idx) { fgrgb(0xFFFF80); out('>'); } else out(' ');
-        dbg_num(number, ns);
-        fgrgb(0x60D0F0);
-        { int k = 0; while (ns[k]) out((unsigned char)ns[k++]); out(' '); }
-        fgrgb(idx == cur_idx ? 0xFFFFFF : 0xC0C0C0);
-        { int k = 0; while (text[k] && k < COLS - 12) out((unsigned char)text[k++]); }
+    /* --- code area --- */
+    for (int r = 0; r < nrows; r++) {
+        int row = win_y1 + r, idx = topi + r, number = 0; char text[128];
+        int is_cur = (idx == cur_idx), is_sel = (idx == dbg_view);
+        int ok = (idx >= 0 && idx < total && S->dbg_line_at(idx, &number, text, sizeof text) == 0);
+
+        /* gutter: darker blue, right-aligned number, marker/arrow in the left cell */
+        bgrgb(0x0000A0);
+        at(win_x1, row);
+        if (ok) {
+            int ndi = 1; { int t = number; while (t >= 10) { t /= 10; ndi++; } }
+            int pad = gw - 1 - ndi; if (pad < 0) pad = 0;
+            char ns[12]; dbg_num(number, ns);
+            fgrgb(syn_color(HL_LINENO));
+            for (int i = 0; i < pad; i++) out(' ');
+            for (int k = 0; ns[k]; k++) out((unsigned char)ns[k]);
+            out(' ');
+            if (has_brk(number)) { fgrgb(0xFF4040); at(win_x1, row); out('*'); }
+            else if (is_cur)     { fg(C_BLACK);     at(win_x1, row); out(16);  }  /* filled arrow */
+            else if (is_sel)     { fgrgb(0xFFE060); at(win_x1, row); out(175); }  /* hollow arrow */
+        } else {
+            for (int i = 0; i < gw; i++) out(' ');
+        }
+
+        /* body: highlight the current line (cyan, like a selection) and the nav
+         * cursor (steel-blue); everything else is syntax-coloured on window blue. */
+        unsigned rbg = is_cur ? pal[C_CYAN] : (is_sel ? 0x335A8C : pal[C_BLUE]);
+        if (ok) hl_basic(text, (int)strlen(text), clsbuf);
+        at(win_x1 + gw, row);
+        for (int col = win_x1 + gw; col <= codeR; col++) {
+            int i = col - (win_x1 + gw);
+            bgrgb(rbg);
+            if (ok && i < (int)strlen(text)) {
+                fgrgb(is_cur ? pal[C_BLACK] : syn_color(clsbuf[i]));
+                out((unsigned char)text[i]);
+            } else out(' ');
+        }
+        if (panelw) { bgrgb(pal[C_BLUE]); fg(C_WHITE); at(dvx, row); out(B_V); }
     }
 
-    /* status + a compact variables strip */
-    bgrgb(0x0000A0); fgrgb(0xFFFFFF);
-    { char st[96], ns[12]; int p;
-      dbg_num(c->line, ns);
-      strcpy(st, " "); strcat(st, dbg_event_name(c->event));
-      strcat(st, " at line "); strcat(st, ns);
-      if (c->event == BERRY_DBG_ERROR && c->errmsg) { strcat(st, ": "); strncat(st, c->errmsg, 40); }
-      for (p = (int)strlen(st); p < COLS; p++) st[p] = ' '; st[COLS] = 0;
-      puts_at(0, ROWS - 2, st);
+    /* --- Watch panel (variables + call stack), styled like the editor --- */
+    if (panelw) {
+        int col = dvx + 1, row = win_y1;
+        bgrgb(pal[C_BLUE]);
+        for (int rr = win_y1; rr <= win_y2; rr++) repeat_ch(col, rr, ' ', win_x2 - col + 1);
+        fgrgb(0xFFE060); puts_at(col, row++, "VARIABLES");
+        int nv = S->dbg_var_count(), half = nrows / 2;
+        for (int i = 0; i < nv && row < win_y1 + half; i++) {
+            char name[16]; int isstr = 0, isarr = 0;
+            if (S->dbg_var_at(i, name, sizeof name, &isstr, &isarr) < 0) continue;
+            char val[40], line[52];
+            if (isarr) strcpy(val, "(array)"); else dbg_fmt_val(name, isstr, val, sizeof val);
+            strcpy(line, name); strcat(line, "="); strncat(line, val, 36);
+            line[win_x2 - col] = 0;
+            fgrgb(0xE0E0E0); puts_at(col, row++, line);
+        }
+        row++;
+        if (row <= win_y2) { fgrgb(0xFFE060); puts_at(col, row++, "CALL STACK"); }
+        int depth = S->dbg_stack_depth();
+        if (depth == 0 && row <= win_y2) { fgrgb(0x80FF80); puts_at(col, row++, " (top level)"); }
+        for (int i = 0; i < depth && row <= win_y2; i++) {
+            char name[16], ns[12], line[40]; int cl = 0;
+            if (S->dbg_stack_frame(i, name, sizeof name, &cl) < 0) break;
+            strcpy(line, " "); strcat(line, name); strcat(line, " @"); dbg_num(cl, ns); strcat(line, ns);
+            fgrgb(0x80FF80); puts_at(col, row++, line);
+        }
     }
-    { char vars[160]; int nv = S->dbg_var_count(), shown = 0; vars[0] = 0;
-      strcpy(vars, " ");
-      for (int i = 0; i < nv && shown < 6 && (int)strlen(vars) < COLS - 14; i++) {
-          char name[16], val[40]; int isstr = 0, isarr = 0;
-          if (S->dbg_var_at(i, name, sizeof name, &isstr, &isarr) < 0) continue;
-          if (isarr) continue;
-          if (isstr) { char b[24]; int n = S->get_str(name, b, sizeof b - 1);
-                       if (n < 0) n = 0; if (n > 23) n = 23; b[n] = 0;
-                       strcat(vars, name); strcat(vars, "=\""); strcat(vars, b); strcat(vars, "\" "); }
-          else { double v = 0; char nb[32]; S->get_num(name, &v); S->fmt_num(v, nb);
-                 strcat(vars, name); strcat(vars, "="); strcat(vars, nb); strcat(vars, " "); }
-          shown++;
-      }
-      bgrgb(0x000000); fgrgb(0xA0E0A0);
-      puts_at(0, ROWS - 1, vars);
+
+    /* --- status bar: the editor's white bar, debug content --- */
+    { char b[96], ns[12], ev[16];
+      bg(C_WHITE); fg(C_BLACK); repeat_ch(0, ROWS - 1, ' ', COLS);
+      { const char *e = dbg_event_name(c->event); int i = 0;
+        for (; e[i] && i < 15; i++) ev[i] = (e[i] >= 'a' && e[i] <= 'z') ? e[i] - 32 : e[i]; ev[i] = 0; }
+      strcpy(b, "  "); strcat(b, ev);
+      strcat(b, "  line "); dbg_num(c->line, ns); strcat(b, ns);
+      { int sn = 0; char st[8]; if (S->dbg_line_at(dbg_view, &sn, st, sizeof st) == 0 && sn != c->line) {
+            strcat(b, "   sel "); dbg_num(sn, ns); strcat(b, ns); } }
+      if (c->event == BERRY_DBG_ERROR && c->errmsg) { strcat(b, ": "); strncat(b, c->errmsg, 30); }
+      puts_at(0, ROWS - 1, b);
+      const char *keys = " F7 Step  F8 Over  F6 Out  F5 Cont  F4 Run  F9 Bp  F10 Menu  Esc Stop ";
+      int kl = (int)strlen(keys);
+      if (COLS > kl + 4) puts_at(COLS - kl, ROWS - 1, keys);
     }
 }
 
+/* Toggle a breakpoint on the nav-cursor line (F9 and the Debug menu). */
+static void dbg_bp_toggle_view(void)
+{
+    int number = 0; char t[8];
+    if (S->dbg_line_at(dbg_view, &number, t, sizeof t) != 0) return;
+    if (has_brk(number)) {
+        S->dbg_clear(number);
+        for (int i = 0; i < brk_n; i++) if (brk_lines[i] == number) {
+            for (int j = i; j < brk_n - 1; j++) brk_lines[j] = brk_lines[j + 1]; brk_n--; break; }
+    } else if (brk_n < MAX_BREAKS) {
+        S->dbg_break_line(number); brk_lines[brk_n++] = number;
+    }
+}
+
+/* Run to the nav-cursor line: a breakpoint there, then continue. Returns 1 so
+ * the caller leaves the stop loop and resumes the program. */
+static int dbg_run_to_view(void)
+{
+    int number = 0; char t[8];
+    if (S->dbg_line_at(dbg_view, &number, t, sizeof t) != 0) return 0;
+    S->dbg_break_line(number);
+    S->dbg_cont();
+    return 1;
+}
+
+/* The in-editor Debug menu (F10 while paused), using the editor's own dropdown. */
+static const char *dbg_menu_items[] = {
+    " Step Into     F7 ", " Step Over     F8 ", " Step Out      F6 ",
+    " Continue      F5 ", "-", " Run to Line   F4 ", " Toggle Break  F9 ",
+    "-", " Stop         Esc ", 0
+};
+
+/* Show the running/finished program's output - its console text AND graphics,
+ * mode 1 or 2 - which was stashed with screen_save. Alt+F5 (or Esc) returns. The
+ * output is drawn to the visible front directly (buffering off) so the editor's
+ * double buffer never overwrites it; the caller redraws its own UI afterwards. */
+static void show_output(void)
+{
+    int wasbuf = S->gfx_buffered();
+    S->gfx_backbuffer(0);                          /* draw straight to the front */
+    for (;;) {
+        S->screen_restore();                       /* the saved program screen */
+        bg(C_WHITE); fg(C_BLACK); repeat_ch(0, ROWS - 1, ' ', COLS);
+        puts_at(0, ROWS - 1, "  PROGRAM OUTPUT      Alt+F5 or Esc: back to the editor");
+        int k = key();                             /* gfx_flip is a no-op while unbuffered */
+        int m = S->keymods();
+        if (k == K_ESC || ((m & KMOD_ALT) && k == K_F5)) break;
+    }
+    if (wasbuf) S->gfx_backbuffer(1);              /* restore the caller's buffering */
+}
+
+/* The interactive stop handler: draws the paused editor and drives stepping.
+ * On entry the visible screen holds the program's output so far, so stash it
+ * (Alt+F5 shows it again) and force buffering off so the debug UI draws to the
+ * front; restore the program's buffering when we resume. */
 static void ed_on_stop(const dbg_ctx *c)
 {
+    int wasbuf = S->gfx_buffered();
+    if (wasbuf) S->gfx_backbuffer(0);
+    S->screen_save();                      /* the program's output up to this pause */
     dbg_view = c->line_idx;
-    for (;;) {
+
+    int done = 0;
+    while (!done) {
         dbg_draw(c);
-        int k = key();                       /* key() flips the back buffer then reads */
-        int nrows = ROWS - 4;
+        int k = key();
+        int mods = S->keymods();
+        int nrows = win_y2 - win_y1 + 1;
+        int last = S->dbg_line_count() - 1;
+        if ((mods & KMOD_ALT) && k == K_F5) { show_output(); continue; }  /* peek at output */
         switch (k) {
-            case K_F7: case 's':               S->dbg_step();      return;
-            case K_F8: case 'o':               S->dbg_step_over(); return;
-            case K_F6: case 'u':               S->dbg_step_out();  return;
-            case K_F5: case 'c': case K_ENTER: S->dbg_cont();      return;
-            case 'q': case K_ESC:              S->dbg_abort();     return;
+            case K_F7: case 's':               S->dbg_step();      done = 1; break;
+            case K_F8: case 'o':               S->dbg_step_over(); done = 1; break;
+            case K_F6: case 'u':               S->dbg_step_out();  done = 1; break;
+            case K_F5: case 'c': case K_ENTER: S->dbg_cont();      done = 1; break;
+            case K_F4: case 'g':               if (dbg_run_to_view()) done = 1; break;
+            case 'q': case K_ESC:              S->dbg_abort();     done = 1; break;
             case K_UP:   if (dbg_view > 0) dbg_view--; break;
-            case K_DOWN: if (dbg_view < S->dbg_line_count() - 1) dbg_view++; break;
+            case K_DOWN: if (dbg_view < last) dbg_view++; break;
             case K_PGUP: dbg_view -= nrows; if (dbg_view < 0) dbg_view = 0; break;
-            case K_PGDN: dbg_view += nrows;
-                         if (dbg_view > S->dbg_line_count() - 1) dbg_view = S->dbg_line_count() - 1; break;
-            case K_F9: {                       /* toggle a breakpoint on the cursor line */
-                int number = 0; char t[8];
-                if (S->dbg_line_at(dbg_view, &number, t, sizeof t) == 0) {
-                    if (has_brk(number)) { S->dbg_clear(number);
-                        for (int i = 0; i < brk_n; i++) if (brk_lines[i] == number) {
-                            for (int j = i; j < brk_n - 1; j++) brk_lines[j] = brk_lines[j + 1]; brk_n--; break; } }
-                    else if (brk_n < MAX_BREAKS) { S->dbg_break_line(number); brk_lines[brk_n++] = number; }
+            case K_PGDN: dbg_view += nrows; if (dbg_view > last) dbg_view = last; break;
+            case K_HOME: dbg_view = 0; break;
+            case K_END:  dbg_view = last; break;
+            case K_F9:   dbg_bp_toggle_view(); break;
+            case K_F10: {                       /* the editor's dropdown, Debug menu */
+                int n = 0; while (dbg_menu_items[n]) n++;
+                int sel = popup(2, 1, dbg_menu_items, n);
+                switch (sel) {
+                    case 0: S->dbg_step();      done = 1; break;
+                    case 1: S->dbg_step_over(); done = 1; break;
+                    case 2: S->dbg_step_out();  done = 1; break;
+                    case 3: S->dbg_cont();      done = 1; break;
+                    case 5: if (dbg_run_to_view()) done = 1; break;
+                    case 6: dbg_bp_toggle_view(); break;
+                    case 8: S->dbg_abort();     done = 1; break;
+                    default: break;             /* cancelled / separators */
                 }
                 break;
             }
             default: break;
         }
     }
+    /* Put the program's own screen back before it resumes, so its console/graphics
+     * output continues coherently over what it drew - not over our debug UI. */
+    S->screen_restore();
+    if (wasbuf) S->gfx_backbuffer(1);       /* hand the program back its buffering */
 }
 
 /* Debug: like Run, but arm the debugger with the editor's breakpoints first. */
@@ -2337,6 +2496,7 @@ static int run_debug(void)
     S->dbg_run(filename);                   /* runs on the visible screen, calling ed_on_stop */
     S->dbg_detach();
 
+    S->screen_save();                       /* stash the final output for Alt+F5 */
     { static const char *pause = "\n[ press a key to return to the editor ]\n";
       S->puts(pause, (int)strlen(pause)); S->getkey(); }
 
@@ -2558,7 +2718,8 @@ int main(int argc, char **argv)
          * toggles auto-numbering (Ctrl+N is left for the usual "New"). Left Alt
          * only, so AltGr (third-legend characters) still types normally. */
         if (mods & KMOD_ALT) {
-            if (c == 'n' || c == 'N') toggle_autonum();
+            if (c == K_F5) show_output();        /* Alt+F5: view the last program output */
+            else if (c == 'n' || c == 'N') toggle_autonum();
             else { int mi = menu_accel(c); if (mi >= 0) quit = run_menu_at(mi); }
             handled = 1;
         }

@@ -258,6 +258,18 @@ done
 [ -e "$ROOT/fonts/Philosopher-Regular.ttf" ] &&
     mcopy -o -i "$DATAPART" "$ROOT/fonts/Philosopher-Regular.ttf" ::SYS/FONTS/PHILO.TTF
 
+# The help pages (HTML-ish) that HELP.POD prints and HELPVIEW.POD browses live in
+# /SYS/HELP/BASIC - one file per command, e.g. PRINT.HTML.
+if compgen -G "$ROOT/help/basic/*.html" >/dev/null; then
+    dbg "shipping /SYS/HELP/BASIC"
+    mmd -i "$DATAPART" ::SYS/HELP 2>/dev/null || true
+    mmd -i "$DATAPART" ::SYS/HELP/BASIC 2>/dev/null || true
+    for h in "$ROOT"/help/basic/*.html; do
+        [ -e "$h" ] || continue
+        mcopy -o -i "$DATAPART" "$h" "::SYS/HELP/BASIC/$(basename "$h" | tr '[:lower:]' '[:upper:]')"
+    done
+fi
+
 # --- Assemble the final image with a 2-partition MBR ------------------------
 dbg "assembling final image + MBR (dd/sfdisk)"
 dd if=/dev/zero of="$OUT" bs=1M count="$SIZE_MB" status=none

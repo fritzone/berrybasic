@@ -184,6 +184,7 @@ void pod_build_svc(BerryServices *s, uint64_t caps) {
     s->screen_size = pod_dn_scrsz;
     s->con_font = pod_dn_scrsz; s->con_glyph = pod_dn_glyph;
     s->clip_set = pod_dn_puts; s->clip_get = pod_dn_getcwd; s->clip_len = pod_dn_geti;
+    s->screen_save = pod_dn_void; s->screen_restore = pod_dn_void;   // v26 (CAP_GRAPHICS)
     // v25 debugger defaults: all refusals until CAP_DEBUG grants the real ones.
     s->dbg_attach = pod_dn_dbgattach; s->dbg_detach = pod_dn_void;
     s->dbg_break_line = pod_dn_dbg_i_i; s->dbg_break_proc = pod_dn_dbg_s;
@@ -237,6 +238,7 @@ void pod_build_svc(BerryServices *s, uint64_t caps) {
         s->font_size = svc_font_size; s->font_style = svc_font_style;
         s->gfx_text = svc_gfx_text; s->text_width = svc_text_width; s->text_height = svc_text_height;
         s->con_font = svc_con_font; s->con_glyph = svc_con_glyph;
+        s->screen_save = svc_screen_save; s->screen_restore = svc_screen_restore;
     }
     if (caps & POD_CAP_GPIO) {
         s->gpio_mode = svc_gpio_mode; s->gpio_write = svc_gpio_write; s->gpio_read = svc_gpio_read;

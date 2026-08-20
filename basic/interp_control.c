@@ -399,6 +399,9 @@ void scan_defs(void) {
                 lex_next();                       // the name follows as its own word
                 if (tok != T_VAR) continue;       // malformed DEF line
             }
+            // PROC/FN names are their own prefixed namespace: PROCmove / FNlist
+            // are unambiguous even when the suffix spells a keyword, so (unlike
+            // plain variable names) a keyword spelling is allowed here.
             s_copy(defs[def_n].name, tok_var, NAME_LEN);
             defs[def_n].is_fn    = is_fn;
             defs[def_n].newstyle = newstyle;
