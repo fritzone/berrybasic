@@ -1,0 +1,16 @@
+<title>COLOUR</title>
+<h1>COLOUR</h1>
+<p>Sets the text foreground (and background) colour. <b>COLOR</b> is an accepted spelling.</p>
+<h2>Syntax</h2>
+<pre>COLOUR foreground
+COLOUR 128 + background</pre>
+<h2>Description</h2>
+<p>Colours 0-7 are black, red, green, yellow, blue, magenta, cyan and white.
+Adding 128 sets the background instead of the foreground.</p>
+<h2>Examples</h2>
+<code>
+10 COLOUR 1 : PRINT "red on black"
+20 COLOUR 128 + 4 : COLOUR 7 : PRINT "white on blue"
+</code>
+<h2>See also</h2>
+<p><a href="VDU">VDU</a>, <a href="GCOL">GCOL</a>, <a href="INDEX">Index</a></p>

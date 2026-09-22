@@ -1,0 +1,20 @@
+<title>DRAW</title>
+<h1>MOVE and DRAW</h1>
+<p>Move the graphics cursor, or draw a line to a point.</p>
+<h2>Syntax</h2>
+<pre>MOVE x, y
+DRAW x, y</pre>
+<h2>Description</h2>
+<p><b>MOVE</b> repositions the graphics cursor without drawing; <b>DRAW</b> draws
+a line from the cursor to (x,y) in the current <a href="GCOL">GCOL</a> colour and
+leaves the cursor there. They are shorthands for <a href="PLOT">PLOT</a> 4 and 5.</p>
+<h2>Examples</h2>
+<code>
+10 GCOL 1
+20 MOVE 100, 100
+30 DRAW 500, 100
+40 DRAW 300, 400
+50 DRAW 100, 100
+</code>
+<h2>See also</h2>
+<p><a href="PLOT">PLOT</a>, <a href="CIRCLE">CIRCLE</a>, <a href="INDEX">Index</a></p>

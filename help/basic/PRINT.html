@@ -1,0 +1,27 @@
+<title>PRINT</title>
+<h1>PRINT</h1>
+<p>Writes numbers, strings and the results of expressions to the screen.</p>
+
+<h2>Syntax</h2>
+<pre>PRINT [item] [ sep [item] ]... [ sep ]</pre>
+<p>Each <b>item</b> is a number, a string, or any expression. A <b>sep</b> is
+a comma or a semicolon.</p>
+
+<h2>Description</h2>
+<p>PRINT evaluates each item and writes it to the console in turn. A comma
+between items pads to the next tab column so output lines up in fields; a
+semicolon joins items with no space at all. A comma or semicolon at the very end
+of the statement suppresses the newline, so the next PRINT continues on the same
+line. Numbers print in the usual BASIC format; strings print exactly.</p>
+
+<h2>Examples</h2>
+<code>
+10 PRINT "Hello, world!"
+20 PRINT "6 * 7 = "; 6*7
+30 FOR I=1 TO 3 : PRINT I, : NEXT
+40 PRINT
+50 PRINT "x="; x; "  y="; y
+</code>
+
+<h2>See also</h2>
+<p><a href="INPUT">INPUT</a>, <a href="VDU">VDU</a>, <a href="COLOUR">COLOUR</a>, <a href="INDEX">Index</a></p>

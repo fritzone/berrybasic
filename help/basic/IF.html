@@ -1,0 +1,27 @@
+<title>IF</title>
+<h1>IF</h1>
+<p>Runs statements conditionally.</p>
+<h2>Syntax</h2>
+<pre>IF condition THEN statements [ ELSE statements ]
+
+IF condition THEN
+  statements
+[ ELSE
+  statements ]
+ENDIF</pre>
+<h2>Description</h2>
+<p>The single-line form runs the statements after <b>THEN</b> when the condition
+is true, and those after an optional <b>ELSE</b> when it is false. The block form
+(ending in <a href="IF">ENDIF</a>) spans several lines and may be nested. A
+condition is any expression; zero is false and any non-zero value is true.</p>
+<h2>Examples</h2>
+<code>
+10 IF score > 100 THEN PRINT "You win!"
+20 IF n MOD 2 = 0 THEN PRINT "even" ELSE PRINT "odd"
+30 IF lives = 0 THEN
+40   PRINT "Game over"
+50   END
+60 ENDIF
+</code>
+<h2>See also</h2>
+<p><a href="FOR">FOR</a>, <a href="CASE">CASE</a>, <a href="WHILE">WHILE</a>, <a href="INDEX">Index</a></p>

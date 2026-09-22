@@ -1,0 +1,17 @@
+<title>MODE</title>
+<h1>MODE</h1>
+<p>Chooses the graphics coordinate system.</p>
+<h2>Syntax</h2>
+<pre>MODE n</pre>
+<h2>Description</h2>
+<p><b>MODE 1</b> (the default) uses BBC-style logical coordinates: x from 0 to
+1279 and y from 0 to 1023, with the origin at the bottom-left, scaled to fit the
+screen. <b>MODE 2</b> uses native device pixels with the origin at the top-left,
+matching the mouse and the framebuffer.</p>
+<h2>Examples</h2>
+<code>
+10 MODE 2
+20 CIRCLE 400, 300, 100
+</code>
+<h2>See also</h2>
+<p><a href="PLOT">PLOT</a>, <a href="CIRCLE">CIRCLE</a>, <a href="COLOUR">COLOUR</a>, <a href="INDEX">Index</a></p>

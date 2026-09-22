@@ -1,0 +1,17 @@
+<title>CIRCLE</title>
+<h1>CIRCLE</h1>
+<p>Draws a circle outline (or a filled disc).</p>
+<h2>Syntax</h2>
+<pre>CIRCLE x, y, radius
+CIRCLE FILL x, y, radius</pre>
+<h2>Description</h2>
+<p>Draws a circle centred at (x,y) with the given radius in the current
+<a href="GCOL">GCOL</a> colour. Add <b>FILL</b> to draw a solid disc.</p>
+<h2>Examples</h2>
+<code>
+10 GCOL 2
+20 CIRCLE 640, 512, 200
+30 GCOL 1 : CIRCLE FILL 300, 300, 80
+</code>
+<h2>See also</h2>
+<p><a href="RECTANGLE">RECTANGLE</a>, <a href="PLOT">PLOT</a>, <a href="INDEX">Index</a></p>

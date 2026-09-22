@@ -1,0 +1,20 @@
+<title>WHILE</title>
+<h1>WHILE ... ENDWHILE</h1>
+<p>Repeats a block as long as a condition is true.</p>
+<h2>Syntax</h2>
+<pre>WHILE condition
+  statements
+ENDWHILE</pre>
+<h2>Description</h2>
+<p>The condition is tested before each pass, so the block may run zero times.
+Contrast with <a href="REPEAT">REPEAT</a>, which always runs at least once.</p>
+<h2>Examples</h2>
+<code>
+10 n = 100
+20 WHILE n > 1
+30   PRINT n
+40   n = n / 2
+50 ENDWHILE
+</code>
+<h2>See also</h2>
+<p><a href="REPEAT">REPEAT</a>, <a href="FOR">FOR</a>, <a href="INDEX">Index</a></p>

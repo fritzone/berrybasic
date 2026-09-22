@@ -1,0 +1,16 @@
+<title>DATA</title>
+<h1>DATA</h1>
+<p>Holds constant values that <a href="READ">READ</a> pulls in one at a time.</p>
+<h2>Syntax</h2>
+<pre>DATA value [, value ]...</pre>
+<h2>Description</h2>
+<p>DATA lines are not executed; they are a pool of constants. Each READ takes the
+next value in order. RESTORE rewinds to the first (or a chosen) DATA line. Values
+may be numbers or strings.</p>
+<h2>Examples</h2>
+<code>
+10 FOR I=1 TO 3 : READ n$, age : PRINT n$; " is "; age : NEXT
+20 DATA "Ann", 30, "Bo", 25, "Cy", 41
+</code>
+<h2>See also</h2>
+<p><a href="READ">READ</a>, <a href="INDEX">Index</a></p>
