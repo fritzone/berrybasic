@@ -7,8 +7,13 @@
 #include "usb_hid.h"
 #include "cp437.h"
 
-void con_literal(int c) {
+#define SEMANTIC 0
+#define GRAPHIC 1
+
+void con_xlate_char(int c, int mode) {
     // xterm can display Unicode characters, as long as they're encoded with UTF-8
+
+    if ((c < 32) && (mode == SEMANTIC)) { putchar(c); return; }
 
     int code_point = codepage437_to_unicode(c);
 
@@ -31,7 +36,7 @@ void con_literal(int c) {
 
 void con_putc(char c) {
     unsigned char uc = (unsigned char)c;
-    if (uc < 127) putchar(uc); else con_literal(uc);
+    if (uc < 127) putchar(uc); else con_xlate_char(uc, SEMANTIC);
 }
 
 void con_puts(const char *s) {
@@ -112,7 +117,7 @@ void con_vdu(int b) {
                 con_colour(params[0]);
                 break;
             case 27: // Literal character output
-                con_literal(params[0]);
+                con_xlate_char(params[0], GRAPHIC);
                 break;
             case 31: // Move cursor
                 con_move_to(params[0], params[1]);
