@@ -37,6 +37,33 @@ int con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
 
 void con_cls(void) { fputs("\033[2J\033[H", stdout); }   // ANSI clear on a terminal
 
+void con_colour(int c) {
+    static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
+    int bg = (c & 128) ? 10 : 0;
+    printf("\033[%dm", ansi[c & 7] + bg);
+}
+
+void con_literal(int c) {
+    if (c == 27) {
+        // Character 27's glyph is a left arrow. But, it can't be displayed
+        // directly, not even in Transparent Print mode, because it introduces
+        // escape sequences. The same glyph is mapped to character 'b' in the
+        // DEC Special Graphics character set, htough.
+        printf("\033(0b\033(B");
+    } else if (c >= 32) {
+        // No special handling needed for printable characters.
+        putchar(c);
+    } else if (c) {
+        // For all other control characters, we can use Transparent Print mode
+        // to disable control character processing.
+        printf("\033[5i%c\033[4i", c);
+    }
+}
+
+void con_move_to(int x, int y) {
+    printf("\033[%d;%dH", y + 1, x + 1);
+}
+
 // VDU driver for the host: keeps the same parameter-counting state machine as
 // the target so multi-byte commands stay in sync, prints text codes to stdout,
 // and ignores the graphics/screen-control codes (no display on the host).
@@ -46,20 +73,36 @@ void con_vdu(int b) {
         0,1,2,5,0,0,1,9, 8,5,0,1,4,4,0,2
     };
     static int need = 0, cmd = -1, got = 0;
+    static int params[10];
     b &= 0xff;
-    if (cmd >= 0) { if (++got >= need) cmd = -1; return; }   // skip parameter bytes
-    if (b < 32) {
+    if (cmd >= 0) {
+        params[got++] = b;
+    } else if (b == 127) {
+        if (b == 127) { fputs("\b \b", stdout); return; }
+    } else if (b < 32) {
         if (b == 10 || b == 13) putchar(b);                  // LF/CR are visible
         if (nparams[b]) { cmd = b; need = nparams[b]; got = 0; }
-        return;
     }
-    if (b == 127) { fputs("\b \b", stdout); return; }
-    putchar(b);                                              // printable
-}
 
-void con_colour(int c) {
-    static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
-    printf("\033[%dm", ansi[c & 7]);
+    if (cmd < 0) {
+        putchar(b);                                              // printable
+    }
+    else if (got == need) {
+        switch (cmd) {
+            case 17: // Set colour (+128 for background)
+                con_colour(params[0]);
+                break;
+            case 27: // Literal character output
+                con_literal(params[0]);
+                break;
+            case 31: // Move cursor
+                con_move_to(params[0], params[1]);
+                break;
+        }
+
+        cmd = -1;
+        need = 0;
+    }
 }
 
 int con_getkey(void) {
