@@ -176,7 +176,11 @@ void lex_next(void) {
         lx++;
         char id[NAME_LEN]; int n = 0;
         while (is_alnum(*lx)) { if (n < NAME_LEN - 1) id[n++] = up(*lx); lx++; }
-        if ((*lx == '$' || *lx == '%') && n < NAME_LEN - 1) { id[n++] = *lx; lx++; }
+        if (*lx == '$' || *lx == '%') {
+            if (n < NAME_LEN - 1) id[n++] = *lx;
+            else id[n-1] = *lx;
+            lx++;
+        }
         id[n] = 0;
         s_copy(tok_var, id, NAME_LEN);
         tok = T_LABEL; return;
@@ -271,7 +275,7 @@ void lex_next(void) {
                 tok = T_KW; tok_kw = kwtab[i].id; return;
             }
         }
-        s_copy(tok_var, id, NAME_LEN);
+        name_copy(tok_var, id);
         tok = T_VAR; return;
     }
 

@@ -55,6 +55,9 @@ value_t v_num (double n);
 // V str.
 value_t v_str (char *p, int len);
 
+// Copy name preserving type.
+void name_copy (char *name, const char *token);
+
 // Name is str.
 int name_is_str (const char *name);
 
