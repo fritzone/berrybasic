@@ -20,10 +20,13 @@ int con_canonical_mode(int enable) {
 
     was_enabled = (t.c_lflag & ICANON) != 0;
 
-    if (enable)
+    if (enable) {
         t.c_lflag |= ICANON | ECHO;
-    else
+        printf("\033[?25h"); // show cursor
+    } else {
         t.c_lflag &= ~(ICANON | ECHO);
+        printf("\033[?25l"); // hide cursor
+    }
 
     tcsetattr(STDIN_FILENO, TCSANOW, &t);
 
