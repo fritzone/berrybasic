@@ -5,10 +5,38 @@
 #include <string.h>
 #include "console.h"
 #include "usb_hid.h"
+#include "cp437.h"
 
-void con_putc(char c) { putchar(c); }
+void con_literal(int c) {
+    // xterm can display Unicode characters, as long as they're encoded with UTF-8
 
-void con_puts(const char *s) { fputs(s, stdout); }
+    int code_point = codepage437_to_unicode(c);
+
+    if (code_point <= 0x7F) {
+        // 1-byte sequence: 0xxxxxxx
+        putchar(code_point);
+    }
+    else if (code_point <= 0x7FF) {
+        // 2-byte sequence: 110xxxxx 10xxxxxx
+        putchar(0xC0 | (code_point >> 6));
+        putchar(0x80 | (code_point & 0x3F));
+    }
+    else if (code_point <= 0xFFFF) {
+        // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+        putchar(0xE0 | (code_point >> 12));
+        putchar(0x80 | ((code_point >> 6) & 0x3F));
+        putchar(0x80 | (code_point & 0x3F));
+    }
+}
+
+void con_putc(char c) {
+    unsigned char uc = (unsigned char)c;
+    if (uc < 127) putchar(uc); else con_literal(uc);
+}
+
+void con_puts(const char *s) {
+    while (*s) con_putc(*s++);
+}
 
 int con_getline(char *buf, int maxlen) {
     if (!fgets(buf, maxlen, stdin)) return -1;
@@ -43,22 +71,6 @@ void con_colour(int c) {
     printf("\033[%dm", ansi[c & 7] + bg);
 }
 
-void con_literal(int c) {
-    if (c == 27) {
-        // Character 27's glyph is a left arrow. But, it can't be displayed
-        // directly, not even in Transparent Print mode, because it introduces
-        // escape sequences. The same glyph is mapped to character 'b' in the
-        // DEC Special Graphics character set, htough.
-        printf("\033(0b\033(B");
-    } else if (c >= 32) {
-        // No special handling needed for printable characters.
-        putchar(c);
-    } else if (c) {
-        // For all other control characters, we can use Transparent Print mode
-        // to disable control character processing.
-        printf("\033[5i%c\033[4i", c);
-    }
-}
 
 void con_move_to(int x, int y) {
     printf("\033[%d;%dH", y + 1, x + 1);

@@ -197,7 +197,7 @@ HOST_BIN    = $(BUILD_DIR)/basic_host
 HOST_INC    = -I$(INCLUDE_DIR) -I$(BASIC_DIR) -I$(SEED_DIR) -I$(DRIVERS_DIR) -Ithird_party \
               -I$(BUILD_DIR) -idirafter podlib/include
 HOST_SRC    = $(BASIC_DIR)/basic.c $(wildcard $(BASIC_DIR)/interp_*.c) \
-              $(HOST_DIR)/console_host.c $(HOST_DIR)/storage_host.c \
+              $(HOST_DIR)/console_host.c $(HOST_DIR)/cp437.c $(HOST_DIR)/storage_host.c \
               $(SEED_DIR)/seed_host.c $(HOST_DIR)/image_host.c $(HOST_DIR)/sound_host.c \
               $(HOST_DIR)/gpio_host.c $(HOST_DIR)/i2c_host.c $(HOST_DIR)/ttf_host.c $(HOST_DIR)/gfx_host.c \
               $(DRIVERS_DIR)/usb_hid.c $(HOST_DIR)/main.c
