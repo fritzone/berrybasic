@@ -70,7 +70,7 @@ int num_digits(int n) { int d = 1; if (n < 0) n = -n; while (n >= 10) { n /= 10;
 // nets to zero, so only true multi-line definitions open a block.
 int line_blocks(const char *t, int *dedent_first) {
     *dedent_first = 0;
-    int delta = 0, seen = 0, defs = 0, has_eq = 0;
+    int delta = 0, seen = 0, defs = 0, has_eq = 0, has_loop_control = 0;
     char last[16]; last[0] = 0;
     int i = 0;
     while (t[i]) {
@@ -83,19 +83,23 @@ int line_blocks(const char *t, int *dedent_first) {
         s_copy(last, w, 16);
         if (s_eq(w, "REM")) break; // The remainder of the line is irrelevant!
         int open = 0, close = 0, mid = 0;
-        if (s_eq(w, "FOR") || s_eq(w, "REPEAT") || s_eq(w, "WHILE") ||
-            s_eq(w, "CASE") || s_eq(w, "TRY") || s_eq(w, "TYPE")) open = 1;
-        else if (s_eq(w, "DEF")) defs++;                       // resolved after has_eq is known
-        else if (s_eq(w, "NEXT") || s_eq(w, "UNTIL") || s_eq(w, "ENDWHILE") ||
-                 s_eq(w, "ENDCASE") || s_eq(w, "ENDTRY") || s_eq(w, "ENDPROC") ||
-                 s_eq(w, "ENDIF") || s_eq(w, "ENDTYPE")) close = 1;
-        else if (s_eq(w, "ELSE") || s_eq(w, "CATCH")) mid = 1;
-        else if (s_eq(w, "END")) {                             // END PROC / END FN close a block
-            int k = i; while (t[k] == ' ') k++;
-            char nw[8]; int nn = 0;
-            while (is_alpha(t[k]) && nn < 7) { nw[nn++] = up(t[k]); k++; }
-            nw[nn] = 0;
-            if (s_eq(nw, "PROC") || s_eq(nw, "FN")) close = 1;
+        if (s_eq(w, "CONTINUE") || s_eq(w, "EXIT")) has_loop_control = 1;
+        else {
+            if (s_eq(w, "FOR") || s_eq(w, "REPEAT") || s_eq(w, "WHILE") ||
+                s_eq(w, "CASE") || s_eq(w, "TRY") || s_eq(w, "TYPE")) open = !has_loop_control;
+            else if (s_eq(w, "DEF")) defs++;                       // resolved after has_eq is known
+            else if (s_eq(w, "NEXT") || s_eq(w, "UNTIL") || s_eq(w, "ENDWHILE") ||
+                     s_eq(w, "ENDCASE") || s_eq(w, "ENDTRY") || s_eq(w, "ENDPROC") ||
+                     s_eq(w, "ENDIF") || s_eq(w, "ENDTYPE")) close = 1;
+            else if (s_eq(w, "ELSE") || s_eq(w, "CATCH")) mid = 1;
+            else if (s_eq(w, "END")) {                             // END PROC / END FN close a block
+                int k = i; while (t[k] == ' ') k++;
+                char nw[8]; int nn = 0;
+                while (is_alpha(t[k]) && nn < 7) { nw[nn++] = up(t[k]); k++; }
+                nw[nn] = 0;
+                if (s_eq(nw, "PROC") || s_eq(nw, "FN")) close = 1;
+            }
+            has_loop_control = 0;
         }
         if (open)  delta++;
         if (close) delta--;
