@@ -65,12 +65,19 @@ int con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
 
 void con_cls(void) { fputs("\033[2J\033[H", stdout); }   // ANSI clear on a terminal
 
+int con_fg = 7;
+int con_bg = 0;
+
 void con_colour(int c) {
     static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
-    int bg = (c & 128) ? 10 : 0;
-    printf("\033[%dm", ansi[c & 7] + bg);
-}
+    static const int high[8] = {  0,  0,  0,  1,  0,  0,  0,  0 };
 
+    if ((c & 128) == 0) con_fg = c & 7; else con_bg = c & 7;
+    int ansi_fg = ansi[con_fg];
+    int ansi_bg = ansi[con_bg] + 10;
+    int bright = high[con_fg];
+    printf("\033[%d;%d;%dm", bright, ansi_fg, ansi_bg);
+}
 
 void con_move_to(int x, int y) {
     printf("\033[%d;%dH", y + 1, x + 1);
