@@ -5,10 +5,43 @@
 #include <string.h>
 #include "console.h"
 #include "usb_hid.h"
+#include "cp437.h"
 
-void con_putc(char c) { putchar(c); }
+#define SEMANTIC 0
+#define GRAPHIC 1
 
-void con_puts(const char *s) { fputs(s, stdout); }
+void con_xlate_char(int c, int mode) {
+    // xterm can display Unicode characters, as long as they're encoded with UTF-8
+
+    if ((c < 32) && (mode == SEMANTIC)) { putchar(c); return; }
+
+    int code_point = codepage437_to_unicode(c);
+
+    if (code_point <= 0x7F) {
+        // 1-byte sequence: 0xxxxxxx
+        putchar(code_point);
+    }
+    else if (code_point <= 0x7FF) {
+        // 2-byte sequence: 110xxxxx 10xxxxxx
+        putchar(0xC0 | (code_point >> 6));
+        putchar(0x80 | (code_point & 0x3F));
+    }
+    else if (code_point <= 0xFFFF) {
+        // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+        putchar(0xE0 | (code_point >> 12));
+        putchar(0x80 | ((code_point >> 6) & 0x3F));
+        putchar(0x80 | (code_point & 0x3F));
+    }
+}
+
+void con_putc(char c) {
+    unsigned char uc = (unsigned char)c;
+    if (uc < 127) putchar(uc); else con_xlate_char(uc, SEMANTIC);
+}
+
+void con_puts(const char *s) {
+    while (*s) con_putc(*s++);
+}
 
 int con_getline(char *buf, int maxlen) {
     if (!fgets(buf, maxlen, stdin)) return -1;
@@ -37,6 +70,24 @@ int con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
 
 void con_cls(void) { fputs("\033[2J\033[H", stdout); }   // ANSI clear on a terminal
 
+int con_fg = 7;
+int con_bg = 0;
+
+void con_colour(int c) {
+    static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
+    static const int high[8] = {  0,  0,  0,  1,  0,  0,  0,  0 };
+
+    if ((c & 128) == 0) con_fg = c & 7; else con_bg = c & 7;
+    int ansi_fg = ansi[con_fg];
+    int ansi_bg = ansi[con_bg] + 10;
+    int bright = high[con_fg];
+    printf("\033[%d;%d;%dm", bright, ansi_fg, ansi_bg);
+}
+
+void con_move_to(int x, int y) {
+    printf("\033[%d;%dH", y + 1, x + 1);
+}
+
 // VDU driver for the host: keeps the same parameter-counting state machine as
 // the target so multi-byte commands stay in sync, prints text codes to stdout,
 // and ignores the graphics/screen-control codes (no display on the host).
@@ -46,20 +97,36 @@ void con_vdu(int b) {
         0,1,2,5,0,0,1,9, 8,5,0,1,4,4,0,2
     };
     static int need = 0, cmd = -1, got = 0;
+    static int params[10];
     b &= 0xff;
-    if (cmd >= 0) { if (++got >= need) cmd = -1; return; }   // skip parameter bytes
-    if (b < 32) {
+    if (cmd >= 0) {
+        params[got++] = b;
+    } else if (b == 127) {
+        if (b == 127) { fputs("\b \b", stdout); return; }
+    } else if (b < 32) {
         if (b == 10 || b == 13) putchar(b);                  // LF/CR are visible
         if (nparams[b]) { cmd = b; need = nparams[b]; got = 0; }
-        return;
     }
-    if (b == 127) { fputs("\b \b", stdout); return; }
-    putchar(b);                                              // printable
-}
 
-void con_colour(int c) {
-    static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
-    printf("\033[%dm", ansi[c & 7]);
+    if (cmd < 0) {
+        putchar(b);                                              // printable
+    }
+    else if (got == need) {
+        switch (cmd) {
+            case 17: // Set colour (+128 for background)
+                con_colour(params[0]);
+                break;
+            case 27: // Literal character output
+                con_xlate_char(params[0], GRAPHIC);
+                break;
+            case 31: // Move cursor
+                con_move_to(params[0], params[1]);
+                break;
+        }
+
+        cmd = -1;
+        need = 0;
+    }
 }
 
 int con_getkey(void) {
