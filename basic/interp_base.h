@@ -66,6 +66,7 @@
 #define STG_BUF_SIZE 65536
 #define CHAIN_MAX 4
 #define MAX_MODULES 16
+#define KEY_QLEN  16    // max keystrokes buffered
 #define SND_CHANS 4          // BBC channels 0..3
 #define SND_QLEN  9          // per-channel ring buffer (8 usable notes)
 #define RGB_TAG 0x40000000

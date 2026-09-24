@@ -47,7 +47,7 @@ void on_mouse (void);
 
 // ON KEY PROC name   |   ON KEY OFF
 // The handler reads the triggering key with GET / GET$ / INKEY(0), which return
-// the very key that fired the event (it is held in g_pending_key).
+// the very key that fired the event (it is held in key queue).
 void on_key (void);
 
 // ON DEBUG PROC name | ON DEBUG OFF : register/clear a BASIC debugger handler.
