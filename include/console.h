@@ -39,6 +39,7 @@ int  con_pos(void);                    // text cursor column (POS)
 int  con_vpos(void);                   // text cursor row (VPOS)
 int  con_rows(void);                   // text rows on screen, or 0 if unpaged (host/tests)
 int  con_cols(void);                   // text columns on screen, or 0 (host/tests)
+int  con_canonical_mode(int);          // enable key input when running under desktop host
 
 // System clipboard (one kernel-side buffer, shared by the REPL and every POD).
 void con_clip_set(const char *data, int len);
