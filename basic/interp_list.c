@@ -81,6 +81,7 @@ int line_blocks(const char *t, int *dedent_first) {
         while (is_alnum(t[i])) { if (wn < 15) w[wn++] = up(t[i]); i++; }
         w[wn] = 0;
         s_copy(last, w, 16);
+        if (s_eq(w, "REM")) break; // The remainder of the line is irrelevant!
         int open = 0, close = 0, mid = 0;
         if (s_eq(w, "FOR") || s_eq(w, "REPEAT") || s_eq(w, "WHILE") ||
             s_eq(w, "CASE") || s_eq(w, "TRY") || s_eq(w, "TYPE")) open = 1;
