@@ -13,6 +13,7 @@
 #include "interp_graphics.h"
 #include "interp_pod.h"
 #include "interp_call.h"
+#include "interp_keyqueue.h"
 #include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — TRY/CATCH, statement dispatch, event polling, the run loop
@@ -427,8 +428,8 @@ void poll_events(void) {
     if (in_event || g_err || g_stop || dbg_in_hook) return;  // never fire events mid-stop
     // Ctrl+C stops a running program (the universal "interrupt"). Drain the
     // keyboard so a stray key can't hide a following Ctrl+C; any other key is
-    // left in g_pending_key for the program's next GET / INKEY (so Esc and the
-    // rest still reach programs that want them). This makes every program
+    // left in the pending key queue for the program's next GET / INKEY (so Esc
+    // and the rest still reach programs that want them). This makes every program
     // stoppable - even a tight animation loop that never reads the keyboard -
     // while a program that installed ON KEY keeps full control of the keys.
     // Ctrl+C is byte 3 from a serial terminal, or 'c'/'C' with the Ctrl
@@ -440,7 +441,7 @@ void poll_events(void) {
             if (k == 3 || ((con_keymods() & 0x002) && (k == 'c' || k == 'C'))) {
                 g_stop = 1; return;                // 0x002 = KMOD_CTRL
             }
-            g_pending_key = k;
+            key_queue_enqueue(k);
         }
     }
     if (!ev_timer.active && !ev_mouse.active && !ev_key.active) {
@@ -478,11 +479,11 @@ void poll_events(void) {
             dispatch_handler(ev_mouse.proc);
         }
     }
-    // A keypress: consume it and hold it in g_pending_key so the handler's GET /
-    // INKEY reads the same key. Skip if a key is already waiting to be read.
-    if (ev_key.active && !g_err && !g_stop && g_pending_key < 0) {
+    // A keypress: consume it and hold it in pending key queue so the handler's
+    // GET / INKEY reads the same key. Skip if the queue is full.
+    if (ev_key.active && !g_err && !g_stop && key_queue_avail()) {
         int k = con_inkey(0);
-        if (k >= 0) { g_pending_key = k; dispatch_handler(ev_key.proc); }
+        if (k >= 0) { key_queue_enqueue(k); dispatch_handler(ev_key.proc); }
     }
     in_event = 0;
 }

@@ -11,7 +11,6 @@
 /* -------------------------------------------------------------- globals */
 
 extern coll_t colls[COLL_MAX];
-extern int g_pending_key;
 extern char g_seed_retstr[MAX_STR];   // string result staged by set_return_str
 extern int  g_seed_retstr_len;   // -1 = the last call set no string
 extern const BerryServices g_svc;

@@ -7,6 +7,7 @@
 #include "interp_stmt.h"
 #include "interp_hw.h"
 #include "interp_control.h"
+#include "interp_keyqueue.h"
 #include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — DATA/READ/RESTORE, event handlers (ON TIMER/PIN/MOUSE), VDU
@@ -98,7 +99,7 @@ void events_reset(void) {
     }
     in_event = 0;
     g_frame_us = 0;
-    g_pending_key = -1;
+    key_queue_clear();
     con_backbuffer(0);                           // every program starts drawing to the screen
     con_sprite_tint(0, 0, 0, 0, 0);                 // ... and untinted
     con_target_screen();                         // ... and not redirected into a sprite
@@ -140,7 +141,7 @@ void on_mouse(void) {
 
 // ON KEY PROC name   |   ON KEY OFF
 // The handler reads the triggering key with GET / GET$ / INKEY(0), which return
-// the very key that fired the event (it is held in g_pending_key).
+// the very key that fired the event (it is held in the key queue).
 void on_key(void) {
     lex_next();                                  // consume KEY
     if (word_is("OFF")) { lex_next(); ev_key.active = 0; return; }
