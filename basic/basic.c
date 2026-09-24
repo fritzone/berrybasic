@@ -68,10 +68,16 @@ int process_line(char *line) {
     g_branch = 0;
     g_return = 0;
     scratch_base = 0;
+
+    int saved = con_canonical_mode(0);
+
     exec_text(p, 0);
     // A direct "GOTO/GOSUB <line>" starts the program running from there.
     if (!g_err && g_branch) run_program(g_branch_line, g_branch_off);
     else if (!g_err && chain_qn > 0) run_chain_queue();   // immediate-mode CHAIN
+
+    con_canonical_mode(saved);
+
     return 1;
 }
 
