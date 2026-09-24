@@ -66,14 +66,14 @@ typedef struct { var_t *slot; var_t old; } localsave_t;
 
 /* ===================== interp_lexer.c ===================== */
 
-enum {
+typedef enum {
     T_EOL, T_NUM, T_STR, T_VAR, T_KW, T_LABEL,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_CARET,
     T_LP, T_RP, T_COMMA, T_SEMI, T_COLON, T_SQUOTE,
     T_EQ, T_NE, T_LT, T_GT, T_LE, T_GE,
     T_QUERY, T_PLING, T_DOLLAR,         // ? ! $ memory indirection
     T_HASH                              // # file channel prefix
-};
+} tok_t;
 
 enum {
     // Keywords

@@ -13,7 +13,7 @@ extern const char *cur_text;   // text of the line currently executing (see cur_
 extern const int kwcount;
 extern const kwent_t kwtab[];
 extern const char *lx;   // lexer cursor into the current line
-extern int    tok;   // current token type
+extern tok_t  tok;   // current token type
 extern int  tok_kw;   // payload for T_KW
 extern double tok_num;   // payload for T_NUM
 extern const char *tok_start;   // start of the current token (for re-branching)
