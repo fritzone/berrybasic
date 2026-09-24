@@ -153,7 +153,7 @@ int name_is_reserved(const char *name) {
 const char *cur_text;           // text of the line currently executing (see cur_line_idx)
 const char *lx;                 // lexer cursor into the current line
 const char *tok_start;          // start of the current token (for re-branching)
-int    tok;                     // current token type
+tok_t  tok;                     // current token type
 double tok_num;                 // payload for T_NUM
 int  tok_kw;                    // payload for T_KW
 char tok_str[LINE_LEN];         // payload for T_STR
