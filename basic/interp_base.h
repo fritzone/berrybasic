@@ -67,7 +67,7 @@
 #define CHAIN_MAX 4
 #define MAX_MODULES 16
 #define SND_CHANS 4          // BBC channels 0..3
-#define SND_QLEN  9          // per-channel ring buffer (8 usable notes)
+#define SND_QLEN  33         // per-channel ring buffer (32 usable notes)
 #define RGB_TAG 0x40000000
 #define POD_MAX        4                 // resident/running PODs at once
 #define POD_SLOT_SIZE  (2 * 1024 * 1024) // biggest image we host (tcc's is ~0.7 MB)
