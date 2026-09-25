@@ -492,6 +492,7 @@ void poll_events(void) {
 void run_body(int pc, int off) {
     g_return = 0;
     while (pc >= 0 && pc < prog_n && !g_err && !g_stop && !g_return) {
+        sound_pump();                            // advance any queued/background notes
         poll_events();                           // fire any events between lines
         if (g_err || g_stop || g_return) break;
         cur_line_idx = pc;
