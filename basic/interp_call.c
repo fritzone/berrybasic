@@ -121,6 +121,7 @@ void call_named(int is_fn, const char *name, value_t *retval) {
     call_sp++;
 
     // Position at the definition and bind formal parameters to the arguments.
+    g_runline = prog[defs[d].line].num;
     cur_text = prog[defs[d].line].text;
     lx = prog[defs[d].line].text + defs[d].off;
     lex_next();
