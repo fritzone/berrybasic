@@ -75,6 +75,22 @@ value_t v_str(char *p, int len)  { value_t v; v.is_str = 1; v.num = 0; v.str = p
 
 // A string value living in the GC heap: bytes pointer + length.
 
+// Variable names are limited to NAME_LEN; if they're longer, they get truncated. But, if they end
+// in % or $ for the variable type, we want to preserve that, so we sacrifice a name character for
+// the type character.
+void name_copy(char *name, const char *token) {
+    int i;
+
+    for (i=0; (i < NAME_LEN - 1) && token[i]; i++) name[i] = token[i];
+
+    name[i] = '\0';
+
+    if ((i + 1 == NAME_LEN) && (token[i] != '\0')) {
+        while (token[i]) i++;
+        if ((token[i - 1] == '$') || (token[i - 1] == '%')) name[NAME_LEN - 2] = token[i - 1];
+    }
+}
+
 int name_is_str(const char *name) {
     int i = 0; while (name[i]) i++;
     return i > 0 && name[i - 1] == '$';
