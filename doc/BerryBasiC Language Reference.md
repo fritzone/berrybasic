@@ -20,9 +20,17 @@ BerryBasiC is a BASIC interpreter running on a RaspberryPi4 supporting:
 
 · Console I/O
 
+· USB keyboard and mouse input
+
+· File handling — read/write data files on the SD card (`OPENIN`/`BGET#`/`BPUT#`…)
+
 · Graphics primitives
 
 · BBC BASIC–style VDU commands
+
+· Reserved memory blocks with `?` / `!` / `$` indirection
+
+· Native "seeds" — compiled AArch64 code called from BASIC for speed
 
 
 
@@ -286,6 +294,17 @@ Combine with AND/OR to pack and unpack fields, e.g. an RGB colour:
 ## String Concatenation
 
 FULL$ = FIRST$ + LAST$
+
+
+
+## Indirection
+
+`?`, `!` and `$` read or write memory directly (byte, 32-bit word, and string).
+They are covered in detail under [Memory and Indirection](#memory-and-indirection):
+
+    ?addr            REM the byte at addr
+    addr!4           REM the 32-bit word at addr+4
+    $addr            REM the string at addr (up to a CR)
 
 
 
@@ -659,6 +678,70 @@ A `$` array holds a string in every element:
 
     DIM NAME$(20)
     NAME$(0) = "BERRY"
+
+
+
+# Memory and Indirection
+
+Beyond variables and arrays, a program can reserve a block of raw bytes and read
+or write it directly with the indirection operators `?`, `!` and `$`. This is how
+you build a buffer to hand to a native seed for fast processing.
+
+## Reserving memory
+
+`DIM name size` (a name *without* parentheses) reserves `size + 1` bytes and puts
+the address of the first byte in the variable:
+
+    DIM BUF% 255          : REM 256 bytes; BUF% holds their address
+
+Use a numeric variable (typically a `%` integer). The block lives until the next
+`RUN`/`NEW`. You can reserve several at once: `DIM A% 100, B% 1000`.
+
+## The indirection operators
+
+| Form        | Meaning |
+| ----------- | ------- |
+| `?addr`     | the byte at `addr` (0–255) |
+| `addr?n`    | the byte at `addr + n` |
+| `!addr`     | the 32-bit word at `addr` (little-endian, signed) |
+| `addr!n`    | the word at `addr + n` |
+| `$addr`     | the string at `addr`, up to a carriage-return (`&0D`) terminator |
+
+They work on both sides of `=` — reading (peek) and writing (poke):
+
+    ?BUF% = 65            : REM poke a byte
+    BUF%?1 = 66           : REM poke the next byte
+    PRINT ?BUF%, BUF%?1   : REM 65  66
+    !BUF% = &12345678     : REM poke a 32-bit word (4 bytes, little-endian)
+    PRINT BUF%?0          : REM 120  (&78, the low byte)
+    $BUF% = "BERRY"       : REM write text + a CR terminator
+    PRINT $BUF%           : REM BERRY
+
+Binary `?`/`!` bind tighter than arithmetic, so `BUF%?I + 1` is `(BUF%?I) + 1`.
+For an arithmetic *address* with the unary form, parenthesise it — `?(BUF%+1)` —
+or just use the binary form, `BUF%?1`.
+
+## Passing a buffer to a seed
+
+Because the address is a real pointer, a seed can read or write the same memory.
+Build the buffer in BASIC and pass its address (and length):
+
+    10 DIM B% 9
+    20 FOR I = 0 TO 9 : B%?I = I * I : NEXT
+    30 SEED H%, "BUFSUM.SED"
+    40 PRINT CALL(H%, B%, 10)        : REM the seed sums the 10 bytes -> 285
+
+with the seed dereferencing the address it is given:
+
+    SEED_EXPORT(bufsum) {
+        const unsigned char *p = (const unsigned char *)(uintptr_t)(long)argv[0].num;
+        int len = (int)argv[1].num, sum = 0;
+        for (int i = 0; i < len; i++) sum += p[i];
+        return sum;
+    }
+
+This is the fast path for bulk data: BASIC owns the buffer, the seed crunches it
+natively, and both see the same bytes.
 
 
 
@@ -1080,6 +1163,58 @@ The current text cursor row (Y position), counting from 0.
 
 
 
+# Mouse
+
+A USB mouse (plugged into a USB-A port on real hardware, or supplied with
+`-device usb-mouse` under QEMU) drives an on-screen pointer. Position is reported
+in **raw framebuffer pixels** with the origin at the **top-left** corner: X runs
+`0` to screen-width−1, Y runs `0` to screen-height−1. The pointer starts at the
+centre of the screen and is clamped to the screen edges.
+
+The **button value** is a bitmask:
+
+| Bit | Value | Button |
+|-----|-------|--------|
+| 0   | 1     | Left   |
+| 1   | 2     | Right  |
+| 2   | 4     | Middle |
+
+So a value of `3` means left+right are held together. Test a single button with
+`AND`, e.g. `IF MOUSEB AND 1 THEN ...` for the left button.
+
+If no mouse is present, the position reads back as `0,0` and the buttons as `0`.
+
+When a mouse is connected, the system draws an **arrow pointer** on screen and
+moves it with the mouse automatically — including at the `>` editor prompt and
+while a program waits at `GET`/`INKEY`. You do not have to draw the pointer
+yourself; reading `MOUSEX`/`MOUSEY`/`MOUSE` simply tells you where it is.
+
+> Under QEMU (`make run`), click inside the window once to let it capture the
+> mouse (a relative USB mouse only sends movement while the window has grabbed
+> the pointer); press `Ctrl`+`Alt`+`G` to release it.
+
+## MOUSEX / MOUSEY / MOUSEB
+
+Three parenless value functions that read one component of the pointer, for use
+inside an expression:
+
+    PLOT 69, MOUSEX, MOUSEY          : REM plot a point under the pointer
+    IF MOUSEB AND 1 THEN PROCclick   : REM act on the left button
+
+## MOUSE
+
+The `MOUSE` statement reads all three at once into three numeric variables —
+X, Y, then the button bitmask:
+
+    MOUSE X%, Y%, B%
+    PRINT "pointer at "; X%; ","; Y%; "  buttons="; B%
+
+Reading the mouse (via either form) also polls the hardware, so call it in your
+main loop to keep the pointer up to date. See `examples/mouse.bas` for a small
+drawing demo.
+
+
+
 # Time
 
 `TIME` is a centisecond (hundredth-of-a-second) counter. Read it as a value:
@@ -1443,6 +1578,120 @@ STOP
 Terminate execution immediately.
 
 END
+
+
+
+# Storage (SD card)
+
+Programs and data live on the SD card's FAT filesystem. File names may be given
+quoted or bare; if you give no extension, `.BAS` is assumed (so `LOAD WELCOME`
+opens `WELCOME.BAS`). Names are 8.3 (up to eight characters, a dot, a three-letter
+extension), as the card is FAT.
+
+## SAVE
+
+Writes the current program to a file.
+
+    SAVE "GAME"           : REM -> GAME.BAS
+    SAVE "DATA.TXT"
+
+## LOAD
+
+Clears the current program and variables, then loads a program from a file.
+
+    LOAD "GAME"
+
+## CAT / DIR
+
+Lists the files on the card. `CAT` and `DIR` are the same command.
+
+    CAT
+
+## DELETE
+
+Removes a file from the card.
+
+    DELETE "OLD.BAS"
+
+These commands work on a whole program (or, for `DELETE`, any file). To read and
+write your own **data files** byte by byte, use the file-handling commands below.
+
+
+
+# File Handling
+
+A program can open a file on the SD card as a **channel** and read or write its
+bytes directly. Writes go straight to the real FAT filesystem, so the files can be
+read on a PC (and by other programs). Up to four files may be open at once.
+
+Open a file with one of three functions, each returning a channel number (a small
+positive integer), or **0** if it could not be opened:
+
+| Function | Opens a file for… | If the file… |
+|----------|-------------------|--------------|
+| `OPENIN "name"`  | reading            | doesn't exist → returns 0 |
+| `OPENOUT "name"` | writing (creates, or **empties** an existing file) | is created fresh |
+| `OPENUP "name"`  | reading *and* writing | doesn't exist → returns 0 |
+
+All the other file words take a channel after a `#`:
+
+| Command | Meaning |
+|---------|---------|
+| `BGET# ch`         | Read and return the next byte (`0`–`255`), or `-1` at end of file |
+| `BPUT# ch, n`      | Write the byte `n AND 255` |
+| `BPUT# ch, A$`     | Write every byte of the string `A$` |
+| `EOF# ch`          | `TRUE` (`-1`) when the file pointer is at the end, else `FALSE` (`0`) |
+| `EXT# ch`          | The length of the file in bytes |
+| `PTR# ch`          | The current read/write position (0 = start) |
+| `PTR# ch = n`      | Move the position to byte `n` (0 to `EXT#`, so `PTR# ch = EXT# ch` appends) |
+| `CLOSE# ch`        | Close the channel (writes are finalised here); `CLOSE# 0` closes every open channel |
+
+Reading advances the pointer by one byte; so does writing. Seeking with `PTR#`
+lets you re-read or overwrite any part of the file.
+
+    10 C = OPENOUT "SCORES.DAT"
+    20 FOR I = 1 TO 8 : BPUT# C, I*I : NEXT   : REM write eight bytes
+    30 BPUT# C, "END"                          : REM append the bytes of a string
+    40 CLOSE# C
+    50 C = OPENIN "SCORES.DAT"
+    60 PRINT "length ="; EXT# C
+    70 REPEAT : PRINT BGET# C; " "; : UNTIL EOF# C
+    80 PRINT
+    90 PTR# C = 3 : PRINT "byte 3 ="; BGET# C   : REM random access
+    100 CLOSE# C
+
+> Always `CLOSE#` a file you have written — the final data and the file's length
+> are committed to the card on close. `CLOSE# 0` is a quick way to close everything
+> (for example in an error handler or at the end of a program).
+
+## PRINT# and INPUT# (typed records)
+
+`BGET#`/`BPUT#` work a byte at a time. When you want to store whole **numbers and
+strings** and get them back with their types intact, use `PRINT#` to write and
+`INPUT#` to read. Each value is stored as a self-describing record, so you read
+them back in the same order you wrote them:
+
+    PRINT# ch, expr, expr, ...   : REM write a list of numbers and/or strings
+    INPUT# ch, var,  var,  ...   : REM read them back into variables
+
+The variables in `INPUT#` may be simple variables or array elements, and their
+types must match the records in the file (a number into a numeric variable, a
+string into a `$` variable).
+
+    10 C = OPENOUT "SAVE.DAT"
+    20 PRINT# C, "Level", 7, SCORE, NAME$      : REM mix strings and numbers freely
+    30 CLOSE# C
+    40 C = OPENIN "SAVE.DAT"
+    50 INPUT# C, TITLE$, LVL, SC, NAME$
+    60 CLOSE# C
+
+On disk each record is a tag byte followed by its data — a number is `&40` plus
+eight bytes (an IEEE-754 double, little-endian); a string is `&00`, a one-byte
+length, then the characters. You can freely mix `BPUT#`/`BGET#` and
+`PRINT#`/`INPUT#` on the same file if you keep track of the layout yourself.
+
+See `examples/fileio.bas` (byte level) and `examples/records.bas` (typed records)
+for complete demos.
 
 
 
