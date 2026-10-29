@@ -3,6 +3,8 @@
 // the bare-metal target.
 #include <stdio.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 #include "console.h"
 #include "usb_hid.h"
 
@@ -10,10 +12,39 @@ void con_putc(char c) { putchar(c); }
 
 void con_puts(const char *s) { fputs(s, stdout); }
 
+int con_canonical_mode(int enable) {
+    struct termios t;
+    int was_enabled;
+
+    tcgetattr(STDIN_FILENO, &t);
+
+    was_enabled = (t.c_lflag & ICANON) != 0;
+
+    if (enable) {
+        t.c_lflag |= ICANON | ECHO;
+        printf("\033[?25h"); // show cursor
+    } else {
+        t.c_lflag &= ~(ICANON | ECHO);
+        printf("\033[?25l"); // hide cursor
+    }
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &t);
+
+    return was_enabled;
+}
+
 int con_getline(char *buf, int maxlen) {
-    if (!fgets(buf, maxlen, stdin)) return -1;
-    int n = (int)strlen(buf);
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    int saved = con_canonical_mode(1);
+
+    int n = -1;
+
+    if (fgets(buf, maxlen, stdin)) {
+        n = (int)strlen(buf);
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    }
+
+    con_canonical_mode(saved);
+
     return n;
 }
 
@@ -26,12 +57,21 @@ int con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
     if (prefill_len > 0) { buf[prefill_len] = 0; fputs(buf, stdout); }
     fflush(stdout);
     char tmp[1024];
-    if (!fgets(tmp, sizeof tmp, stdin)) return -1;
-    int t = (int)strlen(tmp);
-    while (t > 0 && (tmp[t - 1] == '\n' || tmp[t - 1] == '\r')) tmp[--t] = 0;
-    int n = prefill_len;
-    for (int i = 0; i < t && n < maxlen - 1; i++) buf[n++] = tmp[i];
-    buf[n] = 0;
+
+    int saved = con_canonical_mode(1);
+
+    int n = -1;
+
+    if (fgets(tmp, sizeof tmp, stdin)) {
+        int t = (int)strlen(tmp);
+        while (t > 0 && (tmp[t - 1] == '\n' || tmp[t - 1] == '\r')) tmp[--t] = 0;
+        n = prefill_len;
+        for (int i = 0; i < t && n < maxlen - 1; i++) buf[n++] = tmp[i];
+        buf[n] = 0;
+    }
+
+    con_canonical_mode(saved);
+
     return n;
 }
 
@@ -74,7 +114,92 @@ unsigned long long con_micros(void) {
     return (unsigned long long)tv.tv_sec * 1000000ULL + tv.tv_usec;
 }
 
-int con_inkey(int centiseconds) { (void)centiseconds; return -1; }   // no raw stdin on host
+int inkey_pushback = -1;
+
+int poll_byte_ms(int ms) {
+    int ret = -1;
+
+    if (inkey_pushback > 0) {
+        ret = inkey_pushback;
+        inkey_pushback = -1;
+    } else {
+        int microseconds = ms * 10000;
+        struct timeval timeout = { 0, microseconds };
+        struct timeval *timeout_ptr = ms >= 0 ? &timeout : NULL;
+
+        fd_set fds;
+
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+
+        int matched = select(STDIN_FILENO + 1, &fds, NULL, NULL, timeout_ptr);
+
+        if (matched > 0) {
+            char ch;
+
+            if (read(STDIN_FILENO, &ch, 1) >= 1) ret = ch;
+        }
+    }
+
+    return ret;
+}
+
+int con_inkey(int centiseconds) {
+    int milliseconds = centiseconds * 10;
+
+    int ch = poll_byte_ms(milliseconds);
+
+    if (ch == 27) {
+        // Translate CSI escape sequence if present in the buffer.
+        ch = poll_byte_ms(20);
+
+        // No additional characters have arrived to form an escape sequence; return ESC itself.
+        if (ch < 0) return 27;
+
+        // Check if additional characters have arrived but they don't form an escape sequence.
+        if ((ch != '[') && (ch != 'O')) {
+            inkey_pushback = ch;
+            return 27;
+        }
+
+        // We are definitely in an escape sequence now.
+        ch = poll_byte_ms(20);
+
+        switch (ch) {                                       // single-char CSI / SS3
+            case 'A': ch = KEY_UP; break;
+            case 'B': ch = KEY_DOWN; break;
+            case 'C': ch = KEY_RIGHT; break;
+            case 'D': ch = KEY_LEFT; break;
+            case 'H': ch = KEY_HOME; break;
+            case 'F': ch = KEY_END; break;
+            case 'P': ch = KEY_F(1); break;              // SS3: ESC O P..S = F1..F4
+            case 'Q': ch = KEY_F(2); break;
+            case 'R': ch = KEY_F(3); break;
+            case 'S': ch = KEY_F(4); break;
+
+            default:
+                if (ch >= '0' && ch <= '9') {                        // numeric CSI: ESC [ <n> ~
+                    int n = 0;
+                    while (ch >= '0' && ch <= '9') { n = n * 10 + (ch - '0'); ch = poll_byte_ms(20); }
+                    switch (n) {                                   // (terminator '~' already consumed)
+                        case 2:  ch = KEY_INS; break;
+                        case 3:  ch = KEY_DEL; break;
+                        case 5:  ch = KEY_PGUP; break;
+                        case 6:  ch = KEY_PGDN; break;
+                        case 11: ch = KEY_F(1); break;   case 12: ch = KEY_F(2); break;
+                        case 13: ch = KEY_F(3); break;   case 14: ch = KEY_F(4); break;
+                        case 15: ch = KEY_F(5); break;   case 17: ch = KEY_F(6); break;
+                        case 18: ch = KEY_F(7); break;   case 19: ch = KEY_F(8); break;
+                        case 20: ch = KEY_F(9); break;   case 21: ch = KEY_F(10); break;
+                        case 23: ch = KEY_F(11); break;  case 24: ch = KEY_F(12); break;
+                    }
+                }
+        }
+    }
+
+    return ch;
+}
+
 int con_pos(void)  { return 0; }
 int con_vpos(void) { return 0; }
 int con_rows(void) { return 0; }        // no paging on the host CLI

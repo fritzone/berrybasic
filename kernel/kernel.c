@@ -652,6 +652,8 @@ int con_vpos(void) { return cursor_row; }
 int con_rows(void) { return g_term_rows; }
 int con_cols(void) { return g_term_cols; }
 
+int con_canonical_mode(int) { return 0; } // no-op outside of the desktop host
+
 // --- system clipboard -------------------------------------------------------
 // One buffer, in the kernel, so it outlives any POD (copy in the editor, paste
 // at the BASIC prompt or in the next program). con_clip_get returns the FULL
