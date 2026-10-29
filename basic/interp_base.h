@@ -31,27 +31,27 @@
 #define BAS_TWOPI  6.28318530717958647692
 #define BAS_LN2    0.69314718055994530942
 #define ERRMSG_MAX 128
-#define MAX_ARRAYS      16
+#define MAX_ARRAYS      128
 #define MAX_DIMS         3
-#define ARR_NUM_POOL  4096      // numeric elements (longs)
-#define ARR_STR_POOL   512      // string elements (descriptors)
-#define MAX_TYPES       8
-#define MAX_FIELDS     16
-#define REC_NUM_POOL 1024      // numeric field slots across all record instances
-#define REC_STR_POOL  256      // string field slots (descriptors into gcheap)
-#define LOCAL_MAX 96
+#define ARR_NUM_POOL 65536      // numeric elements (longs)
+#define ARR_STR_POOL 65536      // string elements (descriptors)
+#define MAX_TYPES     256
+#define MAX_FIELDS    256
+#define REC_NUM_POOL 65536      // numeric field slots across all record instances
+#define REC_STR_POOL 65536      // string field slots (descriptors into gcheap)
+#define LOCAL_MAX 256
 #define DIM_HEAP_SIZE (256 * 1024)   // room for indirection buffers and sprites (GGET/GPUT)
 #define KW_SEED_DYN 5000
 #define SEED_HEAP_SIZE  (48u * 1024u * 1024u)  // shared by seeds and POD programs;
 #define COLL_MAX 64
 #define SEED_KW_MAX 256
-#define GOSUB_MAX 32
-#define FOR_MAX 16
-#define REPEAT_MAX 16
-#define WHILE_MAX 16
-#define TRY_MAX 16
-#define FN_RET_MAX 32
-#define DEF_MAX 64
+#define GOSUB_MAX 256
+#define FOR_MAX 64
+#define REPEAT_MAX 64
+#define WHILE_MAX 64
+#define TRY_MAX 64
+#define FN_RET_MAX 64
+#define DEF_MAX 256
 #define PRINT_FIELD 8     // column width for the ',' separator and TAB alignment
 #define REC_NUM  0x40
 #define REC_STR  0x00
@@ -67,7 +67,7 @@
 #define CHAIN_MAX 4
 #define MAX_MODULES 16
 #define SND_CHANS 4          // BBC channels 0..3
-#define SND_QLEN  9          // per-channel ring buffer (8 usable notes)
+#define SND_QLEN  33         // per-channel ring buffer (32 usable notes)
 #define RGB_TAG 0x40000000
 #define POD_MAX        4                 // resident/running PODs at once
 #define POD_SLOT_SIZE  (2 * 1024 * 1024) // biggest image we host (tcc's is ~0.7 MB)
