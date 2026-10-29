@@ -8,6 +8,7 @@
 #include "interp_files.h"
 #include "interp_pod.h"
 #include "interp_control.h"
+#include "interp_keyqueue.h"
 #include "interp_debug.h"
 // ===========================================================================
 // BerryBasiC — native seeds: heap, collections (DICT/LIST/TREE), seed-service vtable
@@ -506,17 +507,15 @@ void svc_audio_close(void)                 { snd_pcm_close(); }
 // lets a seed convert coordinates BASIC passed in its current mode.
 int  svc_gfx_mode(void)                    { return con_gfx_mode(); }
 
-// A key that the ON KEY event consumed while detecting the press, held for the
-// handler (or the next GET) to read. GET/INKEY go through these wrappers so the
-// key that triggered the event is the one the handler reads back.
-int g_pending_key = -1;
 int bas_getkey(void) {
-    if (g_pending_key >= 0) { int k = g_pending_key; g_pending_key = -1; return k; }
-    return con_getkey();
+    int key = key_queue_dequeue();
+    if (key < 0) key = con_getkey();
+    return key;
 }
 int bas_inkey(int cs) {
-    if (g_pending_key >= 0) { int k = g_pending_key; g_pending_key = -1; return k; }
-    return con_inkey(cs);
+    int key = key_queue_dequeue();
+    if (key < 0) key = con_inkey(cs);
+    return key;
 }
 
 // A record variable has no scalar value of its own, so it is not a number and
