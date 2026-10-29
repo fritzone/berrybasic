@@ -1,0 +1,20 @@
+<title>DIM</title>
+<h1>DIM</h1>
+<p>Reserves storage for an array, or a block of memory.</p>
+<h2>Syntax</h2>
+<pre>DIM name(size [, size ...])
+DIM name size</pre>
+<h2>Description</h2>
+<p>The first form creates an array whose indices run from 0 up to each given
+size. String arrays (<b>name$</b>) and integer arrays (<b>name%</b>) work too.
+The second form (a bare name and a byte count) reserves a block of memory and
+sets <b>name</b> to its address, for use with the ? ! $ indirection operators.</p>
+<h2>Examples</h2>
+<code>
+10 DIM score(10)
+20 DIM grid(8, 8)
+30 DIM word$(100)
+40 DIM mem 256
+</code>
+<h2>See also</h2>
+<p><a href="LET">LET</a>, <a href="INDEX">Index</a></p>

@@ -1,0 +1,21 @@
+<title>REPEAT</title>
+<h1>REPEAT ... UNTIL</h1>
+<p>Repeats a block until a condition becomes true.</p>
+<h2>Syntax</h2>
+<pre>REPEAT
+  statements
+UNTIL condition</pre>
+<h2>Description</h2>
+<p>The block runs at least once; after each pass the condition is tested, and the
+loop ends when it is true. Contrast with <a href="WHILE">WHILE</a>, which tests
+before the first pass.</p>
+<h2>Examples</h2>
+<code>
+10 n = 1
+20 REPEAT
+30   PRINT n
+40   n = n * 2
+50 UNTIL n > 100
+</code>
+<h2>See also</h2>
+<p><a href="WHILE">WHILE</a>, <a href="FOR">FOR</a>, <a href="INDEX">Index</a></p>

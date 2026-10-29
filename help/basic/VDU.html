@@ -1,0 +1,17 @@
+<title>VDU</title>
+<h1>VDU</h1>
+<p>Sends raw control codes and characters to the screen driver.</p>
+<h2>Syntax</h2>
+<pre>VDU n [, n ]...</pre>
+<h2>Description</h2>
+<p>Each number is sent as a byte to the VDU (screen) driver. Codes below 32 are
+commands: 12 clears the screen, 17 sets the text colour, 31 moves the cursor.
+Bytes 32 and above are printed as characters.</p>
+<h2>Examples</h2>
+<code>
+10 VDU 17, 1          : REM red text
+20 PRINT "warning"
+30 VDU 12             : REM clear the screen
+</code>
+<h2>See also</h2>
+<p><a href="PRINT">PRINT</a>, <a href="CLS">CLS</a>, <a href="COLOUR">COLOUR</a>, <a href="INDEX">Index</a></p>

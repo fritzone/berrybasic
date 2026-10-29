@@ -1,0 +1,17 @@
+<title>READ</title>
+<h1>READ</h1>
+<p>Reads the next constant from the <a href="DATA">DATA</a> pool into a variable.</p>
+<h2>Syntax</h2>
+<pre>READ var [, var ]...</pre>
+<h2>Description</h2>
+<p>Each READ takes the next unread DATA value and stores it in the variable,
+advancing an internal pointer. Reading past the last value raises an error; use
+RESTORE to rewind.</p>
+<h2>Examples</h2>
+<code>
+10 READ a, b, c
+20 PRINT a + b + c
+30 DATA 3, 4, 5
+</code>
+<h2>See also</h2>
+<p><a href="DATA">DATA</a>, <a href="INDEX">Index</a></p>

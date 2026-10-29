@@ -1,0 +1,24 @@
+<title>PROC</title>
+<h1>PROC / DEF PROC</h1>
+<p>Defines and calls a named procedure with parameters and local variables.</p>
+<h2>Syntax</h2>
+<pre>DEF PROCname[(param [, param]...)]
+  statements
+ENDPROC
+
+PROCname[(argument [, argument]...)]</pre>
+<h2>Description</h2>
+<p>A procedure groups statements under a name. Call it with <b>PROC</b> followed
+by the name. Parameters are passed by value; declare extra <a href="LET">LOCAL</a>
+variables inside so they do not clash with the caller's. ENDPROC returns.</p>
+<h2>Examples</h2>
+<code>
+10 PROCbox(3)
+20 END
+30 DEF PROCbox(n)
+40   LOCAL i
+50   FOR i = 1 TO n : PRINT STRING$(n, "*") : NEXT
+60 ENDPROC
+</code>
+<h2>See also</h2>
+<p><a href="FN">FN</a>, <a href="GOSUB">GOSUB</a>, <a href="INDEX">Index</a></p>

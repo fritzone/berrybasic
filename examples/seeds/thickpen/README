@@ -1,0 +1,15 @@
+THICKPEN - thick lines with the three join styles.
+
+Language features
+  - SEED_KEYWORD statement (THICKPEN)
+  - the line pen: width and miter / bevel / round joins
+  - stroking polylines from native code (<graphics.h>)
+
+Try it
+  THICKPEN                     REM three thick zig-zags, one per join
+
+Build it on the machine
+  grow thickpen          # -> build/THICKPEN.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as THICKPEN.SED, ready to use.
+

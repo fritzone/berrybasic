@@ -13,8 +13,13 @@
 # Usage:  tools/flashsd.sh [image.img]
 set -euo pipefail
 
+# Debug tracing: run with MKSD_DEBUG=1 to print a marker at each stage, so a
+# hang (interactive read, sudo password prompt, slow dd) shows where it stalls.
+dbg(){ [ -n "${MKSD_DEBUG:-}" ] && printf '[flashsd %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; return 0; }
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMG="${1:-$ROOT/berrybasic-sd.img}"
+dbg "flashsd start: IMG=$IMG"
 
 [ -f "$IMG" ] || { echo "error: image '$IMG' not found - run 'make sdimage' first"; exit 1; }
 command -v lsblk >/dev/null || { echo "error: lsblk not found"; exit 1; }
@@ -26,6 +31,7 @@ printf 'Image: %s (%s)\n\n' "$IMG" "$(numfmt --to=iec --suffix=B "$IMG_SIZE" 2>/
 # resolve the *physical* disks backing /, /boot and /boot/efi via lsblk's
 # inverse tree (-s), so this works even when root is on LVM/RAID/LUKS where the
 # mount source (e.g. /dev/mapper/...) has no direct parent disk.
+dbg "resolving protected system disks (findmnt/lsblk)"
 declare -A PROTECTED=()
 for mp in / /boot /boot/efi; do
     src="$(findmnt -no SOURCE "$mp" 2>/dev/null || true)"
@@ -38,6 +44,7 @@ done
 # Collect candidate whole disks (TYPE=disk).  Prefer removable / USB / MMC, but
 # list everything except the system disk so an oddly-enumerated reader still
 # shows up - clearly flagged.
+dbg "listing candidate disks (lsblk)"
 mapfile -t DISKS < <(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}')
 
 idx=0
@@ -67,6 +74,7 @@ if [ "$idx" -eq 0 ]; then
     exit 1
 fi
 
+dbg "waiting for device-number input (interactive read)"
 printf 'Select a device number to flash [1-%d], or q to quit: ' "$idx"
 read -r choice
 [ "$choice" = "q" ] && { echo "aborted."; exit 0; }
@@ -86,6 +94,7 @@ read -r confirm
 [ "$confirm" = "$DEV" ] || { echo "names did not match - aborted."; exit 1; }
 
 echo
+dbg "running sudo (may prompt for password - can look like a hang)"
 echo ">> wiping old partition tables on $DEV ..."
 sudo wipefs -a "$DEV"
 sudo sgdisk --zap-all "$DEV" 2>/dev/null || true   # nuke GPT incl. backup at disk end

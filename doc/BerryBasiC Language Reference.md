@@ -1,1981 +1,5196 @@
-# BerryBasiC Language Reference
+# Another BASIC? Really?
 
-## Introduction
+There is no shortage of BASIC dialects. The language is sixty years old, and over those decades it has appeared in hundreds of forms - from corporate/classroom mainframes, to every 8-bit home computer, in pocket calculators, and today in half a dozen actively maintained modern interpreters, online or offline. So the first fair question to ask about ***BerryBasiC*** is: why one more?
 
-BerryBasiC is a BASIC interpreter running on a RaspberryPi4 supporting:
+The honest answer is that ***BerryBasiC*** is not really trying to be a *better BASIC*. It is trying to bring back a particular *experience* that modern computing has almost entirely lost - and BASIC happens to be the most natural language for it.
 
-· Line-numbered programs
+Think about what made the home-computer BASICs of the 1980s so formative for a generation of programmers. It was not the syntax, which was often clumsy. It was that when you switched the machine on, **you and the computer were the only two things in the room.** There was no operating system between you. You typed `PRINT "HELLO"` and it happened. You wrote a number to a memory address and a pixel changed colour. You could, with a little courage, understand the *entire* machine - from the character you typed to the electrons on the screen - because there was nothing hidden between you and that big ugly CRT screen.
 
-· Direct mode commands
+In recent years and modern operating systems that directness has quietly disappeared. A modern computer is a complex machine of layered abstractions: your BASIC program runs inside a runtime, that lives inside a sandbox, executed from inside a process, which runs atop an operating system of tens of millions of lines, on top of a firmware you will never see. Every layer is there for a good reason, and together they are a marvel. But no one person can hold the whole thing in their head anymore, and a beginner writing their first line of code is standing at the bottom of a very tall building with no way to see the top.
 
-· Numeric, integer, and string variables
+***BerryBasiC*** exists to hand you a whole machine again - a small, comprehensible, *complete* machine that you own from the first instruction to the last pixel - running on cheap, modern, genuinely powerful hardware, the ***Raspberry PI 4***. It is not nostalgia for old syntax. It is nostalgia for **transparency**.
 
-· Arrays
+## What makes BerryBasiC different
 
-· Procedures and functions
+The thing that sets ***BerryBasiC*** apart from every other BASIC you can install today is where it runs: **on bare metal.** It is not an application that runs on Linux or Windows, but the single program which is running on the Raspberry Pi. When the Pi powers on, there is no operating system to load - ***BerryBasiC*** takes the role of the operating system, just like a classic **BBC Micro** or a **Commodore** would do it. It boots to a `>` prompt in a second, and you can start programming right away.
 
-· Structured loops
+That single fact colours everything else. But be assured, ***BerryBasiC*** is not a museum piece, and four things keep it from being one:
 
-· DATA/READ processing
+- **It is a modern, structured BASIC.** The spaghetti of `GOTO` and line numbers is still there if you want it, but you rarely need it. There are named procedures and functions with local variables and recursion, block `IF`/`ELSE`/`ENDIF`, `FOR`/`REPEAT`/`WHILE`/`CASE` loops, structured error handling with `TRY`/`CATCH`, and reusable code libraries you pull in with `IMPORT`. You can write clean, readable programs in it.
+- **It owns the hardware directly.** The graphics screen, sound, the mouse and keyboard, files on the SD card, and - the reason many people come to it - the 40 pins of the GPIO header are all reachable with a single plain keyword. No driver, no device file, no permission dance. `PIN 17, 1` lights an LED. That is the whole story.
+- **It has an escape hatch to full native speed.** Interpreting BASIC is friendly but slow. When a job needs to run at the speed of the silicon - an image filter, a simulation, a tight numeric loop - you write a *seed*: a small piece of compiled native code that ***BerryBasiC*** loads from the card and calls like a function, running in a safe sandbox. You stay in approachable BASIC for everything else and drop to the metal only where it counts. Very few languages give beginners both ends of that spectrum in one place.
+- **It is legible all the way down.** The interpreter is written in user friendly C, you can read, understand, and extend. There is no hidden magic - which is the whole point.
 
-· Console I/O
+And last, but not least, it is free, as in beer. You can download, modify, create your own interpretation of it, make it yours.
 
-· USB keyboard and mouse input
+## What you can do with it
 
-· File handling — read/write data files on the SD card (`OPENIN`/`BGET#`/`BPUT#`…)
+***BerryBasiC*** is an approach towards a computer for *making things you can see, hear, and touch*. without the added complexity of several layers of abstractizations. A few of the things it is built for:
 
-· Graphics primitives
+**Learn to program from the ground up.** Everything is immediate - type a statement at the prompt and it runs - and the concepts build naturally from a first `PRINT` to loops, procedures, and graphics. Because there is no framework to learn first, the ideas stay in the foreground. Ideal for algorithmic implementation, keeping the focus on what is the most important: your program, unhindered by "stuff" that sits below it.  
 
-· BBC BASIC–style VDU commands
+**Blink an LED, read a sensor, control the world.** Since this is physical computing, it is where a bare-metal BASIC on a Raspberry Pi truly comes alive. Buttons, sensors and other pins are read and driven just as simply, so a working thermostat, a burglar alarm, or a reaction-timer game is a short evening's project rather than a stack of libraries. Without this direct approach to the underlying hardware, it would be just another basic, running, well, on a Raspberry Pi. With direct hardware access, it is something that brings the low level closer.
 
-· Reserved memory blocks with `?` / `!` / `$` indirection
+**Make games and graphics.** There is a full graphics screen with lines, shapes, geometric primitives, 24-bit truecolour, and sprites you can capture from the screen or load from PNG, JPEG and BMP files. There is even sound implemented. There is a mouse, keyboard, and an event system that runs your code when a timer fires or a pin changes. All is there to make your own games.
 
-· Native "seeds" — compiled AArch64 code called from BASIC for speed
+**Tinker at the metal.** You can reserve raw blocks of memory and read and write them byte by byte, pass a buffer to a native seed to crunch at full speed, and generally see how a computer actually works underneath the friendly words. For the systems-curious, it is a sandbox for exactly the kind of low-level poking that a modern OS normally forbids.
 
+## Who it is for
 
+***BerryBasiC*** is written for people who want to *understand* the computer, not just command it from a safe distance.
+
+That includes **complete beginners and students**, who get a machine where cause and effect are always visible and nothing has to be taken on faith. It includes **teachers**, for whom a device that boots to a prompt and blinks an LED in five lines is a wonderful way to make both programming and electronics tangible. It includes **hobbyists, makers, and retrocomputing enthusiasts** who remember (or wish they had known) the directness of the old machines and want it back on hardware that can actually keep up. And it includes **tinkerers and systems-minded programmers** who would like to touch bare metal - to own the wires, the timers, the pins, and every last byte of RAM - without having to write an entire operating system first.
+
+It is worth being equally clear about who it is *not* for, at least today. If you are building a production web service, shipping a cross-platform app, or leaning on a vast ecosystem of third-party packages, ***BerryBasiC*** is simply the wrong tool and makes no apology for it. It is deliberately small, deliberately hardware-bound, and deliberately focused on the machine in front of you.
+
+## The bargain of direct hardware access
+
+The defining choice in ***BerryBasiC*** - running on bare metal, with nothing between your program and the silicon - is a genuine trade-off, and it is worth understanding both sides before you begin, because the same decision that gives the system its magic also gives it its sharp edges.
+
+| Direct hardware access gives you...                                                                                                                  | ...at the cost of                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Immediacy.** `PIN 17, 1` drives a pin with nothing in between - cause and effect are visible, which is priceless for learning.                     | **No safety net.** There is no operating system to catch a mistake; a wrong pin or a bad memory write can hang the machine or, electrically, damage what you have wired up.                     |
+| **Predictable timing.** No scheduler, no background tasks stealing cycles - your program has the processor to itself, so timing is yours to control. | **No multitasking or isolation.** One program runs at a time; if it crashes, everything stops and you reboot. There is no process boundary to contain a fault. Save often!                      |
+| **Simplicity.** No drivers, device files, or permissions - one keyword reaches the hardware.                                                         | **You build it or do without.** If the interpreter doesn't already expose something (a network stack, an exotic device), you write a seed for it or go without; there is no library to install. |
+| **You own the whole machine.** All the RAM, all the PINs, every cycle, nothing hidden.                                                               | **You own the responsibility too.** Correctness and *electrical safety* are on you - put the resistor on that LED - and recovering from a hard lock-up means switching the power off and on.    |
+| **Legibility.** The whole system is small enough to understand top to bottom.                                                                        | **Portability.** It is tied to specific hardware; the pin registers and boot process are the Raspberry Pi's, not a write-once-run-anywhere abstraction.                                         |
+
+Read that table and the cons might look like a list of reasons not to bother. They are not. **The constraints are the point.** The reason a bad `POKE` can hang the machine is the same reason a good one lights a pixel with no ceremony: there is nothing in the way. The reason there is no safety net is the same reason there is nothing hidden. You are accepting a little risk and a little responsibility in exchange for a computer you can actually see all the way through - and for learning, for making, and for the sheer pleasure of understanding the machine, that is an excellent bargain.
+
+The rest of this manual shows you how to spend it. For the precise shape of those sharp edges - which devices the drivers really support, which they don't, and what it would take to change that - see *Hardware Support and Limitations* near the end.
+
+# BerryBasiC Quick Intro
+
+***BerryBasiC*** is a small, BBC-flavoured BASIC interpreter that, as you might have guesses at this point, runs on a Raspberry Pi 4 (and in a QEMU emulator on your desktop). It is a *tokenless* interpreter: you type a program as numbered lines, and it runs the source directly. If you have ever used **BBC BASIC**, **Acorn BASIC**, or one of the 8-bit home-computer BASICs, most of this will feel familiar; if you are new to BASIC entirely, the rest of this manual is written to be read start to finish.
+
+At a glance, BerryBasiC supports:
+
+- Line-numbered programs **and** direct-mode commands typed at the prompt
+- Floating-point, integer (`%`) and string (`$`) variables, plus arrays of up to three dimensions
+- Collections: dictionaries (text-keyed), growable lists, and sorted binary trees
+- Named procedures (`PROC`) and functions (`FN`), local variables, and recursion
+- Structured control flow: `IF`/`THEN`/`ELSE`/`ENDIF`, `FOR`, `REPEAT`, `WHILE`, `CASE`
+- `DATA`/`READ`/`RESTORE` for built-in constant tables
+- Reusable code libraries via `IMPORT`
+- Console I/O, a USB keyboard and mouse, and a centisecond clock
+- Files on the SD card, opened as channels for byte- or record-level I/O, plus a full set of directory commands
+- Graphics: BBC-style `PLOT`/`MOVE`/`DRAW`, a high-level shape library, truecolour (24-bit) drawing, sprites (with scaling, rotation and tinting), double buffering, render-to-sprite, tilemaps, anti-aliased TrueType text, and PNG/JPEG/BMP image loading and saving
+- `VDU` commands for fine screen control, user-defined characters, viewports and palettes
+- Hardware on the 40-pin header: digital GPIO (with edge events) and an I2C master for add-on boards
+- Reserved memory blocks read and written with the `?` / `!` / `$` indirection operators
+- **Native "seeds"** - C code compiled to native AArch64 machine code, loaded from the card and called from BASIC, for the parts of a job that need full native speed.
+
+Throughout this manual, code you type or that appears in a program is shown in a monospaced block:
+
+```basic
+10 PRINT "HELLO, WORLD"
+20 GOTO 10
+```
+
+Text the machine prints back is shown as plain output:
+
+```text
+HELLO, WORLD
+HELLO, WORLD
+...
+```
+
+## Getting Started
+
+When BerryBasiC starts it prints a banner and then a `>` prompt:
+
+![The BerryBasiC Prompt](prompt.png)
+
+The `>` is where you type. Everything you enter is one of two things:
+
+- **A numbered line** - it is *stored* as part of your program and not run yet.
+- **Anything else** - it is a *direct-mode command*, run immediately.
+
+### Direct mode
+
+Type a statement with no line number and press Return, and it runs at once:
+
+```basic
+>PRINT 2 + 2
+4
+>PRINT "Hi "; "there"
+Hi there
+```
+
+Direct mode is handy for quick sums, for inspecting variables, and for the commands that manage your program (`LIST`, `RUN`, `SAVE`, `NEW`, and so on). Most statements work in direct mode exactly as they do in a program; the few that only make sense inside a running program (such as `FOR`/`NEXT` spanning several lines, or `RETURN`) will say so.
+
+### Writing a program
+
+Give a line a number and it is remembered instead of run:
+
+```basic
+>10 PRINT "HELLO"
+>20 PRINT "AGAIN"
+>RUN
+HELLO
+AGAIN
+>
+```
+
+Lines are always kept sorted by number, however you type them, so you can enter them in any order and insert new ones later by choosing a number in between (this is why programs are traditionally numbered 10, 20, 30 - it leaves room to squeeze `15` in). `LIST` shows the program in order; `RUN` executes it from the lowest line number.
+
+### Editing and deleting lines
+
+- **Replace a line:** type it again with the same number. The new text replaces the old.
+- **Delete a line:** type its number alone and press Return.
+- **Edit a line in place:** `EDIT 20` recalls line 20 into the input so you can change it (see *Program Control Commands*).
+
+```basic
+>20 PRINT "CHANGED"      : REM replaces line 20
+>20                      : REM deletes line 20
+```
+
+### A first program
+
+```basic
+10 REM My first BerryBasiC program
+20 INPUT "What is your name"; NAME$
+30 PRINT "Hello, "; NAME$; "!"
+40 FOR I = 1 TO 3
+50   PRINT "Beep "; I
+60 NEXT I
+70 END
+```
+
+Type `RUN` to run it, `LIST` to see it, and `SAVE "HELLO"` to keep it on the card (it becomes `HELLO.BAS`). `LOAD "HELLO"` brings it back.
 
 # Program Structure
 
-Programs consist of numbered lines.
+A program is a list of numbered lines. Each line holds one or more statements (as we have seen previously), but it is possible to have several statements on one line by using a colon `:` which separates statements, so a single line can do several things:
 
-10 PRINT "HELLO"
-20 GOTO 10
+```basic
+10 A = 10 : B = 20 : PRINT A + B
+```
 
-Multiple statements may appear on the same line separated by colons.
+Execution runs left to right along the line, then moves to the next line. For future reference, a single line may be up to 128 characters. A program may hold up to 8192 lines. (See *Appendix B: Limits* for the full list.)
 
-10 A=10 : B=20 : PRINT A+B
+## Comments
 
-Comments are introduced with REM.
+`REM` (remark) turns the rest of the line into a comment - the interpreter ignores everything after it:
 
-10 REM This is a comment
+```basic
+10 REM This whole line is a note
+20 A = 5 : REM ...and so is this, after the colon
+```
 
-
+Because `REM` swallows the rest of the line, put it last.
 
 # Data Types
 
-There are two kinds of value: **numbers** and **strings**. A variable's name
-decides which it holds. A name is up to 8 characters, starts with a letter, and
-may contain letters and digits. The trailing `%` or `$` counts as part of the
-name and as part of that 8-character limit.
+There are exactly two kinds of values in BerryBasiC: **numbers** and **strings**. Every variable holds one or the other, and its *name* decides which.
 
-## Floating Point
+A variable name starts with a letter and may contain letters and digits (and the underscore `_`). A trailing `%` or `$` is part of the name - and it counts towards the length. Names are up to 8 characters including that suffix, so keep to seven letters plus a suffix to be safe. Names are not case-sensitive: `Count`, `COUNT` and `count` are the same variable (they are all folded to upper case internally).
 
-The default numeric type. Numbers are held as double-precision floating point,
-so fractions and large values are kept accurately.
+| Name ends in... | Holds                    | Example                |
+| --------------- | ------------------------ | ---------------------- |
+| *(nothing)*     | a floating-point number  | `RADIUS`, `X`, `TOTAL` |
+| `%`             | a whole number (integer) | `COUNT%`, `I%`         |
+| `$`             | text (a string)          | `NAME$`, `LINE$`       |
 
-    A = 12.5
-    B = 3.14159
+A variable springs into existence the first time you assign to it; there is no separate "declare" step (arrays are the exception - see their dedication section, called *Arrays*). A numeric variable that has never been assigned reads as `0`; an unassigned string reads as `""`.
 
-A plain name (no suffix) is a floating-point variable:
+With this in mind, please note, that `I%` , `I$` and `I` do not denote the same variable, they are three different entities: an integer, a string and a real number.
 
-    RADIUS = 2.5
-    AREA = PI * RADIUS * RADIUS
+## Floating point (the default)
 
+A plain name, with no suffix, is a floating-point variable. Numbers are held as **double-precision** IEEE-754 floating point, so both fractions and large magnitudes are kept accurately (about 15-16 significant decimal digits internally).
 
+```basic
+A = 12.5
+B = 3.14159
+RADIUS = 2.5
+AREA = PI * RADIUS * RADIUS
+```
 
-## Integer Variables
+## Integer variables (`%`)
 
-A name ending in `%` holds a whole number. Any value assigned to it is truncated
-towards zero, dropping the fractional part.
+A name ending in `%` holds a whole number. Whenever you assign to it, the value is **truncated towards zero** - the fractional part is simply dropped (this is truncation, not rounding):
 
-    COUNT% = 10
-    I% = 123
+```basic
+I% = 12.9
+PRINT I%
+```
 
-Truncation happens on assignment:
+```text
+12
+```
 
-    I% = 12.9
-    PRINT I%
+Negative values truncate towards zero as well, so `I% = -12.9` gives `-12`. Integer variables make good loop counters and array indices, they run a touch faster, and they document intent ("this is a count"). Internally they behave as 32-bit integers, which matters for the bitwise operators.
 
-Output:
+## Numeric Literals
 
-    12
+One of the most basic operations a program can do is to print meaningful numbers on a screen. In BerryBasic you can write numbers in four ways.
 
-Integer variables are handy as loop counters and array indices, and make the
-intent ("this is a count") clear.
+### Decimal
 
+Ordinary decimal, with or without a fractional part:
 
-
-## String Variables
-
-A name ending in `$` holds text. Strings may be up to 255 characters long and
-may be empty (`""`).
-
-    NAME$ = "BERRY"
-    EMPTY$ = ""
-
-Use `+` to join strings and the string functions (`LEFT$`, `MID$`, `LEN`, ...)
-to take them apart.
-
-
-
-# Constants
-
-## PI
-
-The ratio of a circle's circumference to its diameter, 3.14159265...
-
-    PRINT PI
-
-Use it with the trigonometric functions, which work in radians (a full turn is
-`2 * PI`):
-
-    PRINT SIN(PI / 2)
-
-
-
-## TRUE
-
-The result a comparison gives when it holds. Its value is `-1` (every bit set),
-which makes it work cleanly with the bitwise operators.
-
-    -1
-
-Example:
-
-    IF TRUE THEN PRINT "YES"
-
-
-
-## FALSE
-
-The result a comparison gives when it does not hold. Its value is `0`.
-
-    0
-
-Any non-zero number is treated as true by `IF`, so `TRUE` and `FALSE` are
-conveniences, not the only truth values.
-
-
-
-# Numeric Literals
-
-## Decimal
-
+```basic
 A = 123
 B = 12.34
+C = .5                   : REM a leading dot is fine (= 0.5)
+```
 
-## Hexadecimal
+### Scientific (E) notation
 
-BBC BASIC style:
+A number may carry an exponent, written with `E` (or lower-case `e`) followed by an optional sign and the power of ten. This is the compact way to write very large or very small values:
 
+```basic
+A = 2E3                  : REM 2000
+B = 1.5E-4               : REM 0.00015
+C = 6.022E23             : REM Avogadro's number
+```
+
+The `E` form is only recognised when digits actually follow it, so a variable such as `E` or `EXIT` is never mistaken for an exponent.
+
+### Hexadecimal
+
+An ampersand `&` introduces a base-16 (hexadecimal) constant, BBC-style. The digits `A`-`F` may be upper or lower case:
+
+```basic
 A = &FF
 PRINT A
+```
 
-Output:
-
+```text
 255
+```
 
+Hex is convenient for bit masks, colours and memory addresses:
 
+```basic
+MASK = &00FF00           : REM the green byte of an RGB value
+```
 
-# Assignment
+### Binary
 
-Explicit:
+A percent sign `%` followed by `0`s and `1`s is a base-2 (binary) constant - the natural companion to `&`-hex when you care about individual bits:
 
-LET A = 10
+```basic
+A = %1010                : REM 10
+MASK = %1100 OR %0011    : REM 15  (bitwise OR of two nibbles)
+PINSET %00001000         : REM bit 3 set
+```
 
-Implicit:
+(The `%` is only read as a binary literal when a `0` or `1` follows it; attached to a variable name it remains the integer-variable suffix, as in `COUNT%`.) Turn a number back into hexadecimal or binary text with `HEX$` and `BIN$` (see *Formatted Output*).
 
-A = 10
+## String variables (`$`)
 
-Both forms are equivalent.
+A name ending in `$` holds text. A string may be from 0 up to **255** characters long. The empty string is written `""`.
 
+```basic
+NAME$ = "BERRY"
+EMPTY$ = ""
+```
 
+Join strings with `+`, and take them apart with the string functions (`LEFT$`, `RIGHT$`, `MID$`, `LEN`, `INSTR`, ...), all described under *String Functions*.
 
-# Operators
+```basic
+FULL$ = "BERRY" + " " + "PI"      : REM "BERRY PI"
+```
 
-## Arithmetic
+## Arrays
 
-| Operator | Meaning |
-|----------|---------|
-| `+`      | Add |
-| `-`      | Subtract (or, as a prefix, negate) |
-| `*`      | Multiply |
-| `/`      | Divide (floating-point result) |
-| `^`      | Raise to a power |
+`DIM` reserves an array. Indices start at **0**, so `DIM A(N)` gives `N+1` elements, `A(0)` through `A(N)` (BBC BASIC semantics). Up to **3** dimensions are supported, and up to 16 arrays may exist at once. Every element starts at `0` (or `""` for a string array).
 
-Operators follow the usual precedence: `^` first, then `*` and `/`, then `+` and
-`-`. Use parentheses to group where you need a different order.
+### One dimension
 
-Example:
+```basic
+DIM A(10)                : REM elements A(0) .. A(10)
+A(0) = 100
+A(1) = A(0) + 1
+PRINT A(1)
+```
 
-    PRINT 2^8
+### Two dimensions
 
+Bounds are given per dimension; `DIM GRID(9, 9)` is a 10×10 grid:
 
+```basic
+DIM GRID(9, 9)
+GRID(2, 3) = 7
+```
 
-## Integer Division
+### Three dimensions
 
-`DIV` divides and discards any remainder, giving a whole-number result.
+```basic
+DIM CUBE(3, 3, 3)
+CUBE(1, 1, 1) = 42
+```
 
-    PRINT 7 DIV 2
-
-Result:
-
-    3
-
-
-
-## Modulus
-
-`MOD` gives the remainder left after `DIV`.
-
-    PRINT 7 MOD 2
-
-Result:
-
-    1
-
-
-
-## Relational
-
-=
-<>
-<
-\>
-<=
-\>=
-
-Example:
-
-IF A<>0 THEN PRINT "NONZERO"
-
-
-
-## Logical / Bitwise
-
-`AND`, `OR`, `EOR` (exclusive-or) and `NOT` operate bit by bit on 32-bit
-integers. Because `TRUE` is -1 (all bits set) and `FALSE` is 0, the same
-operators serve as logical connectives in conditions.
-
-| Operator | Meaning |
-|----------|---------|
-| `AND`    | Bits set in both operands |
-| `OR`     | Bits set in either operand |
-| `EOR`    | Bits set in exactly one operand |
-| `NOT`    | Inverts every bit (so `NOT 0` is -1) |
-
-As bit masks:
-
-    PRINT 6 AND 3        : REM 2
-
-As conditions:
-
-    IF A>0 AND B>0 THEN PRINT "BOTH POSITIVE"
-
-
-
-## Shift and Rotate
-
-Bitwise shifts and rotates operate on 32-bit integers, written as functions:
-
-| Function    | Meaning                                             |
-| ----------- | --------------------------------------------------- |
-| SHL(x, n)   | Shift x left by n bits (zeros in from the right)    |
-| SHR(x, n)   | Logical shift right by n bits (zeros in, unsigned)  |
-| ASR(x, n)   | Arithmetic shift right by n bits (keeps the sign)   |
-| ROL(x, n)   | Rotate left by n bits within 32 bits                |
-| ROR(x, n)   | Rotate right by n bits within 32 bits               |
-
-Examples:
-
-    PRINT SHL(1, 4)        : REM 16
-    PRINT SHR(256, 4)      : REM 16
-    PRINT ASR(-8, 1)       : REM -4  (sign preserved)
-    PRINT ROL(1, 1)        : REM 2
-
-Shift counts of 32 or more give 0 for SHL/SHR; a negative count is an error.
-Combine with AND/OR to pack and unpack fields, e.g. an RGB colour:
-
-    COL = SHL(R,16) OR SHL(G,8) OR B
-    R   = SHR(COL,16) AND 255
-
-
-
-## String Concatenation
-
-FULL$ = FIRST$ + LAST$
-
-
-
-## Indirection
-
-`?`, `!` and `$` read or write memory directly (byte, 32-bit word, and string).
-They are covered in detail under [Memory and Indirection](#memory-and-indirection):
-
-    ?addr            REM the byte at addr
-    addr!4           REM the 32-bit word at addr+4
-    $addr            REM the string at addr (up to a CR)
-
-
-
-# PRINT Statement
-
-`PRINT` writes a list of items to the screen, followed by a newline. The
-separator between items decides the spacing.
-
-## Basic Output
-
-    PRINT "HELLO"
-
-
-
-## Expressions
-
-Items may be any numeric or string expression; numbers are converted to text:
-
-    PRINT A+B
-
-
-
-## Multiple Items
-
-A comma between items moves to the next print field. Fields are 8 columns wide,
-so columns line up in a table:
-
-    PRINT A, B, C
-
-A semicolon joins items with no space at all:
-
-    PRINT "X="; X; " Y="; Y
-
-
-
-## Suppress Newline
-
-A separator (`;` or `,`) at the very end of the line suppresses the closing
-newline, so the next `PRINT` continues on the same line:
-
-    PRINT "HELLO";
-    PRINT "WORLD"
-
-Output:
-
-    HELLOWORLD
-
-A single quote `'` inside the list forces a newline, which is a compact way to
-print several lines from one statement:
-
-    PRINT "Line 1" ' "Line 2"
-
-
-
-## TAB
-
-`TAB(n)` moves the print position to column `n` (counting from 0) by emitting
-spaces. If the position is already at or past `n`, it does nothing.
-
-    PRINT TAB(10); "value"
-
-
-
-## SPC
-
-`SPC(n)` outputs `n` spaces, wherever the print position happens to be.
-
-    PRINT "A"; SPC(5); "B"
-
-
-
-# INPUT Statement
-
-`INPUT` reads a line typed by the user and stores it into one or more variables.
-By default it shows a `?` prompt.
-
-## Numeric Input
-
-Reads a number. Non-numeric text is read as 0.
-
-    INPUT A
-
-
-
-## String Input
-
-Reads text into a string variable. The whole field is taken literally, so it may
-contain spaces.
-
-    INPUT NAME$
-
-
-
-## Prompt String
-
-A string followed by `;` is printed as the prompt, with a `? ` added after it:
-
-    INPUT "NAME"; NAME$
-
-The interpreter prints:
-
-    NAME? 
-
-
-
-## Multiple Variables
-
-Several variables may be filled from one statement; values are separated by
-commas on the input line.
-
-    INPUT A,B,C
-
-All the variables are filled from a single typed line. If the user supplies
-fewer values than requested, the remaining variables are left as 0 (or empty
-text for string variables).
-
-
-
-# Branching
-
-## GOTO
-
-GOTO 100
-
-GOTO and GOSUB may also jump to a **label** instead of a line number, so the
-target survives RENUMBER and the program reads more clearly.
-
-
-
-## Labels
-
-A label is a name introduced with a leading dot, on its own at the start of a
-line. Jump to it from GOTO or GOSUB by name (the dot is optional in the jump):
-
-    10 GOTO main
-    20 .greet
-    30 PRINT "Hello"
-    40 RETURN
-    50 .main
-    60 GOSUB greet
-    70 END
-
-Labels are never altered by RENUMBER, so `GOTO done` keeps working however the
-program is renumbered.
-
-
-
-## IF THEN
-
-IF A=10 THEN PRINT "TEN"
-
-
-
-## IF THEN ELSE
-
-IF A=10 THEN PRINT "TEN" ELSE PRINT "OTHER"
-
-
-
-## Block IF (multi-line)
-
-When THEN is the last thing on the line, IF starts a multi-line block that runs
-until ENDIF. An optional ELSE selects the alternative block. Blocks may be
-nested.
-
-    10 IF SCORE>=50 THEN
-    20   PRINT "Pass"
-    30   PRINT "Well done"
-    40 ELSE
-    50   PRINT "Try again"
-    60 ENDIF
-
-Single-line `IF ... THEN ...` (with statements after THEN) keeps its classic
-behaviour; the block form is used only when nothing follows THEN on the line.
-
-
-
-## ON GOTO
-
-ON N GOTO 100,200,300
-
-Selection is 1-based.
-
-| N    | Target |
-| ---- | ------ |
-| 1    | 100    |
-| 2    | 200    |
-| 3    | 300    |
-
-Values outside the range fall through.
-
-
-
-## ON GOSUB
-
-ON N GOSUB 100,200,300
-
-
-
-# Subroutines
-
-`GOSUB` and `RETURN` are the classic line-numbered subroutine mechanism. For new
-code, named `PROC`/`FN` (below) are usually clearer, but `GOSUB` remains for
-compatibility.
-
-## GOSUB
-
-Jumps to a line (or label) and remembers where it came from:
-
-    10 GOSUB 100
-    20 END
-    100 PRINT "SUBROUTINE"
-    110 RETURN
-
-Up to 32 GOSUBs may be nested (active at once).
-
-
-
-## RETURN
-
-Returns to the statement immediately after the `GOSUB` that called this
-subroutine. A `RETURN` with no matching `GOSUB` is an error.
-
-
-
-# FOR Loops
-
-A `FOR` loop counts a variable from a start value to a limit, running the body
-once for each value. The limit is tested at the top of each pass, so a loop
-whose start is already past the limit runs zero times.
-
-## Basic Loop
-
-The counter goes up by 1 each time, from 1 to 10 inclusive:
-
-    FOR I=1 TO 10
-    PRINT I
-    NEXT
-
-`NEXT` may name its variable (`NEXT I`) for clarity; this also helps when loops
-are nested. Up to 16 `FOR` loops may be nested.
-
-
-
-## STEP
-
-`STEP` sets the amount added each pass:
-
-    FOR I=0 TO 20 STEP 2
-    PRINT I
-    NEXT
-
-
-
-## Negative STEP
-
-A negative `STEP` counts down; the loop continues while the counter is at or
-above the limit:
-
-    FOR I=10 TO 1 STEP -1
-    PRINT I
-    NEXT
-
-Nested loops close in reverse order. Naming the variable on `NEXT` makes the
-pairing explicit:
-
-    FOR Y=1 TO 3
-      FOR X=1 TO 3
-        PRINT X*Y
-      NEXT X
-    NEXT Y
-
-
-
-# REPEAT Loops
-
-## REPEAT UNTIL
-
-The body runs first, then the condition is tested, so a `REPEAT` loop always
-runs at least once. It repeats until the condition becomes true.
-
-    REPEAT
-    A=A+1
-    UNTIL A=10
-
-Condition is tested at the end. Use `WHILE` instead when the body should be
-skippable from the start.
-
-
-
-# WHILE Loops
-
-## WHILE ENDWHILE
-
-WHILE tests its condition **before** each pass, so the body may run zero times.
-The loop repeats until the condition is false. Loops may be nested.
-
-    10 N=1
-    20 WHILE N<=5
-    30   PRINT N
-    40   N=N+1
-    50 ENDWHILE
-
-Compared with REPEAT...UNTIL (tested at the bottom, always runs once), WHILE is
-the right choice when the body should be skipped entirely if the condition is
-false to start with.
-
-
-
-# CASE Selection
-
-## CASE OF WHEN
-
-CASE selects one branch by matching an expression against the values listed by
-each WHEN. A WHEN may list several comma-separated values. OTHERWISE catches
-anything that did not match, and ENDCASE closes the statement. The selector may
-be numeric or a string.
-
-    10 CASE DAY OF
-    20   WHEN 1,7: PRINT "Weekend"
-    30   WHEN 6:   PRINT "Almost there"
-    40   OTHERWISE PRINT "Weekday"
-    50 ENDCASE
-
-Only the first matching WHEN (or OTHERWISE) runs; control then continues after
-ENDCASE. Each clause's statements may follow on the same line after a colon, or
-on the lines below until the next WHEN/OTHERWISE/ENDCASE.
-
-
-
-# Arrays
-
-`DIM` reserves an array. Indices start at 0, so `DIM A(N)` gives `N+1` elements,
-`A(0)` through `A(N)` (BBC BASIC semantics). Up to 3 dimensions are supported.
-All elements start at 0 (or empty text for string arrays).
-
-## One Dimension
-
-    DIM A(10)
-
-Creates indices:
-
-    A(0) .. A(10)
-
-Assign and read elements by index:
-
-    A(0) = 100
-    A(1) = A(0) + 1
-    PRINT A(1)
-
-
-
-## Two Dimensions
-
-The bounds are given per dimension; `GRID(9,9)` is a 10x10 grid:
-
-    DIM GRID(9,9)
-    GRID(2,3) = 7
-
-
-
-## Three Dimensions
-
-    DIM CUBE(3,3,3)
-
-
-
-## String Arrays
+### String arrays
 
 A `$` array holds a string in every element:
 
-    DIM NAME$(20)
-    NAME$(0) = "BERRY"
+```basic
+DIM NAME$(20)
+NAME$(0) = "BERRY"
+NAME$(1) = "PI"
+```
+
+An index outside the declared bounds raises `Array index out of range`, and re-`DIM`ing an existing array raises `That array is already defined`. Arrays are cleared (along with all other variables) whenever a program is `RUN`, and by `NEW` and `LOAD`.
+
+## Collections
+
+Arrays are fixed in size and indexed by number. For jobs that need something more flexible, BerryBasiC has three **collections**: a **dictionary** (values looked up by a text key), a **list** (an ordered sequence you can grow, push onto and pop from), and a **binary tree** (values keyed by number, kept permanently in sorted order).
+
+### How collections work
+
+You create a collection with `NEWDICT`, `NEWLIST` or `NEWTREE`, which returns a small number - a **handle** - that you keep in a variable and pass to the other collection words:
+
+```basic
+10 scores = NEWDICT              : REM scores now refers to a new, empty dictionary
+20 DICTSET scores, "ada", 95
+30 PRINT DICTGET(scores, "ada")  : REM 95
+```
+
+A few rules apply to all three:
+
+- Every collection can hold **numbers or text**, mixed freely. You read a value back with the plain word for a number (`DICTGET`, `LISTGET`, `POP`, `TREEGET`) or the **`$` form** for text (`DICTGET$`, `LISTGET$`, `POP$`, `TREEGET$`), exactly as variables split into `A` and `A$`. Asking for the wrong kind raises `Type mismatch`.
+- `SIZE(h)` gives the number of items in **any** collection.
+- Collections live in their own memory and are **cleared when a program is `RUN`** (and by `NEW`), just like variables. Up to 64 may exist at once.
+- Passing a value that isn't a collection handle raises `Not a collection`; using the wrong word for the kind (say `PUSH` on a dictionary) raises `Not a list` / `Not a dictionary` / `Not a tree`.
+
+### Dictionary - keyed by text
+
+A dictionary maps a **text key** to a value. Keys are unique: setting an existing key replaces its value.
+
+| Word                                     | Meaning                                                                                                              |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `d = NEWDICT`                            | Create a new, empty dictionary.                                                                                      |
+| `DICTSET d, key$, value`                 | Store `value` under `key$` (adds it, or replaces the existing one).                                                  |
+| `DICTGET(d, key$)` / `DICTGET$(d, key$)` | Read the value as a number / as text. A **missing key reads as `0` or `""`** (use `DICTHAS` to tell the difference). |
+| `DICTHAS(d, key$)`                       | `TRUE` if the key is present, else `FALSE`.                                                                          |
+| `DICTDEL d, key$`                        | Remove the key (does nothing if it isn't there).                                                                     |
+| `DICTKEY$(d, i)`                         | The `i`-th key (0-based, in the order keys were first added) - for walking every entry.                              |
+
+```basic
+10 phone = NEWDICT
+20 DICTSET phone, "alice", "555-1234"
+30 DICTSET phone, "bob",   "555-9876"
+40 FOR i = 0 TO SIZE(phone) - 1
+50   k$ = DICTKEY$(phone, i)
+60   PRINT k$; " -> "; DICTGET$(phone, k$)
+70 NEXT
+```
 
+### List - a growable, ordered sequence
 
+A list holds items in order, indexed from **0**, and grows as you add to it. `PUSH` and `POP` at the end make it a natural **stack**.
 
-# Memory and Indirection
+| Word                               | Meaning                                                                                                   |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `l = NEWLIST`                      | Create a new, empty list.                                                                                 |
+| `PUSH l, value`                    | Append `value` to the end.                                                                                |
+| `POP(l)` / `POP$(l)`               | Remove and return the **last** item as a number / as text. `POP` on an empty list raises `List is empty`. |
+| `LISTGET(l, i)` / `LISTGET$(l, i)` | Read item `i` (0-based) as a number / as text.                                                            |
+| `LISTSET l, i, value`              | Replace item `i`.                                                                                         |
+| `LISTINS l, i, value`              | Insert `value` **before** index `i` (use `i = SIZE(l)` to append).                                        |
+| `LISTDEL l, i`                     | Remove item `i`, closing the gap.                                                                         |
 
-Beyond variables and arrays, a program can reserve a block of raw bytes and read
-or write it directly with the indirection operators `?`, `!` and `$`. This is how
-you build a buffer to hand to a native seed for fast processing.
+An index outside `0 ... SIZE(l)-1` raises `Index out of range`.
 
-## Reserving memory
+```basic
+10 TRY
+ 20   stack = NEWLIST
+ 30   PUSH stack, 10 : PUSH stack, 20 : PUSH stack, 30
+ 40   PRINT "top is "; POP(stack)          : REM 30, and the list shrinks to 2
+ 50   PRINT "now holds "; SIZE(stack); " items"
+ 60   PRINT LISTGET(stack, 10)
+ 70 CATCH
+ 80   PRINT "Error while fetching:", ERR$
+ 90 ENDTRY
+100 PRINT "Done"
+```
 
-`DIM name size` (a name *without* parentheses) reserves `size + 1` bytes and puts
-the address of the first byte in the variable:
+will produce the following output:
 
-    DIM BUF% 255          : REM 256 bytes; BUF% holds their address
+```basic
+>run
+top is 30
+now holds 2 items
+Error while fetching:   Index out of range
+Done
+```
 
-Use a numeric variable (typically a `%` integer). The block lives until the next
-`RUN`/`NEW`. You can reserve several at once: `DIM A% 100, B% 1000`.
+Don't be afraid if some of the statements are not familiar, they are presented in details in the document, so please keep on reading.
 
-## The indirection operators
+### Binary tree - numbers, always sorted
 
-| Form        | Meaning |
-| ----------- | ------- |
-| `?addr`     | the byte at `addr` (0–255) |
-| `addr?n`    | the byte at `addr + n` |
-| `!addr`     | the 32-bit word at `addr` (little-endian, signed) |
-| `addr!n`    | the word at `addr + n` |
-| `$addr`     | the string at `addr`, up to a carriage-return (`&0D`) terminator |
+A tree stores values keyed by a **number**, and - unlike a dictionary - keeps its keys in **sorted order** at all times. That makes it ideal when you need the smallest/largest key, or to visit everything in order, cheaply.
 
-They work on both sides of `=` — reading (peek) and writing (poke):
+| Word                                   | Meaning                                                                                            |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `t = NEWTREE`                          | Create a new, empty tree.                                                                          |
+| `TREESET t, key, value`                | Store `value` under the number `key` (adds or replaces).                                           |
+| `TREEGET(t, key)` / `TREEGET$(t, key)` | Read the value as a number / as text (`0`/`""` if the key is absent).                              |
+| `TREEHAS(t, key)`                      | `TRUE` if the key is present.                                                                      |
+| `TREEDEL t, key`                       | Remove the key, keeping the rest sorted.                                                           |
+| `TREEMIN(t)` / `TREEMAX(t)`            | The smallest / largest key (raises `Tree is empty` if there are none).                             |
+| `TREEKEY(t, i)`                        | The `i`-th key in ascending order (0-based) - walk `i = 0 ... SIZE(t)-1` to read every key sorted. |
 
-    ?BUF% = 65            : REM poke a byte
-    BUF%?1 = 66           : REM poke the next byte
-    PRINT ?BUF%, BUF%?1   : REM 65  66
-    !BUF% = &12345678     : REM poke a 32-bit word (4 bytes, little-endian)
-    PRINT BUF%?0          : REM 120  (&78, the low byte)
-    $BUF% = "BERRY"       : REM write text + a CR terminator
-    PRINT $BUF%           : REM BERRY
+```basic
+10 t = NEWTREE
+20 TREESET t, 50, "M" : TREESET t, 20, "T" : TREESET t, 80, "E"
+30 TREESET t, 10, "A" : TREESET t, 30, "L"
+40 PRINT "smallest key: "; TREEMIN(t)
+50 FOR i = 0 TO SIZE(t) - 1
+60   k = TREEKEY(t, i)
+70   PRINT k; " = "; TREEGET$(t, k)         : REM printed in ascending key order
+80 NEXT
+```
 
-Binary `?`/`!` bind tighter than arithmetic, so `BUF%?I + 1` is `(BUF%?I) + 1`.
-For an arithmetic *address* with the unary form, parenthesise it — `?(BUF%+1)` —
-or just use the binary form, `BUF%?1`.
+Because a collection error is an ordinary error, you can wrap risky operations in `TRY ... CATCH` (see *Error Handling*).
 
-## Passing a buffer to a seed
+## Type mismatches
 
-Because the address is a real pointer, a seed can read or write the same memory.
-Build the buffer in BASIC and pass its address (and length):
+Numbers and strings never mix silently. Trying to add a number to a string, assign one to the other, or compare across types raises `Type mismatch: numbers and text can't be mixed`. Convert explicitly with `STR$` (number to text) and `VAL` (text to number) when you need to cross the divide.
 
-    10 DIM B% 9
-    20 FOR I = 0 TO 9 : B%?I = I * I : NEXT
-    30 SEED H%, "BUFSUM.SED"
-    40 PRINT CALL(H%, B%, 10)        : REM the seed sums the 10 bytes -> 285
+## Constants
 
-with the seed dereferencing the address it is given:
+***BerryBasiC*** defines a few constants of convenience, for easier access to common numerical values.
 
-    SEED_EXPORT(bufsum) {
-        const unsigned char *p = (const unsigned char *)(uintptr_t)(long)argv[0].num;
-        int len = (int)argv[1].num, sum = 0;
-        for (int i = 0; i < len; i++) sum += p[i];
-        return sum;
-    }
+### PI
 
-This is the fast path for bulk data: BASIC owns the buffer, the seed crunches it
-natively, and both see the same bytes.
+`PI` is the ratio of a circle's circumference to its diameter, 3.14159265358979...
 
+```basic
+PRINT PI
+```
 
+Use it with the trigonometric functions, which work in **radians** - a full turn is `2 * PI`:
 
-# DATA Processing
+```basic
+PRINT SIN(PI / 2)        : REM 1
+```
 
-`DATA` holds constants inside the program; `READ` copies them into variables one
-after another, and `RESTORE` chooses where the next `READ` starts. All the
-`DATA` lines in the program form one continuous list, read in line order.
+### TRUE
 
-## DATA
+`TRUE` is the value a comparison gives when it holds. It is `-1` - every bit set - which is what makes the logical operators double as bitwise ones (see *Operators*).
 
-Lists values to be read later. `DATA` lines may appear anywhere in the program.
+```basic
+PRINT TRUE               : REM -1
+IF TRUE THEN PRINT "YES"
+```
 
-    10 DATA 10,20,30
+### FALSE
 
+`FALSE` is the value a comparison gives when it does **not** hold. It is `0`.
 
+```basic
+PRINT FALSE              : REM 0
+```
 
-## READ
+`IF` treats **any non-zero number** as true, so `TRUE` and `FALSE` are conveniences rather than the only truth values - `IF 5 THEN ...` runs, and so does `IF A$ <> "" THEN ...`.
 
-Takes the next item(s) from the `DATA` list, in order, and stores them. Reading
-past the end of the list is an error.
+# Assignment
 
-    READ A,B,C
+Assignment copies the value on the right into the variable on the left.
 
+The keyword `LET` is optional. These two lines mean exactly the same thing:
 
+```basic
+LET A = 10
+A = 10
+```
 
-## String DATA
+The right-hand side may be any expression of the matching type:
 
-A `DATA` item may be a quoted string; read it into a string variable. The type
-read must match the variable.
+```basic
+TOTAL = PRICE * QTY
+GREETING$ = "Hello, " + NAME$
+```
 
-    10 DATA "RED","GREEN","BLUE"
-    20 READ A$,B$,C$
+Assigning to an integer (`%`) variable truncates towards zero, as described under *Data Types*. Assigning across types (a number to a `$` variable, or text to a numeric one) is an error.
 
+Array elements and reserved-memory locations are assigned the same way; see *Arrays* and *Memory and Indirection*.
 
+# Operators
 
-## RESTORE
+Like every self-respecting programming language, ***BerryBasiC*** also supports mathematical operations.
 
-Restart from first DATA item:
+## Arithmetic
 
-    RESTORE
+| Operator | Meaning                                  |
+| -------- | ---------------------------------------- |
+| `+`      | Add (or, between two strings, join them) |
+| `-`      | Subtract; as a prefix, negate            |
+| `*`      | Multiply                                 |
+| `/`      | Divide (always a floating-point result)  |
+| `^`      | Raise to a power                         |
 
-Restart from the first item on (or after) a given line, which lets you keep
-several independent tables in one program:
+```basic
+PRINT 2 ^ 8              : REM 256
+PRINT 10 / 4             : REM 2.5   (division never rounds to an integer)
+```
 
-    RESTORE 100
+## Integer division - `DIV`
 
+`DIV` divides and throws away the remainder, giving a whole-number result (both operands are first truncated to integers):
 
+```basic
+PRINT 7 DIV 2            : REM 3
+```
 
-# Procedures
+## Remainder - `MOD`
 
-## Definition
+`MOD` gives the remainder that `DIV` discards:
 
-A procedure is a named block of statements. It is defined with `DEF PROC`name
-and ends at `ENDPROC`:
+```basic
+PRINT 7 MOD 2            : REM 1
+```
 
-    DEF PROCHELLO
-    PRINT "HELLO"
-    ENDPROC
+Dividing by zero - with `/`, `DIV` or `MOD` - raises `Division by zero`.
 
+## Relational
 
+The comparison operators compare two numbers, or two strings, and return `TRUE` (`-1`) or `FALSE` (`0`):
 
-## Call
+| Operator | True when...                       |
+| -------- | ---------------------------------- |
+| `=`      | the operands are equal             |
+| `<>`     | they differ                        |
+| `<`      | the left is less than the right    |
+| `>`      | the left is greater than the right |
+| `<=`     | the left is less than or equal     |
+| `>=`     | the left is greater than or equal  |
 
-Run a procedure by writing its name (the `PROC` prefix is part of the name):
+```basic
+IF A <> 0 THEN PRINT "NONZERO"
+IF NAME$ = "BERRY" THEN PRINT "Hi Berry"
+```
 
-    PROCHELLO
+Strings compare **character by character** by code value (so uppercase letters sort before lowercase, digits before letters), and a shorter string sorts before a longer one that begins with it (`"CAT" < "CATS"`).
 
-Control returns to the statement after the call when `ENDPROC` is reached.
+## Logical / bitwise - `AND` `OR` `EOR` `NOT`
 
+`AND`, `OR`, `EOR` (exclusive-or) and the prefix `NOT` work bit by bit on 32-bit integers.
 
+| Operator | Result                                                        |
+| -------- | ------------------------------------------------------------- |
+| `AND`    | bits set in **both** operands                                 |
+| `OR`     | bits set in **either** operand                                |
+| `EOR`    | bits set in **exactly one** operand                           |
+| `NOT`    | inverts every bit (so `NOT 0` is `-1`, and `NOT TRUE` is `0`) |
 
-## Parameters
+Because `TRUE` is `-1` (all bits set) and `FALSE` is `0`, the very same operators serve as logical connectives inside conditions:
 
-Parameters are listed in parentheses and passed by value, so changing a
-parameter inside the procedure does not affect the caller's variable:
+```basic
+PRINT 6 AND 3                       : REM 2   (bit masking)
+IF A > 0 AND B > 0 THEN PRINT "BOTH POSITIVE"
+IF DONE OR TIMED_OUT THEN GOTO 500
+```
 
-    DEF PROCADD(A,B)
-    PRINT A+B
-    ENDPROC
-    
-    PROCADD(10,20)
+## Shifts and rotates
 
-A procedure may call itself; recursion works as long as the nesting stays within
-limits.
+Bit shifts and rotates are written as functions and operate on 32-bit integers:
 
+| Function    | Meaning                                                                            |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `SHL(x, n)` | shift `x` left by `n` bits (zeros in from the right)                               |
+| `SHR(x, n)` | logical shift right by `n` bits (zeros in; treats `x` as unsigned)                 |
+| `ASR(x, n)` | arithmetic shift right by `n` bits (copies the sign bit; keeps negatives negative) |
+| `ROL(x, n)` | rotate left by `n` bits, within 32 bits                                            |
+| `ROR(x, n)` | rotate right by `n` bits, within 32 bits                                           |
 
+```basic
+PRINT SHL(1, 4)          : REM 16
+PRINT SHR(256, 4)        : REM 16
+PRINT ASR(-8, 1)         : REM -4  (sign preserved)
+PRINT ROL(1, 1)          : REM 2
+```
 
-## LOCAL Variables
+A shift count of 32 or more gives `0` for `SHL`/`SHR`; a negative count is an error. Shifts and masks together pack and unpack fields - for example an RGB colour:
 
-`LOCAL` makes a variable private to the procedure: its previous value is saved on
-entry and restored on `ENDPROC`. This keeps a procedure (including a recursive
-one) from disturbing variables of the same name elsewhere.
+```basic
+COL = SHL(R, 16) OR SHL(G, 8) OR B
+R   = SHR(COL, 16) AND 255
+```
 
-    DEF PROCTEST
-    LOCAL A
-    A=100
-    ENDPROC
+## String concatenation
 
-LOCAL variables are restored on exit.
+`+` between two strings joins them:
 
+```basic
+FULL$ = FIRST$ + " " + LAST$
+```
 
+## Indirection - `?` `!` `$`
 
-# Functions
+`?`, `!` and `$` read or write memory directly - a byte, a 32-bit word, and a CR-terminated string respectively. They are covered fully under *Memory and Indirection*:
 
-A function is like a procedure but returns a value. It is defined with
-`DEF FN`name and returns its result with a line beginning `=`.
+```basic
+?addr                    : REM the byte at addr
+addr!4                   : REM the 32-bit word at addr+4
+$addr                    : REM the string at addr, up to a carriage return
+```
 
-## Definition
+This approach makes the following code valid, and equally dangerous, unless you know what you're doing on your PI:
 
-    DEF FNSQUARE(X)
-    = X*X
+```basic
+>$9999="Hello RAW Memory"
+>print $9999
+Hello RAW Memory
+```
 
-The `=` line both supplies the result and ends the function. Functions take
-by-value parameters and may use `LOCAL`, exactly like procedures.
+## Precedence
 
+Operators bind in the order below, from **loosest** (evaluated last) to **tightest** (evaluated first). Use parentheses whenever you want a different order - or simply for clarity.
 
+| Level        | Operators                   | Notes                                   |
+| ------------ | --------------------------- | --------------------------------------- |
+| 1 (loosest)  | `OR`, `EOR`                 | bitwise/logical                         |
+| 2            | `AND`                       | bitwise/logical                         |
+| 3            | `=` `<>` `<` `>` `<=` `>=`  | comparisons yield `-1`/`0`              |
+| 4            | `+` `-`                     | add/subtract, and string join           |
+| 5            | `*` `/` `DIV` `MOD`         |                                         |
+| 6            | unary `-`, unary `+`, `NOT` | prefix operators                        |
+| 7            | `^`                         | power; binds *tighter* than unary minus |
+| 8 (tightest) | `?` `!` (binary form)       | indirection postfix                     |
 
-## Usage
+Two consequences worth remembering:
 
-A function call is part of an expression — use its result anywhere a value is
-allowed:
+- Because `^` binds tighter than unary minus, `-2 ^ 2` is `-(2 ^ 2) = -4`, not `4`.
+- Because binary `?` / `!` bind tightest, `BUF%?I + 1` means `(BUF%?I) + 1`. For an arithmetic *address* with the unary form, parenthesise it - `?(BUF% + 1)` - or use the binary form, `BUF%?1`.
 
-    PRINT FNSQUARE(5)
+Power is left-associative here: `2 ^ 3 ^ 2` is `(2 ^ 3) ^ 2 = 64`.
 
-Output:
+# The Beginner's Reference to Basic Statements
 
-    25
+The following section lists all the basic (basic as in simple. beginner level) statements that can be used in the language, treat the upcoming paragraph as the reference to the basic language keywords. The intent of this section is to start you coding as fast as possible, while keeping the more advanced stuff to a later stage.
 
+## PRINT Statement
 
+`PRINT` writes a list of items to the screen and (usually) ends with a newline. The **separator** between items decides the spacing.
 
-# String Functions
+```basic
+PRINT "HELLO"
+```
 
-Character positions in strings are 1-based: the first character is position 1.
-The length and count arguments are clamped to the string, so asking for more
-characters than exist simply returns as many as there are (never an error).
+### Expressions
 
-## LEN
+An item may be any numeric or string expression; numbers are converted to text using the rules under *How Numbers Are Displayed*:
+
+```basic
+PRINT A + B
+PRINT "Area = "; PI * R * R
+```
+
+### Multiple items
+
+A **semicolon** `;` joins items with no space at all:
+
+```basic
+PRINT "X="; X; " Y="; Y
+```
+
+A **comma** `,` moves to the next *print field*. Fields are 8 columns wide, so columns line up into a table:
+
+```basic
+PRINT A, B, C
+```
+
+### Suppressing the newline
+
+A separator (`;` or `,`) at the very **end** of the line suppresses the closing newline, so the next `PRINT` carries on where this one stopped:
+
+```basic
+PRINT "HELLO";
+PRINT "WORLD"
+```
+
+```text
+HELLOWORLD
+```
+
+### Forcing a newline - `'`
+
+A single quote (apostrophe) `'` inside the list forces a newline, a compact way to print several lines from one statement:
+
+```basic
+PRINT "Line 1" ' "Line 2" ' "Line 3"
+```
+
+### `TAB(n)`
+
+`TAB(n)` moves the print position **forward** to column `n` (columns count from 0) by emitting spaces. If the cursor is already at or past column `n`, it does nothing - `TAB` never moves backwards and never starts a new line.
+
+```basic
+PRINT "Name"; TAB(12); "Score"
+```
+
+### `SPC(n)`
+
+`SPC(n)` outputs exactly `n` spaces, wherever the cursor happens to be:
+
+```basic
+PRINT "A"; SPC(5); "B"
+```
+
+### How Numbers Are Displayed
+
+When `PRINT` (or `STR$`) turns a number into text, BerryBasiC uses these rules:
+
+- A **whole number** prints with no decimal point: `PRINT 42` to `42`.
+- Otherwise up to **9 significant digits** are shown, with trailing zeros trimmed: `PRINT 1/8` to `0.125`, `PRINT 2/3` to `0.666666667`.
+- **Very large or very small** magnitudes switch to scientific "E" notation with a signed, two-digit exponent: `PRINT 1e12` to `1E+12`, `PRINT 1.5e-9` to `1.5E-09`. The switch happens for exponents of about `+9` and above, or `-5` and below.
+- Special values print as `INF` (magnitude beyond the double range) and `NAN` (not-a-number, e.g. `0/0` situations).
+
+The value stored is always the full double precision; only its *printed* form is rounded to nine figures. When you need a particular layout - fixed decimals, right-aligned columns, currency, zero-padding, or hexadecimal/binary - reach for the **Formatted Output** functions below rather than the default form.
+
+#### Formatted Output
+
+The default number-to-text rules above are fine for casual output, but reports, tables and hardware work often need exact control. ***BerryBasiC*** provides three tools: `HEX$`/`BIN$` for base conversion, `FORMAT$` for templated numbers, and `PRINT USING` for laying out a column.
+
+##### `HEX$` and `BIN$` - other bases
+
+`HEX$(n)` returns `n` as uppercase hexadecimal text (no `&` prefix); `BIN$(n)` returns it in binary. Both take the value as a **32-bit integer**, read as unsigned two's-complement exactly like the BBC, so negatives wrap:
+
+```basic
+PRINT HEX$(255)        : REM FF
+PRINT BIN$(10)         : REM 1010
+PRINT HEX$(-1)         : REM FFFFFFFF
+PRINT "0x" + HEX$(4080): REM 0xFF0   (composes like any string)
+```
+
+An optional second argument is a **minimum width**; shorter values are zero-padded, longer ones are shown in full:
+
+```basic
+PRINT HEX$(255, 4)     : REM 00FF
+PRINT BIN$(10, 8)      : REM 00001010
+```
+
+These pair naturally with `&`-hex and `%`-binary literals (see *Numeric Literals*) for register work: `I2CWRITE &27, %00001000`.
+
+##### `FORMAT$(template$, value)` - templated numbers
+
+`FORMAT$` renders one number as text according to a template string, and returns it. Within the template:
+
+| Char        | Meaning                                                                                                     |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| `#`         | a digit position; **blank** if the number doesn't need it (leading blanks)                                  |
+| `0`         | a digit position; **zero** if the number doesn't need it (leading zeros)                                    |
+| `.`         | the decimal point; the number of `#`/`0` after it sets the decimal places (the value is **rounded** to fit) |
+| `,`         | placed in the integer part, inserts **thousands** separators                                                |
+| leading `+` | always show a sign (`+` or `-`)                                                                             |
+| leading `-` | show a sign only when negative (this is the default)                                                        |
+
+Any other character - currency symbols, spaces, units - is **literal** and copied straight through. The integer part is never truncated: if the number needs more digits than the template provides, the field simply grows.
+
+```basic
+PRINT FORMAT$("####.##", 3.14159)   : REM "   3.14"   (right-aligned, 2 places)
+PRINT FORMAT$("000.00", 3.1)        : REM "003.10"    (zero-padded)
+PRINT FORMAT$("#,###,###", 1234567) : REM "1,234,567"
+PRINT FORMAT$("+#0.0", 5)           : REM "+5.0"      (forced sign)
+PRINT FORMAT$("$#,##0.00", 1999.5)  : REM "$1,999.50" (literal $ copied through)
+```
+
+Because the width is fixed, `FORMAT$` is the easy way to print a tidy column:
+
+```basic
+10 FOR I = 1 TO 3
+20   PRINT FORMAT$("######.00", I * 12.5)
+30 NEXT
+```
+
+produces three right-aligned, two-decimal numbers stacked in a column.
+
+If the template contains no digit position at all, the error is `Bad format template`.
+
+##### `PRINT USING template$; item; item; ...`
+
+`PRINT USING` is a shorthand for printing several numbers with the **same** template. Each numeric item is formatted as `FORMAT$` would; string items, `TAB`/`SPC` and the usual `;`/`,` spacing behave exactly as in an ordinary `PRINT`:
+
+```basic
+PRINT USING "######.00"; total, tax, net   : REM three aligned money columns
+PRINT USING "#,##0"; score                 : REM 1,234,567
+```
+
+It applies the one template per item - ideal for a column of similarly-formatted values. (A multi-field template, GW-BASIC style, is not supported; use `FORMAT$` and build the line yourself if you need mixed fields.)
+
+## INPUT Statement
+
+`INPUT` reads a line typed by the user and stores it into one or more variables. It shows a `?` prompt while waiting.
+
+### Numeric input
+
+Reads a number. Any non-numeric text at the field is read as `0`.
+
+```basic
+INPUT A
+```
+
+### String input
+
+Reads text into a string variable. Spaces are kept, so the field may contain them:
+
+```basic
+INPUT NAME$
+```
+
+### A prompt string
+
+Put a string, then `;` (or `,`), before the variable to use it as the prompt. A `? ` is always printed after your prompt text:
+
+```basic
+INPUT "NAME"; NAME$
+```
+
+The interpreter shows:
+
+```text
+NAME? 
+```
+
+### Several variables at once
+
+You may fill several variables from one statement. On the typed line, separate the values with **commas**:
+
+```basic
+INPUT A, B, C
+```
+
+All the variables are filled from a single typed line. If the user supplies fewer values than requested, the remaining variables are left at `0` (or `""` for strings). Because commas separate fields, a single string field taken this way cannot itself contain a comma.
+
+To read structured data back from a file with the same feel, see `INPUT#` under *File Handling*.
+
+## Branching
+
+While having an archaic feel to it, `GOTO` can be a very useful construct from time to time.
+
+### GOTO
+
+`GOTO` jumps to another line and continues from there:
+
+```basic
+GOTO 100
+```
+
+`GOTO` (and `GOSUB`) may also jump to a **label** instead of a line number, which reads better and survives `RENUMBER`.
+
+### Labels
+
+A label is a name introduced with a leading dot, sitting on its own at the start of a line. Jump to it by name (the dot is optional in the jump):
+
+```basic
+10 GOTO main
+20 .greet
+30   PRINT "Hello"
+40 RETURN
+50 .main
+60 GOSUB greet
+70 END
+```
+
+Labels are never touched by `RENUMBER`, so `GOTO done` keeps working no matter how the program is renumbered.
+
+### IF ... THEN (single line)
+
+The simplest form runs the rest of the line only when the condition holds:
+
+```basic
+IF A = 10 THEN PRINT "TEN"
+```
+
+The condition is true for any non-zero number (and for a non-empty string). Several things may follow `THEN`, separated by colons:
+
+```basic
+IF OK THEN PRINT "Saving" : GOSUB save : PRINT "Done"
+```
+
+`THEN` may be **omitted** in the single-line form - `IF A = 10 PRINT "TEN"` works too - but writing `THEN` is clearer.
+
+If what follows `THEN` is a bare **line number**, that is an implicit `GOTO` (a classic BASIC shorthand):
+
+```basic
+IF SCORE > HIGH THEN 900       : REM same as: IF SCORE > HIGH THEN GOTO 900
+```
+
+### IF ... THEN ... ELSE
+
+`ELSE` supplies the alternative:
+
+```basic
+IF A = 10 THEN PRINT "TEN" ELSE PRINT "OTHER"
+IF N < 0 THEN 800 ELSE 810     : REM either branch may be a line-number jump
+```
+
+### Block IF (multi-line)
+
+When `THEN` is the **last** thing on the line, `IF` starts a multi-line block that runs until `ENDIF`. An optional `ELSE` (on its own) selects the alternative block. Blocks may be nested.
+
+```basic
+10 IF SCORE >= 50 THEN
+20   PRINT "Pass"
+30   PRINT "Well done"
+40 ELSE
+50   PRINT "Try again"
+60 ENDIF
+```
+
+The single-line form keeps its classic behaviour; the block form is chosen only when nothing follows `THEN` on the line. (The block form needs a stored program - it cannot be used from the direct-mode prompt.)
+
+### ON ... GOTO
+
+`ON` selects a target from a list by a 1-based index:
+
+```basic
+ON N GOTO 100, 200, 300
+```
+
+| `N` | Jumps to |
+| --- | -------- |
+| 1   | 100      |
+| 2   | 200      |
+| 3   | 300      |
+
+A value outside the range (0, negative, or larger than the list) simply falls through to the next statement.
+
+### ON ... GOSUB
+
+The same idea, but each target is called as a subroutine and control returns after the `ON` when the subroutine's `RETURN` runs:
+
+```basic
+ON CHOICE GOSUB 1000, 2000, 3000
+```
+
+### CASE ... OF ... WHEN
+
+`CASE` picks one branch by matching an expression against the values listed by each `WHEN`. A single `WHEN` may list several comma-separated values. `OTHERWISE` catches anything that matched no `WHEN`, and `ENDCASE` closes the statement. The selector may be numeric or a string.
+
+```basic
+10 CASE DAY OF
+20   WHEN 1, 7: PRINT "Weekend"
+30   WHEN 6:    PRINT "Almost there"
+40   OTHERWISE  PRINT "Weekday"
+50 ENDCASE
+```
+
+Only the first matching `WHEN` (or `OTHERWISE`) runs; control then continues after `ENDCASE`. Each clause's statements may follow on the same line after a colon, or on the lines below until the next `WHEN` / `OTHERWISE` / `ENDCASE`. `CASE` needs a stored program (it cannot be used from the direct prompt), and up to 16 `CASE` statements may be nested.
+
+A string example:
+
+```basic
+10 CASE CMD$ OF
+20   WHEN "N", "NORTH": PROCgo_north
+30   WHEN "S", "SOUTH": PROCgo_south
+40   OTHERWISE PRINT "I don't understand."
+50 ENDCASE
+```
+
+## Subroutines
+
+`GOSUB` and `RETURN` are the classic line-numbered subroutine mechanism. For new code the named `PROC`/`FN` forms (see *Procedures* and *Functions*) are usually clearer, but `GOSUB` remains for compatibility and quick jobs.
+
+### GOSUB
+
+Jumps to a line (or label) and remembers where it came from:
+
+```basic
+10 GOSUB 100
+20 PRINT "Back again"
+30 END
+100 PRINT "In the subroutine"
+110 RETURN
+```
+
+Up to 32 `GOSUB`s may be active (nested) at once.
+
+### RETURN
+
+Returns to the statement immediately after the `GOSUB` that called this subroutine. A `RETURN` with no matching `GOSUB` raises `RETURN without a matching GOSUB` error.
+
+## FOR Loops
+
+A `FOR` loop counts a variable from a start value to a limit, running its body once for each value. The limit is tested at the **top** of each pass, so a loop whose start is already past the limit runs zero times.
+
+### Basic loop
+
+The counter goes up by 1 each pass, from 1 to 10 inclusive:
+
+```basic
+FOR I = 1 TO 10
+  PRINT I
+NEXT
+```
+
+`NEXT` may name its variable (`NEXT I`) for clarity - helpful when loops are nested. Up to 16 `FOR` loops may be nested.
+
+### STEP
+
+`STEP` sets the amount added each pass:
+
+```basic
+FOR I = 0 TO 20 STEP 2
+  PRINT I
+NEXT
+```
+
+`STEP` may be fractional (`STEP 0.1`). Beware that fractional steps can accumulate tiny floating-point errors over many passes.
+
+### Negative STEP
+
+A negative `STEP` counts down; the loop continues while the counter is at or **above** the limit:
+
+```basic
+FOR I = 10 TO 1 STEP -1
+  PRINT I
+NEXT
+```
+
+### Nesting
+
+Nested loops close in reverse order (innermost first). Naming the variable on each `NEXT` makes the pairing explicit:
+
+```basic
+FOR Y = 1 TO 3
+  FOR X = 1 TO 3
+    PRINT X * Y;
+  NEXT X
+  PRINT
+NEXT Y
+```
+
+## REPEAT ... UNTIL
+
+This is the "back-testing" loop, where the body runs first, then the condition is tested, so a `REPEAT` loop always runs **at least once**. It repeats *until* the condition becomes true:
+
+```basic
+A = 0
+REPEAT
+  A = A + 1
+  PRINT A
+UNTIL A = 10
+```
+
+Use `WHILE` instead when the body should be skippable from the very start. Up to 16 `REPEAT` loops may be nested.
+
+## WHILE ... ENDWHILE
+
+`WHILE` tests its condition **before** each pass, so the body may run zero times. It repeats while the condition stays true:
+
+```basic
+10 N = 1
+20 WHILE N <= 5
+30   PRINT N
+40   N = N + 1
+50 ENDWHILE
+```
+
+Compared with `REPEAT ... UNTIL` (tested at the bottom, always runs once), `WHILE` is the right choice when the body should be skipped entirely if the condition is false to start with. Up to 16 `WHILE` loops may be nested.
+
+## Loop Control - EXIT and CONTINUE
+
+`EXIT` and `CONTINUE` change the flow of the enclosing `FOR`, `REPEAT` or `WHILE` loop without resorting to a `GOTO`.
+
+### EXIT
+
+`EXIT` leaves a loop immediately, continuing after its terminator (`NEXT`, `UNTIL` or `ENDWHILE`).
+
+```basic
+10 FOR i = 1 TO 1000
+20   IF a(i) = target THEN found = i : EXIT FOR
+30 NEXT
+40 PRINT "found at "; found
+```
+
+On its own, `EXIT` leaves the **innermost** loop, whatever its kind. You can name the kind to be explicit - `EXIT FOR`, `EXIT REPEAT`, `EXIT WHILE` - which leaves the innermost loop of that kind, breaking out of any loops nested inside it too.
+
+### CONTINUE
+
+`CONTINUE` skips the rest of the current pass and goes straight to the loop's next test: `FOR` advances the counter, `REPEAT` and `WHILE` re-check their condition.
+
+```basic
+10 FOR n = 1 TO 10
+20   IF n MOD 2 = 0 THEN CONTINUE FOR : REM skip the even numbers
+30   PRINT n
+40 NEXT
+```
+
+Like `EXIT`, a bare `CONTINUE` acts on the innermost loop, and `CONTINUE FOR` / `CONTINUE REPEAT` / `CONTINUE WHILE` name the kind.
+
+## Error Handling - TRY and CATCH
+
+Instead of letting an error stop the program, wrap the risky part in a `TRY ... CATCH ... ENDTRY` block. If any statement between `TRY` and `CATCH` raises an error, control jumps to the code after `CATCH`; if nothing goes wrong, the handler is skipped.
+
+```basic
+10 TRY
+20   ch = OPENIN "DATA.TXT"
+30   PRINT "opened channel "; ch
+40 CATCH
+50   PRINT "Could not open the file: "; ERR$
+60 ENDTRY
+70 PRINT "carrying on"
+```
+
+Errors raised inside a `PROC` or `FN` called from the `TRY` block are caught too - the whole call is unwound cleanly back to the handler, so loops and locals are restored and the program can keep running.
+
+### ERR and ERR$
+
+Inside (and after) a `CATCH`, two read-only values describe what happened:
+
+* `ERR$` - the error message as text.
+* `ERR` - a numeric code: the number you passed to `RAISE`, or `0` for a built-in error.
+
+### RAISE
+
+`RAISE` throws your own error, which the nearest enclosing `CATCH` will handle.
+
+```basic
+RAISE "something went wrong"        : REM message only (ERR = 0)
+RAISE 404                           : REM a numeric code
+RAISE 404, "not found"              : REM code and message
+```
+
+A `TRY` with no matching `CATCH` still needs an `ENDTRY`; blocks may be nested, and an inner handler catches an error without disturbing an outer one.
+
+## Procedures
+
+A **procedure** is a named block of statements you can call by name. Procedures make a program readable and let you reuse a piece of logic without copying it.
+
+### Definition
+
+Define a procedure with `DEF PROC`*name* and end it with `ENDPROC`. Two spellings are accepted and are equivalent - the glued classic form and the spaced form:
+
+```basic
+10 DEF PROChello
+20   PRINT "HELLO"
+30 ENDPROC
+```
+
+```basic
+10 DEF PROC hello
+20   PRINT "HELLO"
+30 END PROC
+```
+
+### Calling
+
+Run a procedure by writing its name with the `PROC` prefix attached:
+
+```basic
+40 PROChello
+```
+
+Control returns to the statement after the call when `ENDPROC` (or `END PROC`) is reached.
+
+### Parameters
+
+Parameters are listed in parentheses and passed **by value**, so changing a parameter inside the procedure never affects the caller's variable:
+
+```basic
+10 DEF PROCadd(A, B)
+20   PRINT A + B
+30 ENDPROC
+40 PROCadd(10, 20)       : REM prints 30
+```
+
+A procedure may call itself; recursion works as long as nesting stays within limits (up to 32 nested `PROC`/`FN` calls).
+
+### LOCAL variables
+
+`LOCAL` makes a variable private to the procedure: its previous value is saved on entry and restored on `ENDPROC`. This keeps a procedure - including a recursive one - from disturbing variables of the same name elsewhere:
+
+```basic
+10 DEF PROCtest
+20   LOCAL A
+30   A = 100
+40   PRINT A
+50 ENDPROC
+```
+
+List several after `LOCAL`, separated by commas: `LOCAL I, J, TMP$`.
+
+## Functions
+
+A function is like a procedure but **returns a value**, so it can be used inside an expression.
+
+### Definition
+
+Define a function with `DEF FN`*name*`(`parameters`)`. There are two equivalent styles for returning the result:
+
+The recommended, readable style - assign to a variable whose name matches the function, then close with `END FN`:
+
+```basic
+10 DEF FN square(x)
+20   square = x * x
+30 END FN
+```
+
+The classic BBC style - glue the name to `FN` and return with a line beginning `=`, which both supplies the result and ends the function:
+
+```basic
+10 DEF FNsquare(x)
+20 = x * x
+```
+
+Both are entirely equivalent, and a function defined either way can be **called** either way. Parameters are passed by value, and a function may use `LOCAL` and may call itself:
+
+```basic
+10 DEF FN fact(n)
+20   IF n <= 1 THEN fact = 1 ELSE fact = n * fact(n - 1)
+30 END FN
+```
+
+### Using a function
+
+Call it by name, as part of an expression - its result can go anywhere a value is allowed:
+
+```basic
+40 a = square(5)
+50 PRINT a
+```
+
+```text
+25
+```
+
+The name alone is enough - `square(5)` - because the interpreter recognises it as a defined function. The classic `FN` forms, `FNsquare(5)` (glued) and `FN square(5)` (spaced), work too and mean exactly the same thing.
+
+## DATA Processing
+
+`DATA` holds constants inside the program; `READ` copies them into variables one after another; `RESTORE` chooses where the next `READ` starts. All the `DATA` lines in the program form one continuous list, read in line-number order.
+
+### DATA
+
+Lists values to be read later. `DATA` lines may appear anywhere in the program (they are skipped during normal execution):
+
+```basic
+10 DATA 10, 20, 30
+```
+
+### READ
+
+Takes the next item(s) from the `DATA` list, in order, and stores them. Reading past the end of the list raises `READ ran out of DATA`:
+
+```basic
+READ A, B, C
+```
+
+### String DATA
+
+A `DATA` item may be a quoted string; read it into a string variable. The type read must match the variable's type:
+
+```basic
+10 DATA "RED", "GREEN", "BLUE"
+20 READ A$, B$, C$
+```
+
+### RESTORE
+
+Restart reading from the very first `DATA` item:
+
+```basic
+RESTORE
+```
+
+Or restart from the first item on (or after) a given line, which lets you keep several independent tables in one program:
+
+```basic
+RESTORE 100
+```
+
+A worked example - reading a table until it is exhausted:
+
+```basic
+10 FOR I = 1 TO 3
+20   READ NM$, SCORE
+30   PRINT NM$; " scored "; SCORE
+40 NEXT
+50 DATA "Ann", 40, "Ben", 55, "Cid", 33
+```
+
+## Program Control Commands
+
+These commands manage the program itself. Most are typically typed in direct mode. These cover executing the current program, loading/saving programs and creating new ones.
+
+### RUN
+
+Executes the current program from its lowest line number. `RUN` first **clears all variables** (and arrays, and reserved memory), so a program always starts from a clean slate.
+
+```basic
+RUN
+```
+
+Press **Ctrl+C** at any time to stop a running program and return to the prompt - even one stuck in an endless loop that never reads the keyboard. (A program that installs an `ON KEY` handler takes over the keyboard and manages Ctrl+C itself.) Other keys, including `Esc`, are passed through to the program, so a program is free to use `Esc` for its own purposes.
+
+#### The F12 system monitor
+
+Press **F12** at any time - at the prompt or while a program runs - to toggle a small **system-monitor overlay** in the top-right corner of the screen. Press F12 again to hide it. It shows, updated a couple of times a second:
+
+- **CPU** - how busy the machine is: near 0% while it waits for you at the prompt, up to 100% while a program is computing (the bar turns amber then red as it climbs).
+- **MEM** - how much of the 48 MB seed / POD / collections heap is in use (to one decimal). This heap fills when you load a native seed, run a `.POD`, or build a `DICT`/`LIST`/`TREE`; a plain BASIC program leaves it at `0.0%`.
+- **VARS** - how much of BASIC's own working memory is in use (to one decimal): the string heap that holds your string variables plus the arena that `DIM name size` hands out. This is what an ordinary program consumes, so this is the gauge to watch when you `DIM` big buffers or juggle a lot of text.
+- **USE / FRE** - the seed/POD heap (the `MEM` one) as used and free kilobytes.
+- **UP** - how long the machine has been running, as minutes:seconds.
+
+F12 is handled by the system, not your program, so it is swallowed and never reaches `GET`, `INKEY` or an `ON KEY` handler - a program can never see or block it. The overlay draws on top of whatever is on screen (text, graphics, even a double-buffered animation) and lifts cleanly when you switch it off.
+
+### LIST
+
+Displays the stored program, **pretty-printed**:
+
+- **Keywords** are shown in UPPERCASE; variable names, strings and `REM` comments appear exactly as you typed them.
+- **Line numbers** are right-aligned in a gutter whose width is sized to the largest number listed, so the code lines up in a neat column.
+- The body of each block is **indented** - `FOR`/`NEXT`, `REPEAT`/`UNTIL`, `WHILE`/`ENDWHILE`, block `IF`/`ELSE`/`ENDIF`, `CASE`/`ENDCASE`, `TRY`/`CATCH`/`ENDTRY` and multi-line `DEF PROC`/`DEF FN` all step their contents in one level (and `ELSE`, `ENDIF`, `NEXT`, ... step back out).
+- **Syntax colouring** distinguishes keywords, strings, numbers, `REM` comments and `PROC`/`FN` names at a glance.
+
+```basic
+LIST
+```
+
+```text
+ 10 FOR I = 1 TO 3
+ 20   IF I = 2 THEN
+ 30     PRINT "two"
+ 40   ELSE
+ 50     PRINT I
+ 60   ENDIF
+ 70 NEXT
+100 PRINT "done"
+```
+
+List a single line, a range, from a line onward, or up to a line:
+
+```basic
+LIST 100                 : REM just line 100
+LIST 100, 200            : REM lines 100 to 200
+LIST 100,                : REM line 100 to the end
+LIST , 200               : REM the start up to line 200
+```
+
+A partial listing is still indented correctly - `LIST` tracks the block nesting from the top of the program, so a range that starts inside a loop shows the right indentation.
+
+#### Listing a file
+
+Give `LIST` a quoted **file name** to list a program on the card instead of the one in memory - handy for looking at a saved program before you `LOAD` it (which would replace what you are working on). The program in memory is left untouched.
+
+```basic
+LIST "GAME"              : REM lists GAME.BAS from the card
+LIST "UTILS/SORT.BAS"    : REM a path works too
+```
+
+The file is pretty-printed just like the in-memory listing (gutter, indentation, colour), and if it is longer than the screen it pauses with a `-- more --` prompt (press any key to continue, `Q` to stop). `.BAS` is assumed when you give no extension, and `LIST SIMPLE "file"` prints the file's lines plainly. A file that isn't there reports `File not found`.
+
+#### LIST SIMPLE
+
+For the plain, classic form - each line as just its number, a single space, and the text, with no gutter, indentation or colour - add `SIMPLE`. This is handy on a monochrome terminal, or for copying a listing as clean text.
+
+```basic
+LIST SIMPLE              : REM the whole program, plainly
+LIST SIMPLE 100, 200     : REM SIMPLE works with a range too
+LIST SIMPLE "GAME"       : REM a file's lines, verbatim
+```
+
+### AUTO
+
+Enter automatic line-numbering. After `AUTO`, each line you type is given the next number automatically, so you can just type the program. Press Return on an offered number (without typing anything after it) to leave `AUTO`.
+
+```basic
+AUTO
+```
+
+or, choosing the first number and the step:
+
+```basic
+AUTO 100, 10
+```
+
+The default is `AUTO 10, 10` (start at 10, step 10).
+
+### RENUMBER
+
+Renumber the whole program, and fix up every line-number reference - the targets of `GOTO`, `GOSUB`, `RESTORE`, `THEN`, `ELSE`, and the lists of `ON ... GOTO` / `ON ... GOSUB` - so the program still runs correctly.
+
+```basic
+RENUMBER
+```
+
+or, choosing the first number and the step:
+
+```basic
+RENUMBER 100, 10
+```
+
+The default is `RENUMBER 10, 10`. A reference to a line that does not exist is left unchanged. (Labels are never altered by `RENUMBER`, which is why they are the robust choice for jump targets.)
+
+### EDIT
+
+Recall a program line into the input so you can change it instead of retyping it. The line appears ready to edit; press Return to store the changes.
+
+```basic
+EDIT 150
+```
+
+#### Line editing keys
+
+While typing a line - at the prompt, during `AUTO`, or after `EDIT` - these keys are available:
+
+| Key          | Action                                           |
+| ------------ | ------------------------------------------------ |
+| Left / Right | move the cursor within the line                  |
+| Home / End   | jump to the start / end of the line              |
+| Backspace    | delete the character before the cursor           |
+| Delete       | delete the character at the cursor               |
+| Up / Down    | recall previous / next commands from the history |
+
+### NEW
+
+Deletes the current program. Also clears all variables and the control stacks (and unloads any seeds).
+
+```basic
+NEW
+```
+
+### STOP
+
+Stops a running program and prints a message noting where it stopped - useful as a deliberate breakpoint:
+
+```basic
+STOP
+```
+
+```text
+STOP at line 250
+```
+
+### END
+
+Ends the program **silently** (no message). It marks the normal, tidy finish of a program.
+
+```basic
+END
+```
+
+The difference in one line: `END` is the quiet, intended end of a run; `STOP` announces itself and the line it was on, so it reads like a breakpoint.
+
+### SAVE
+
+Writes the current program to a file.
+
+```basic
+SAVE "GAME"              : REM -> GAME.BAS
+SAVE "DATA.TXT"
+```
+
+### LOAD
+
+Clears the current program and variables, then loads a program from a file.
+
+```basic
+LOAD "GAME"
+```
+
+### CHAIN
+
+Loads **another** `.BAS` program and runs it, discarding the current one - like `LOAD` immediately followed by `RUN`, but from inside a running program. The file name is any **string expression** (a literal or a variable), and the `.BAS` extension is added if you leave it off.
+
+```basic
+CHAIN "GAME"
+CHAIN LEVEL$
+```
+
+Given a **second** name, `CHAIN` runs the first program and then, once it finishes, loads and runs the second one:
+
+```basic
+CHAIN "KOCH", "MENU"
+```
+
+This is how a menu launches something and gets itself back: it `CHAIN`s the chosen program with its own name as the second argument, so when that program ends the menu reappears. Each program is loaded fresh and starts with a clean slate (its own variables, screen and modules), exactly as a top-level `RUN` would. The Example Browser (`CD EXAMPLES : LOAD "MENU" : RUN`) is built entirely on this.
+
+### CAT / DIR
+
+Lists a directory - the current one by default, or a directory you name. `CAT` and `DIR` are the same command. By default the listing is **rich**: each entry gets a coloured **type icon**, its name, a human-readable **size**, and the **date and time** it was last written, laid out in aligned columns, and a one-line summary at the end.
+
+```basic
+CAT
+```
+
+Give a **path** to peek into a subdirectory without `CD`-ing into it - for example, to see the native seeds that live in `/seed`. The path may be typed with or without quotes (quotes only for names with spaces):
+
+```basic
+CAT seed
+```
+
+```text
+[SED] ADD.SED             60  2026-07-16 10:18
+[SED] UPPER.SED          180  2026-07-16 10:18
+2 files, 0 dirs, 240 total
+```
+
+The path may be relative to the current directory (`CAT sprites`) or absolute (`CAT /seed`). A path that does not exist raises `File not found`.
+
+```text
+[DIR] EXAMPLES               -  2026-07-15 10:30
+[DIR] SEED                   -  2026-07-15 10:30
+[BAS] HELLO.BAS             14  2026-07-15 10:31
+[IMG] BALL.PNG            1.4K  2026-07-15 10:31
+[FNT] PHILO.TTF          251K  2026-04-13 09:00
+[TXT] README.TXT           98  2026-07-15 10:32
+4 files, 2 dirs, 252.0K total
+```
+
+The icon and colour come from the file type: `[DIR]` a subdirectory, `[BAS]` a program, `[SED]` a native seed, `[IMG]` an image (`.PNG`/`.JPG`/`.BMP`/`.GIF`), `[FNT]` a TrueType font, `[TXT]` text (`.TXT`/`.MD`/`.LOG`/...), and `[BIN]` anything else. When the listing is longer than the screen it pauses with a `-- more --` prompt; press any key to continue, or `Q` to stop.
+
+#### CAT SIMPLE
+
+For the plain listing - one name per line, with a `<DIR>` marker on subdirectories, and no colour, sizes or paging - add `SIMPLE`. This is the form a **program** should use if it prints a catalogue, since it is stable text; interactively, plain `CAT` is friendlier. `SIMPLE` may be followed by a path just like the rich form (`CAT SIMPLE "SEED"`).
+
+```basic
+CAT SIMPLE
+```
+
+### DELETE
+
+Removes a file from the card.
+
+```basic
+DELETE "OLD.BAS"
+```
+
+These commands work on a whole program (or, for `DELETE`, any file). To read and write your own **data files** byte by byte, use the file-handling commands further below.
+
+# The Slightly Excessive BerryBasiC Library
+
+Every programming language with even the slightest sense of self-respect comes bundled with a collection of functions, procedures, and utilities whose sole purpose is to make the programmer's life easier. After all, nobody wants to reinvent the wheel every time they need to manipulate a string, read a file, generate a random number, or figure out what day of the week it is. ***BerryBasiC*** is no exception. In fact, it embraces this long-standing tradition with enthusiasm.
+
+This chapter explores the BerryBasiC standard library: a collection of tools, utilities, and assorted conveniences designed to save you time, reduce boilerplate, and occasionally rescue you from writing code you really shouldn't have to write yourself. Some of these routines you'll use every day. Others you'll use once every five years and be immensely grateful they exist. And a few are included simply because, at some point during development, it seemed like a perfectly reasonable idea.
+
+## String Functions
+
+Character positions in strings are **1-based**: the first character is position 1. Length and count arguments are clamped to the string, so asking for more characters than exist simply returns as many as there are (never an error).
+
+### LEN
 
 Number of characters in a string.
 
-    PRINT LEN("HELLO")
+```basic
+PRINT LEN("HELLO")       : REM 5
+```
 
-Result:
+### ASC
 
-    5
+Character code of the first character. `ASC("")` raises `Invalid argument`.
 
+```basic
+PRINT ASC("A")           : REM 65
+```
 
-
-## ASC
-
-Character code of the first character. `ASC("")` is an error.
-
-    PRINT ASC("A")
-
-Result:
-
-    65
-
-
-
-## CHR$
+### CHR$
 
 The one-character string for a character code (0-255).
 
-    PRINT CHR$(65)
+```basic
+PRINT CHR$(65)           : REM A
+```
 
-Result:
+### STR$
 
-    A
+Converts a number to its printed text form (the same form `PRINT` would use).
 
+```basic
+PRINT STR$(123)          : REM 123
+```
 
+### VAL
 
-## STR$
+Reads a number from the front of a string, stopping at the first character that can't be part of one; leading non-numeric text gives `0`. It accepts a leading sign, a decimal point, and `E`-notation (it does **not** read `&`-hex).
 
-Converts a number to its printed text form.
+```basic
+PRINT VAL("123")         : REM 123
+PRINT VAL("3.5 apples")  : REM 3.5
+PRINT VAL("-2.5E3")      : REM -2500
+```
 
-    PRINT STR$(123)
+### LEFT$
 
-Result:
+The leftmost `n` characters. If `n` exceeds the length the whole string is returned; if `n` is 0 or less, the empty string.
 
-    123
+```basic
+PRINT LEFT$("HELLO", 3)  : REM HEL
+```
 
+### RIGHT$
 
+The rightmost `n` characters, clamped the same way.
 
-## VAL
+```basic
+PRINT RIGHT$("HELLO", 2) : REM LO
+```
 
-Reads a number from the front of a string; leading non-numeric text gives 0.
+### MID$
 
-    PRINT VAL("123")
+`MID$(s, start)` returns from position `start` to the end; `MID$(s, start, n)` returns at most `n` characters from that position. `start` is 1-based.
 
-Result:
+```basic
+PRINT MID$("HELLO", 2, 3): REM ELL
+PRINT MID$("HELLO", 3)   : REM LLO
+```
 
-    123
-
-
-
-## LEFT$
-
-The leftmost `n` characters. If `n` exceeds the length, the whole string is
-returned; if `n` is 0 or less, the empty string.
-
-    PRINT LEFT$("HELLO",3)
-
-Result:
-
-    HEL
-
-
-
-## RIGHT$
-
-The rightmost `n` characters, clamped the same way as `LEFT$`.
-
-    PRINT RIGHT$("HELLO",2)
-
-Result:
-
-    LO
-
-
-
-## MID$
-
-`MID$(s, start)` returns from position `start` to the end; `MID$(s, start, n)`
-returns at most `n` characters from that position. `start` is 1-based.
-
-    PRINT MID$("HELLO",2,3)
-
-Result:
-
-    ELL
-
-
-
-## STRING$
+### STRING$
 
 A string made of `n` copies of another string.
 
-    PRINT STRING$(10,"*")
+```basic
+PRINT STRING$(10, "*")   : REM **********
+```
 
-Result:
+### INSTR
 
-    **********
+Position of the first occurrence of the second string within the first, or `0` if it is not found. An optional third argument gives the 1-based position to start searching from.
 
+```basic
+PRINT INSTR("HELLO", "LL")       : REM 3
+PRINT INSTR("ABABAB", "AB", 2)   : REM 3
+```
 
+### UPPER$ / LOWER$
 
-## INSTR
+Return the string converted to upper or lower case.
 
-Position of the first occurrence of the second string within the first, or 0 if
-not found. An optional third argument gives the 1-based position to start
-searching from.
+```basic
+PRINT UPPER$("Hello")      : REM HELLO
+PRINT LOWER$("Hello")      : REM hello
+```
 
-    PRINT INSTR("HELLO","LL")
+### TRIM$
 
-Result:
+Return the string with leading and trailing whitespace removed.
 
-    3
+```basic
+PRINT "["; TRIM$("  hi  "); "]"    : REM [hi]
+```
 
+### REPLACE$
 
+`REPLACE$(text$, find$, with$)` returns `text$` with **every** occurrence of `find$` replaced by `with$`. If `with$` is empty the matches are deleted.
 
-# Mathematical Functions
+```basic
+PRINT REPLACE$("a,b,c", ",", " / ")     : REM a / b / c
+PRINT REPLACE$("mississippi", "s", "")  : REM miiippi
+```
 
-The trigonometric functions work in **radians**, not degrees; use `RAD` and
-`DEG` to convert. These single-argument functions allow the parentheses to be
-omitted, BBC-style, so `SQR 2` and `SQR(2)` are the same, and the function binds
-tighter than the surrounding operators.
+### CONTAINS / STARTSWITH / ENDSWITH
 
-## ABS
+Tests that return `TRUE` (-1) or `FALSE` (0).
+
+```basic
+IF STARTSWITH(name$, "Dr ") THEN PRINT "a doctor"
+IF ENDSWITH(file$, ".BAS")  THEN PRINT "a program"
+IF CONTAINS(line$, "ERROR") THEN PRINT "problem found"
+```
+
+### SPLIT
+
+`SPLIT(text$, sep$, parts$())` breaks `text$` at every occurrence of the separator `sep$`, stores the pieces in the string array `parts$()`, and returns how many pieces were stored (starting at index 0).
+
+```basic
+10 n = SPLIT("apple,banana,cherry", ",", fruit$())
+20 FOR i = 0 TO n - 1
+30   PRINT i; ": "; fruit$(i)
+40 NEXT
+```
+
+Empty fields are kept (so `"a,,c"` yields three pieces), and an empty separator splits into individual characters. The array is created automatically if it does not exist; if you `DIM` it yourself, `SPLIT` fills up to its size and returns how many it stored.
+
+### JOIN$
+
+`JOIN$(parts$(), sep$ [, count])` is the inverse of `SPLIT`: it joins the array elements into one string with `sep$` between them. An optional `count` joins just the first `count` elements (handy with the value `SPLIT` returned).
+
+```basic
+10 n = SPLIT("one two three", " ", w$())
+20 PRINT JOIN$(w$(), "-", n)          : REM one-two-three
+```
+
+## Mathematical Functions
+
+The trigonometric functions work in **radians**, not degrees; use `RAD` and `DEG` to convert. These single-argument functions allow the parentheses to be omitted, BBC-style, so `SQR 2` and `SQR(2)` are the same, and the function binds tighter than the surrounding operators. (A single-argument function may even be glued to a numeric literal - `SQR3` means `SQR 3` - though a space reads better.)
+
+### ABS
 
 Absolute value (drops the sign).
 
-    PRINT ABS(-5)        : REM 5
+```basic
+PRINT ABS(-5)            : REM 5
+```
 
-## INT
+### INT
 
-Largest whole number not greater than X (rounds towards minus infinity).
+The largest whole number **not greater than** X - it rounds towards minus infinity (so it is not the same as truncation for negatives).
 
-    PRINT INT(3.7)       : REM 3
-    PRINT INT(-3.2)      : REM -4
+```basic
+PRINT INT(3.7)           : REM 3
+PRINT INT(-3.2)          : REM -4
+```
 
-## SGN
+### SGN
 
-Sign of X: `-1`, `0`, or `1`.
+The sign of X: `-1`, `0`, or `1`.
 
-    PRINT SGN(-42)       : REM -1
+```basic
+PRINT SGN(-42)           : REM -1
+```
 
-## SQR
+### SQR
 
 Square root. X must not be negative.
 
-    PRINT SQR(9)         : REM 3
+```basic
+PRINT SQR(9)             : REM 3
+```
 
-## SIN
+### SIN / COS / TAN
 
-Sine of X (X in radians).
+Sine, cosine and tangent of X (X in radians).
 
-    PRINT SIN(PI / 2)    : REM 1
+```basic
+PRINT SIN(PI / 2)        : REM 1
+PRINT COS(0)             : REM 1
+```
 
-## COS
+### ATN / ASN / ACS
 
-Cosine of X (X in radians).
+Arctangent, arcsine and arccosine, each returning an angle in radians. For `ASN` and `ACS`, X must be between -1 and 1.
 
-## TAN
+```basic
+PRINT ATN(1)             : REM 0.785398... (PI/4)
+```
 
-Tangent of X (X in radians).
+### LOG / EXP
 
-## ATN
+`LOG` is the natural logarithm (base e); X must be greater than 0. `EXP` is its inverse, e raised to the power X.
 
-Arctangent: the angle (in radians) whose tangent is X.
+```basic
+PRINT LOG(EXP(1))        : REM 1
+```
 
-## ASN
+(For a base-10 or other-base logarithm, divide: `LOG(x) / LOG(10)`.)
 
-Arcsine: the angle (in radians) whose sine is X. X must be between -1 and 1.
+### DEG / RAD
 
-## ACS
+Convert between radians and degrees.
 
-Arccosine: the angle (in radians) whose cosine is X. X must be between -1 and 1.
+```basic
+PRINT DEG(PI)            : REM 180
+PRINT RAD(180)           : REM 3.14159...
+```
 
-## LOG
-
-Natural logarithm (base e). X must be greater than 0.
-
-    PRINT LOG(EXP(1))    : REM 1
-
-## EXP
-
-e raised to the power X (the inverse of `LOG`).
-
-## DEG
-
-Convert radians to degrees.
-
-    PRINT DEG(PI)        : REM 180
-
-## RAD
-
-Convert degrees to radians.
-
-    PRINT RAD(180)       : REM 3.14159...
-
-
-
-# Random Numbers
-
-## RND
+### Random Numbers: RND
 
 `RND` returns pseudo-random numbers. Its behaviour depends on the argument:
 
-| Call      | Result |
-|-----------|--------|
-| `RND(1)`  | A floating-point value in the range 0 (inclusive) to 1 (exclusive) |
-| `RND(n)`  | A whole number from 1 to `n`, for `n` greater than 1 |
-| `RND(0)`  | Repeats the last value returned by `RND(1)` |
-| `RND(-n)` | Seeds the generator from `n` and returns `-n`, giving a repeatable sequence |
+| Call      | Result                                                                      |
+| --------- | --------------------------------------------------------------------------- |
+| `RND(1)`  | a floating-point value in the range 0 (inclusive) to 1 (exclusive)          |
+| `RND(n)`  | a whole number from 1 to `n`, for `n` greater than 1                        |
+| `RND(0)`  | repeats the last value returned by `RND(1)`                                 |
+| `RND(-n)` | seeds the generator from `n` and returns `-n`, giving a repeatable sequence |
 
-    PRINT RND(100)
+```basic
+PRINT RND(100)           : REM a whole number from 1 to 100
+PRINT RND(6)             : REM a dice roll, 1 to 6
+```
 
-Returns a random value (here, a whole number from 1 to 100). Seed with a
-negative argument when you want the same sequence every run:
+Seed with a negative argument when you want the *same* sequence every run - useful while debugging:
 
-    X = RND(-1)          : REM fix the seed
-    PRINT RND(6)         : REM same "dice roll" each run
+```basic
+X = RND(-1)              : REM fix the seed
+PRINT RND(6)             : REM the same "roll" each run
+```
 
+## Keyboard Functions
 
+While `INPUT` provides a convenient way to read a well-delimited line of text from the keyboard, it is not the only means of interacting with the user. Many programs require more immediate control over keyboard input, allowing them to react to individual key presses as they occur rather than waiting for the user to press **Enter**.
 
-# Keyboard Functions
+For those situations, ***BerryBasiC*** offers additional mechanisms for detecting keyboard events. These functions let your program respond instantly to user input, making them ideal for interactive applications such as games, menus, editors, and real-time utilities where responsiveness is far more important than line-oriented text input.
 
-## GET
+### GET
 
-Waits for a key press and returns its character code. The program pauses until a
-key is pressed.
+Waits for a key press and returns its code. The program pauses until a key is pressed.
 
-    A = GET
+```basic
+A = GET
+```
 
+A key that **types something** returns that character (`65` for `A`, and the whole Latin-1 range for `æ ø å € ...`). A key that types **nothing** - an arrow, a function key - returns a code of its own instead:
 
+| Key      | Code |     | Key            | Code                |
+| -------- | ---- | --- | -------------- | ------------------- |
+| `Left`   | 17   |     | `Esc`          | 27                  |
+| `Right`  | 18   |     | `Delete`       | 127                 |
+| `Up`     | 19   |     | `F1` ... `F12` | **257** ... **268** |
+| `Down`   | 20   |     | `PgUp`         | 269                 |
+| `Home`   | 21   |     | `PgDn`         | 270                 |
+| `End`    | 22   |     |                |                     |
+| `Insert` | 23   |     |                |                     |
 
-## GET$
+The function keys and the page keys are **above 255** on purpose: every code up to 255 is a real character, so a key that types nothing has to live above them or `F1` would be indistinguishable from `æ`. `F1`...`F12` are consecutive, so `F` *n* is `256 + n`.
+
+```basic
+10 REM a menu on the function keys
+20 K = GET
+30 IF K >= 257 AND K <= 268 THEN PRINT "F"; K - 256 : GOTO 20
+40 IF K = 27 THEN PRINT "escaped" : END
+50 GOTO 20
+```
+
+> `Shift`, `Ctrl` and `Alt` never come back from `GET`, and no amount of waiting will make them: on their own they type nothing, so they are not keys but **state**. `KEYMOD` reads them.
+
+### GET$
 
 Like `GET`, but returns the key as a single-character string.
 
-    A$ = GET$
+```basic
+A$ = GET$
+```
 
+### INKEY
 
+`INKEY(n)` waits up to `n` centiseconds (hundredths of a second) for a key. It returns the character code if a key arrives in time, or `-1` if none does.
 
-## INKEY
+```basic
+K = INKEY(100)           : REM wait up to 1 second
+```
 
-`INKEY(n)` waits up to `n` centiseconds (hundredths of a second) for a key. It
-returns the character code if a key is pressed in time, or `-1` if none is.
+### INKEY$
 
-    K = INKEY(100)       : REM wait up to 1 second
+Like `INKEY`, but returns a single-character string, or the empty string `""` on timeout.
 
+```basic
+K$ = INKEY$(100)
+```
 
+A common "wait, but not forever" loop:
 
-## INKEY$
+```basic
+10 PRINT "Press a key..."
+20 REPEAT : K = INKEY(10) : UNTIL K <> -1
+30 PRINT "You pressed code "; K
+```
 
-Like `INKEY`, but returns a single-character string, or the empty string `""` on
-timeout.
+### Keyboard Layouts
 
-    K$ = INKEY$(100)
+A USB keyboard reports *which key* was pressed, not which letter is printed on it, so the machine has to know your keyboard's layout to turn key presses into the right characters. Out of the box it assumes a **US** layout. If you have a Norwegian, Swedish, Danish, German or UK keyboard, tell it so - otherwise the symbols and the national letters land in the wrong places.
 
+#### KEYMOD - which modifiers are held
 
+`Shift`, `Ctrl` and `Alt` type nothing on their own, so they can never arrive through `GET` or `INKEY`. They are **state**, and `KEYMOD` reads it - a bitmask of what is held down and which locks are set, right now:
 
-# Cursor Functions
+| Bit | Value | Meaning                                                 |
+| --- | ----- | ------------------------------------------------------- |
+| 0   | 1     | `Shift` (either)                                        |
+| 1   | 2     | `Ctrl` (either)                                         |
+| 2   | 4     | `Alt` (the left one)                                    |
+| 3   | 8     | `AltGr` (the right `Alt`, which types the third legend) |
+| 4   | 16    | the `Windows` / `Command` key                           |
+| 5   | 32    | `CapsLock` is on                                        |
+| 6   | 64    | `NumLock` is on                                         |
+| 7   | 128   | `ScrollLock` is on                                      |
 
-## POS
+```basic
+IF (KEYMOD AND 2) THEN PRINT "Ctrl is down"
+IF (KEYMOD AND 32) THEN PRINT "CapsLock is on"
+```
 
-The current text cursor column (X position), counting from 0.
+> **`KEYMOD` is a snapshot taken when the keyboard was last read.** Nothing reads the keyboard unless you ask it to, so in a loop, read a key first - `K = INKEY(0)` will do, returning `-1` immediately when nothing is waiting - and then look at `KEYMOD`. Reading `KEYMOD` on its own, over and over, will keep returning whatever the last read saw.
 
-    PRINT POS
+```basic
+10 REM shift-click: poll the key first, then the state
+20 REPEAT
+30   K = INKEY(0)                       ' refreshes KEYMOD (and returns -1 if idle)
+40   IF MOUSEB AND (KEYMOD AND 1) THEN PRINT "shift-click at "; MOUSEX; ","; MOUSEY
+50 UNTIL K = 27
+```
 
+The three lock keys work as you would expect: they toggle, they light the **LED on the keyboard**, and `CapsLock` capitalises the letters you type (only the letters - digits and symbols are unaffected, and `Shift` inverts it as usual). `NumLock` starts **on**, which is why the keypad types digits.
 
+`KEYMOD` returns 0 when there is no USB keyboard - a serial terminal sends characters, and has no modifiers to report.
 
-## VPOS
+#### KEYBOARD
 
-The current text cursor row (Y position), counting from 0.
+Select a layout by its two-letter code (case doesn't matter):
 
-    PRINT VPOS
+```basic
+KEYBOARD "NO"
+```
 
+| Code | Layout                      |
+| ---- | --------------------------- |
+| `US` | United States (the default) |
+| `UK` | United Kingdom              |
+| `NO` | Norwegian                   |
+| `DK` | Danish                      |
+| `SE` | Swedish                     |
+| `DE` | German (QWERTZ)             |
 
+The change takes effect immediately and stays until you change it again or the machine is switched off. An unknown code raises `Unknown keyboard layout`.
 
-# Mouse
+#### KEYBOARD$
 
-A USB mouse (plugged into a USB-A port on real hardware, or supplied with
-`-device usb-mouse` under QEMU) drives an on-screen pointer. Position is reported
-in **raw framebuffer pixels** with the origin at the **top-left** corner: X runs
-`0` to screen-width−1, Y runs `0` to screen-height−1. The pointer starts at the
-centre of the screen and is clamped to the screen edges.
+Reads back the current layout code:
+
+```basic
+10 PRINT "Keyboard is set to "; KEYBOARD$
+```
+
+#### The Three Levels: Normal, Shift and AltGr
+
+Each key can type up to three characters: on its own, with **Shift**, and with **AltGr** (the right-hand `Alt` key). On the Nordic and German layouts AltGr is how you reach the programming symbols. On a Norwegian keyboard, for example:
+
+| You press                 | You get                            |
+| ------------------------- | ---------------------------------- |
+| the `Æ` `Ø` `Å` keys      | `æ ø å` (with Shift, the capitals) |
+| `AltGr` + `2` `4`         | `@` `$`                            |
+| `AltGr` + `7` `8` `9` `0` | `{` `[` `]` `}`                    |
+| `AltGr` + `+`             | `\`                                |
+| `AltGr` + `<`             | `                                  |
+| `AltGr` + the `¨` key     | `~`                                |
+
+The national letters (`æ ø å`, `ä ö ü`, `ß`, ...) are ordinary characters: you can `PRINT` them, put them in strings, and type them into the editor.
+
+#### Making it the default
+
+`KEYBOARD "NO"` only lasts for the session. To boot straight into your layout every time, run the configuration tool and pick it from the menu (alongside the screen resolution and font):
+
+```
+tools/configure.sh
+```
+
+or set it directly:
+
+```
+tools/configure.sh 1280x720 fonts/ISO.F16 1 NO
+```
+
+Then `make`. (The tool writes `#define CFG_KBD_LAYOUT "NO"` into `kernel/buildconfig.h`; you can also edit that line by hand and rebuild.) 
+
+More about configuration will follow at a later stage in the book. 
+
+> Please note: layouts apply to a real USB keyboard on the Pi. Typing over a serial console sends characters directly and is unaffected.
+
+## Mouse
+
+A USB mouse (plugged into a USB-A port on real hardware, or supplied with `-device usb-mouse` under QEMU) drives an on-screen pointer. Position is reported in **raw framebuffer pixels** with the origin at the **top-left** corner: X runs 0 to screen-width-1, Y runs 0 to screen-height-1. The pointer starts at the centre of the screen and is clamped to the screen edges.
+
+> **These are `MODE 2` coordinates.** In `MODE 2` (native pixels, top-left origin) `MOUSEX`/`MOUSEY` map **1:1** onto drawing coordinates - `CIRCLE FILL MOUSEX, MOUSEY, 8` paints exactly under the pointer, with no arithmetic. In `MODE 1` (logical, bottom-left origin) they do not line up: to draw at the pointer you must flip and scale, e.g. `X = MOUSEX * 1280 / SCREENW : Y = 1023 - MOUSEY * 1024 / SCREENH`. If your program is mouse-driven, `MODE 2` is much the simpler choice.
 
 The **button value** is a bitmask:
 
 | Bit | Value | Button |
-|-----|-------|--------|
+| --- | ----- | ------ |
 | 0   | 1     | Left   |
 | 1   | 2     | Right  |
 | 2   | 4     | Middle |
 
-So a value of `3` means left+right are held together. Test a single button with
-`AND`, e.g. `IF MOUSEB AND 1 THEN ...` for the left button.
+So a value of `3` means left+right are held together. Test a single button with `AND` - for example `IF MOUSEB AND 1 THEN ...` for the left button.
 
 If no mouse is present, the position reads back as `0,0` and the buttons as `0`.
 
-When a mouse is connected, the system draws an **arrow pointer** on screen and
-moves it with the mouse automatically — including at the `>` editor prompt and
-while a program waits at `GET`/`INKEY`. You do not have to draw the pointer
-yourself; reading `MOUSEX`/`MOUSEY`/`MOUSE` simply tells you where it is.
+When a mouse is connected the system draws an **arrow pointer** on screen and moves it automatically - including at the `>` editor prompt and while a program waits at `GET`/`INKEY`. You do not have to draw the pointer yourself; reading `MOUSEX`/`MOUSEY`/`MOUSEB` simply tells you where it is.
 
-> Under QEMU (`make run`), click inside the window once to let it capture the
-> mouse (a relative USB mouse only sends movement while the window has grabbed
-> the pointer); press `Ctrl`+`Alt`+`G` to release it.
+> Under QEMU (`make run`), click inside the window once to let it capture the mouse (a relative USB mouse only sends movement while the window has grabbed the pointer); press `Ctrl`+`Alt`+`G` to release it.
 
-## MOUSEX / MOUSEY / MOUSEB
+### MOUSEX / MOUSEY / MOUSEB
 
-Three parenless value functions that read one component of the pointer, for use
-inside an expression:
+Three parenthesis-free value functions, each reading one component of the pointer, for use inside an expression:
 
-    PLOT 69, MOUSEX, MOUSEY          : REM plot a point under the pointer
-    IF MOUSEB AND 1 THEN PROCclick   : REM act on the left button
+```basic
+PLOT 69, MOUSEX, MOUSEY          : REM plot a point under the pointer
+IF MOUSEB AND 1 THEN PROCclick   : REM act on the left button
+```
 
-## MOUSE
+### MOUSE
 
-The `MOUSE` statement reads all three at once into three numeric variables —
-X, Y, then the button bitmask:
+The `MOUSE` statement reads all three at once into three numeric variables - X, Y, then the button bitmask:
 
-    MOUSE X%, Y%, B%
-    PRINT "pointer at "; X%; ","; Y%; "  buttons="; B%
+```basic
+MOUSE X%, Y%, B%
+PRINT "pointer at "; X%; ","; Y%; "  buttons="; B%
+```
 
-Reading the mouse (via either form) also polls the hardware, so call it in your
-main loop to keep the pointer up to date. See `examples/mouse.bas` for a small
-drawing demo.
+Reading the mouse (via either form) also polls the hardware, so call it in your main loop to keep the pointer up to date. See `examples/hardware/mouse.bas` for a small drawing demo.
 
+## Cursor Functions
 
+When writing text-based applications, it is often useful to know the current position of the text cursor. BerryBasiC provides two built-in functions that report the cursor's current coordinates on the terminal. These values can be used to align text, implement custom layouts, or simply determine where the next character will be printed.
 
-# Time
+Both coordinates are zero-based, meaning the upper-left corner of the screen is at position `(0, 0)`.
+
+### POS
+
+`POS` returns the current horizontal cursor position (the **X** coordinate), measured in character columns from the left edge of the screen.
+
+```basic
+PRINT POS
+```
+
+For example, if the cursor is positioned at the beginning of the tenth column, `POS` returns `9`.
+
+### VPOS
+
+`VPOS` returns the current vertical cursor position (the **Y** coordinate), measured in character rows from the top of the screen.
+
+```basic
+PRINT VPOS
+```
+
+For example, if the cursor is on the first line of the screen, `VPOS` returns `0`.
+
+Together, `POS` and `VPOS` make it easy to determine exactly where output will appear, allowing programs to perform relative positioning, preserve cursor locations, or build more sophisticated text-based user interfaces.
+
+## Time
 
 `TIME` is a centisecond (hundredth-of-a-second) counter. Read it as a value:
 
-    PRINT TIME
+```basic
+PRINT TIME
+```
 
 Assign to it to reset or set the counter, typically to time an interval:
 
-    TIME = 0
-    REM ... do some work ...
-    PRINT "Took"; TIME; "centiseconds"
+```basic
+TIME = 0
+REM ... do some work ...
+PRINT "Took "; TIME; " centiseconds"
+```
 
+## Screen Control
 
+BerryBasiC includes several commands for controlling the appearance of the text screen. These commands allow your programs to clear the display, change text colours, and create more visually appealing user interfaces. While simple in nature, they form the foundation of virtually every text-based application.
 
-# Screen Control
+### CLS
 
-## CLS
+The `CLS` command clears the entire text area and moves the cursor back to the upper-left corner of the screen (position `(0, 0)`). Any text previously displayed is erased.
 
-Clears the text area and moves the cursor to the top-left.
+```basic
+CLS
+```
 
-    CLS
+`CLS` is commonly used at the start of a program or before redrawing a menu or status screen, ensuring that old output does not remain visible.
 
+### COLOUR / COLOR
 
+The `COLOUR` command changes the foreground (text) colour used by subsequent `PRINT` statements. For convenience, BerryBasiC accepts both the British spelling (`COLOUR`) and the American spelling (`COLOR`).
 
-## COLOUR / COLOR
+The colour is specified as a logical colour number ranging from **0** to **7**, using the default text palette.
 
-Sets the text foreground colour for subsequent `PRINT` output. Both spellings
-are accepted. The colour is a logical colour number (0-7 in the default
-palette); see the VDU section for the palette and for graphics colours (`GCOL`).
+```basic
+COLOUR 2          : REM Green text
+COLOR 2           : REM Exactly the same command
+```
 
-    COLOUR 2
+The selected colour remains active until another `COLOUR` (or `COLOR`) command changes it.
 
-or
+Only the foreground colour is affected. To change the text background colour, use the `VDU` command:
 
-    COLOR 2
+```basic
+VDU 17, 128 + c
+```
 
+where `c` is the desired background colour number.
 
+The default palette and additional colour-related commands are described in the **VDU** section. The **Graphics Library** chapter also introduces the four-argument form of `COLOUR`, which allows palette entries to be redefined, along with the `GCOL` command used for graphics drawing.
 
-# VDU
+## VDU
 
-The VDU statement sends a list of byte values to the VDU driver, which controls
-the text and graphics screen. Codes 32 to 255 are printable characters; codes
-0 to 31 and 127 are control codes that act on the screen, some of which use the
-values that follow as parameters.
+The `VDU` statement, inherited from the fancy BBC basic dialect (with the meaning Visual Display Unit), sends a list of byte values to the VDU driver, which controls the text and graphics screen. Codes 32 to 255 are printable characters; codes 0 to 31 and 127 are control codes that act on the screen, some of which consume the values that follow as parameters.
 
-VDU 65,66,67
+```basic
+VDU 65, 66, 67
+```
 
-Outputs:
-
+```text
 ABC
+```
 
-## Sending 16-bit values
+### Sending 16-bit values
 
-A value followed by a semicolon ( ; ) is sent as a 16-bit word - two bytes,
-least significant first. A value followed by a comma ( , ), or by nothing, sends
-a single byte (its least significant byte). Screen coordinates are 16-bit, so
-they are written with semicolons:
+A value followed by a **semicolon** `;` is sent as a 16-bit word - two bytes, least-significant first. A value followed by a **comma** `,` (or by nothing) sends a single byte (its least-significant byte). Screen coordinates are 16-bit, so they are written with semicolons:
 
-VDU 25,5,640;512;
+```basic
+VDU 25, 5, 640; 512;
+```
 
-This is the same as PLOT 5,640,512 (draw a line to 640,512).
+This is the same as `PLOT 5, 640, 512` (draw a line to 640,512).
 
-## VDU code summary
+### VDU code summary
 
-| Code | Params | Meaning |
-|------|--------|---------|
-| 0    | -      | Null - does nothing |
-| 4    | -      | Write text at the text cursor (the default) |
-| 5    | -      | Write text at the graphics cursor |
-| 6    | -      | Enable output to the screen |
-| 7    | -      | Bell (no sound on this hardware) |
-| 8    | -      | Move the text cursor back one character |
-| 9    | -      | Move the text cursor forward one character |
-| 10   | -      | Move the text cursor down one line |
-| 11   | -      | Move the text cursor up one line |
-| 12   | -      | Clear the text area (same as CLS) |
-| 13   | -      | Move the text cursor to the start of the line |
-| 16   | -      | Clear the graphics area (same as CLG) |
-| 17   | 1      | Define a text colour (same as COLOUR) |
-| 18   | 2      | Define a graphics colour (same as GCOL) |
-| 19   | 5      | Set an entry in the colour palette |
-| 20   | -      | Restore the default colours and palette |
-| 21   | -      | Disable output to the screen |
-| 22   | 1      | Select the screen mode (same as MODE) |
-| 23   | 9      | Define a character, or control the cursor / scrolling |
-| 24   | 8      | Define a graphics viewport |
-| 25   | 5      | Plot (same as PLOT) |
-| 26   | -      | Restore the default viewports and graphics origin |
+| Code | Params | Meaning                                                  |
+| ---- | ------ | -------------------------------------------------------- |
+| 0    | -      | Null - does nothing                                      |
+| 4    | -      | Write text at the text cursor (the default)              |
+| 5    | -      | Write text at the graphics cursor                        |
+| 6    | -      | Enable output to the screen                              |
+| 7    | -      | Bell (no sound on this hardware)                         |
+| 8    | -      | Move the text cursor back one character                  |
+| 9    | -      | Move the text cursor forward one character               |
+| 10   | -      | Move the text cursor down one line                       |
+| 11   | -      | Move the text cursor up one line                         |
+| 12   | -      | Clear the text area (same as `CLS`)                      |
+| 13   | -      | Move the text cursor to the start of the line            |
+| 16   | -      | Clear the graphics area (same as `CLG`)                  |
+| 17   | 1      | Define a text colour (same as `COLOUR`)                  |
+| 18   | 2      | Define a graphics colour (same as `GCOL`)                |
+| 19   | 5      | Set an entry in the colour palette                       |
+| 20   | -      | Restore the default colours and palette                  |
+| 21   | -      | Disable output to the screen                             |
+| 22   | 1      | Select the screen mode (same as `MODE`)                  |
+| 23   | 9      | Define a character, or control the cursor / scrolling    |
+| 24   | 8      | Define a graphics viewport                               |
+| 25   | 5      | Plot (same as `PLOT`)                                    |
+| 26   | -      | Restore the default viewports and graphics origin        |
 | 27   | 1      | Send the next value to the screen as a literal character |
-| 28   | 4      | Define a text viewport |
-| 29   | 4      | Set the graphics origin (same as ORIGIN) |
-| 30   | -      | Home the text cursor to the top left |
-| 31   | 2      | Move the text cursor (same as TAB(x,y)) |
-| 127  | -      | Backspace and delete |
+| 28   | 4      | Define a text viewport                                   |
+| 29   | 4      | Set the graphics origin                                  |
+| 30   | -      | Home the text cursor to the top-left                     |
+| 31   | 2      | Move the text cursor to column, row                      |
+| 127  | -      | Backspace and delete                                     |
 
-Codes 1, 2 and 3 (printer) and 14 and 15 (auto-paging) are accepted but have no
-effect on this hardware.
+Codes 1, 2 and 3 (printer) and 14 and 15 (auto-paging) are accepted but have no effect on this hardware.
 
-## Colours and palette
+### Colours and palette
 
-VDU 17,c          : set the text foreground to logical colour c (0 to 7)
+```basic
+VDU 17, c            : set the text foreground to logical colour c (0 to 7)
+VDU 17, 128 + c      : set the text background to logical colour c
+VDU 18, action, c    : set the graphics colour and plot action (same as GCOL)
+VDU 19, l, 16, r, g, b : set logical colour l to an RGB value (r, g, b each 0 to 255)
+VDU 19, l, p, 0, 0, 0  : set logical colour l to default physical colour p (0 to 7)
+VDU 20               : restore the default eight colours and palette
+```
 
-VDU 17,128+c      : set the text background to logical colour c
+### Cursor and viewports
 
-VDU 18,action,c   : set the graphics colour and plot action (same as GCOL)
+```basic
+VDU 31, x, y         : move the text cursor to column x, row y
+VDU 30               : home the text cursor to the top-left of the text viewport
+VDU 28, l, b, r, t   : define a text viewport in character cells (left, bottom, right, top)
+VDU 24, l; b; r; t;  : define a graphics viewport in graphics coordinates
+VDU 26               : restore the full-screen viewports and reset the origin
+VDU 29, x; y;        : set the graphics origin (same as ORIGIN in other BASICs)
+```
 
-VDU 19,l,16,r,g,b : set logical colour l to an RGB value (r, g, b each 0 to 255)
+A text viewport restricts where text is printed and scrolled; a graphics viewport clips all plotting (and `CLG`) to a rectangle.
 
-VDU 19,l,p,0,0,0  : set logical colour l to default physical colour p (0 to 7)
+### VDU 5 - text at the graphics cursor
 
-VDU 20            : restore the default eight colours and palette
+`VDU 5` makes all character output - including `PRINT` - appear at the graphics cursor instead of the text cursor. Characters are drawn in the current graphics foreground colour, using the current `GCOL` plot action, with a transparent background, and are clipped to the graphics viewport. `VDU 4` returns to normal text output.
 
-## Cursor and viewports
-
-VDU 31,x,y        : move the text cursor to column x, row y (same as TAB(x,y))
-
-VDU 30            : home the text cursor to the top-left of the text viewport
-
-VDU 28,l,b,r,t    : define a text viewport in character cells (left, bottom,
-                    right, top)
-
-VDU 24,l;b;r;t;   : define a graphics viewport in graphics coordinates
-
-VDU 26            : restore the full-screen viewports and reset the origin
-
-VDU 29,x;y;       : set the graphics origin (same as ORIGIN x,y)
-
-A text viewport restricts where text is printed and scrolled; a graphics
-viewport clips all plotting (and CLG) to a rectangle.
-
-## VDU 5 - text at the graphics cursor
-
-VDU 5 makes all character output - including PRINT - appear at the graphics
-cursor instead of the text cursor. Characters are drawn in the current graphics
-foreground colour, using the current GCOL plot action, with a transparent
-background, and are clipped to the graphics viewport. VDU 4 returns to normal
-text output.
-
-MOVE 200,400
-
+```basic
+MOVE 200, 400
 VDU 5
-
 PRINT "LABEL"
-
 VDU 4
+```
 
-While in VDU 5 mode the codes 8, 9, 10, 11 move the graphics cursor by one
-character, VDU 13 returns it to the left of the graphics viewport, VDU 30 homes
-it to the top-left, and VDU 127 backspaces and erases using the graphics
-background colour.
+While in `VDU 5` mode, codes 8, 9, 10, 11 move the graphics cursor by one character, `VDU 13` returns it to the left of the graphics viewport, `VDU 30` homes it to the top-left, and `VDU 127` backspaces and erases using the graphics background colour.
 
-## VDU 23 - user-defined characters and control
+### VDU 23 - user-defined characters and control
 
-Define a character (code 32 to 255) from eight rows of eight pixels, top to
-bottom. Each row is one byte; a set bit is a lit pixel, with the most significant
-bit on the left:
+Define a character (code 32 to 255) from eight rows of eight pixels, top to bottom. Each row is one byte; a set bit is a lit pixel, with the most significant bit on the left:
 
-VDU 23,240,126,129,165,129,165,153,129,126
-
+```basic
+VDU 23, 240, 126, 129, 165, 129, 165, 153, 129, 126
 PRINT CHR$(240)
+```
 
 This defines character 240 as a smiley face and then prints it.
 
-Other VDU 23 sub-functions:
+Other `VDU 23` sub-functions:
 
-VDU 23,1,0;0;0;0;0;   : hide the text cursor (caret)
+```basic
+VDU 23, 1, 0; 0; 0; 0; 0;   : hide the text cursor (caret)
+VDU 23, 1, 1; 0; 0; 0; 0;   : show the text cursor
+VDU 23, 7, m, d, 0; 0; 0;   : scroll the text viewport one cell
+                              (d: 0 = right, 1 = left, 2 = down, 3 = up)
+```
 
-VDU 23,1,1;0;0;0;0;   : show the text cursor
+The remaining `VDU 23` sub-functions (cursor appearance, cursor-movement flags, MODE 7 extensions, user-defined screen modes and the BBC line-thickness code) are accepted but have no effect on this fixed-resolution display. (For thick lines, use `LINEWIDTH` - see *Line width, joins and caps*.)
 
-VDU 23,7,m,d,0;0;0;   : scroll the text viewport one cell
-                        (d: 0 = right, 1 = left, 2 = down, 3 = up)
+# The More Advanced BerryBasiC Constructs
 
-The remaining VDU 23 sub-functions (cursor appearance, cursor-movement flags,
-MODE 7 extensions, user-defined screen modes and line thickness) are accepted
-but have no effect on this fixed-resolution display.
+Beside of the simple basic statements and constructs, ***BerryBasiC*** offers an interesting set of extensions to the language, partly because, why not, and then partly because they have proven quite useful in other programming languages, so it will just help the language borrowing them.
 
+## User-Defined Types (Records)
 
+An array holds many of *the same* thing. A record holds several *different* things under one name - an x and a y, a name and a score - so that they travel together. `TYPE` describes the shape; `DIM ... AS` gives it storage.
 
-# Graphics
+```basic
+TYPE point : x, y : ENDTYPE
+
+DIM p AS point
+p.x = 3
+p.y = 4
+PRINT p.x, p.y
+```
+
+### TYPE ... ENDTYPE - describing the shape
+
+```basic
+TYPE <name> : <field>, <field>, ... : ENDTYPE
+```
+
+Each field is named, and takes its kind from the **usual suffix**, exactly like a variable: `$` is text, `%` is a whole number, and a plain name is floating point.
+
+```basic
+TYPE player : name$, score%, health : ENDTYPE
+```
+
+The field list may be spread over as many lines as you like, separated by commas or colons. These two are the same type:
+
+```basic
+10 TYPE player : name$, score%, health : ENDTYPE
+```
+
+and
+
+```basic
+10 TYPE player
+20  name$,      
+30  score%,   
+40  health     
+50 ENDTYPE
+```
+
+`TYPE` is a **declaration that runs**, exactly like `DIM`: the statement has to execute before the type can be used, so put your types near the top of the program. `RUN` and `NEW` clear every type and record, so a program always starts from a clean slate.
+
+A type or field name may be a word that is otherwise a keyword - `TYPE point : size, time : ENDTYPE` is perfectly legal, even though `POINT`, `SIZE` and `TIME` all mean something elsewhere. Names appear only where nothing else could be intended, so there is no ambiguity to trip over. A `REM` comment is fine on a `TYPE` line too - it ends the line as it does anywhere else.
+
+### DIM ... AS - making one
+
+```basic
+DIM p AS point
+```
+
+Every field starts out zero (or empty, for text). A record variable never takes a `$` or `%` suffix - the *fields* carry the types, not the record.
+
+### Reading and Writing Fields
+
+Join the record and the field with a dot. A field behaves exactly like a variable of its kind, anywhere a variable can appear:
+
+```basic
+p.x = p.x + 1
+PRINT "at "; p.x; ","; p.y
+IF p.x > 100 THEN p.x = 0
+```
+
+That includes the statements that fill a variable from somewhere else - `READ`, `INPUT` and `INPUT#` all take a field just as happily as a variable:
+
+```basic
+READ p.x, p.y
+INPUT "position"; p.x, p.y
+```
+
+### Arrays of records
+
+Give `DIM ... AS` a size and you get many records instead of one - `DIM e(10)` makes elements `0` to `10`, as everywhere else in BerryBasiC:
+
+```basic
+TYPE enemy : x, y, hp : ENDTYPE
+DIM e(10) AS enemy
+
+FOR i = 0 TO 10
+  e(i).x = RND(320)
+  e(i).y = RND(240)
+  e(i).hp = 100
+NEXT
+PRINT e(3).x, e(3).hp
+```
+
+The index goes on the record, before the dot: `e(3).x`. An array of records has **one** dimension, and you must always index it - a bare `e.x` is an error, because there is no one element to mean.
+
+### Copying a record
+
+Assigning one record to another copies **every field across**:
+
+```basic
+DIM q AS point
+q = p                  ' q now holds its own copy of p's fields
+q.x = 99               ' ... and changing it leaves p alone
+```
+
+Both sides must be the same type. This works on elements too: `e(2) = p`, or `q = e(2)`.
+
+### Records and PROC / FN
+
+A record can be passed to a procedure or function. Mark the parameter with `AS` and the type it expects:
+
+```basic
+DEF PROCshow(r AS point)
+  PRINT r.x, r.y
+ENDPROC
+
+PROCshow(p)
+PROCshow(e(3))         ' one element of an array of records
+```
+
+> **Records pass by reference.** Unlike a number or a string, a record is *not* copied into the procedure: the parameter is another name for the caller's own record, so writing to it changes the original. This is what makes procedures that update a record work at all:
+
+```basic
+DEF PROCmove(r AS point, dx, dy)
+  r.x = r.x + dx
+  r.y = r.y + dy
+ENDPROC
+
+p.x = 0 : p.y = 0
+PROCmove(p, 3, 4)
+PRINT p.x, p.y         ' 3  4  - p itself changed
+```
+
+If you want the callee to work on a copy, make one yourself with `DIM tmp AS point : tmp = r`.
+
+Functions take record parameters the same way:
+
+```basic
+DEF FNdist2(a AS point) = a.x * a.x + a.y * a.y
+```
+
+A record argument needs an `AS` parameter to receive it, and an `AS` parameter needs a record argument - mixing them is an error rather than a surprise. Passing a *field* is ordinary: `PROCshow(p.x)` passes the number `p.x`, and needs a plain parameter.
+
+### What records don't do
+
+Records are deliberately a simple, flat container. A field may not itself be a record (no nesting), a function cannot return a record, and a whole array of records cannot be passed in one go - pass an element, or the index. `LOCAL` always makes a plain variable, never a record.
+
+### A More Complete Example
+
+```basic
+ 10 TYPE player : name$, score%, hp : ENDTYPE
+ 20 DIM team(2) AS player
+ 30 FOR i = 0 TO 2
+ 40   READ team(i).name$, team(i).score%
+ 50   team(i).hp = 100
+ 60 NEXT
+ 70 FOR i = 0 TO 2 : PROCreport(team(i)) : NEXT
+ 80 PROChurt(team(1), 30)
+ 90 PROCreport(team(1))
+100 END
+110 DEF PROCreport(p AS player)
+120   PRINT p.name$; " score "; p.score%; " hp "; p.hp
+130 ENDPROC
+140 DEF PROChurt(p AS player, n)
+150   p.hp = p.hp - n
+160 ENDPROC
+170 DATA "ann", 120, "bob", 95, "cy", 143
+```
+
+## Memory and Indirection
+
+Beyond variables and arrays, a program can reserve a block of raw bytes and read or write it directly with the indirection operators `?`, `!` and `$`. This is how you build a buffer to hand to a native seed for fast processing, or to pack binary data.
+
+### Reserving memory
+
+`DIM name size` - a name **without** parentheses - reserves `size + 1` bytes and puts the address of the first byte in the variable:
+
+```basic
+DIM BUF% 255             : REM 256 bytes; BUF% now holds their address
+```
+
+Use a numeric variable (typically a `%` integer, since it holds an address). The block lives until the next `RUN`/`NEW`. Reserve several at once with commas: `DIM A% 100, B% 1000`.
+
+### The indirection operators
+
+| Form     | Meaning                                                          |
+| -------- | ---------------------------------------------------------------- |
+| `?addr`  | the byte at `addr` (0-255)                                       |
+| `addr?n` | the byte at `addr + n`                                           |
+| `!addr`  | the 32-bit word at `addr` (little-endian, signed)                |
+| `addr!n` | the word at `addr + n`                                           |
+| `$addr`  | the string at `addr`, up to a carriage-return (`&0D`) terminator |
+
+They work on **both** sides of `=` - reading (peek) and writing (poke):
+
+```basic
+?BUF% = 65               : REM poke a byte
+BUF%?1 = 66              : REM poke the next byte
+PRINT ?BUF%, BUF%?1      : REM 65  66
+!BUF% = &12345678        : REM poke a 32-bit word (little-endian)
+PRINT BUF%?0             : REM 120  (&78, the low byte)
+$BUF% = "BERRY"          : REM write text plus a CR terminator
+PRINT $BUF%              : REM BERRY
+```
+
+Binary `?`/`!` bind tighter than arithmetic, so `BUF%?I + 1` is `(BUF%?I) + 1`. For an arithmetic *address* with the unary form, parenthesise it - `?(BUF% + 1)` - or just use the binary form, `BUF%?1`.
+
+### PEEK and POKE
+
+If you are coming from Microsoft-style BASICs, `PEEK` and `POKE` are provided as familiar aliases for byte access. They read and write exactly the same memory as `?`, so you can mix the two freely.
+
+| Alias          | Same as     |
+| -------------- | ----------- |
+| `POKE addr, b` | `?addr = b` |
+| `PEEK(addr)`   | `?addr`     |
+
+```basic
+10 DIM BUF 16
+20 POKE BUF, 65           : REM store a byte (kept modulo 256)
+30 POKE BUF + 1, 66
+40 PRINT PEEK(BUF); PEEK(BUF + 1)     : REM 65 66
+50 PRINT CHR$(PEEK(BUF))              : REM A
+```
+
+There is no separate `PEEK`/`POKE` for words or strings - use `!` for a 32-bit word and `$` for a string, as above.
+
+> On this bare-metal machine an address is a **real** memory address, not a slot in a 64 KB sandbox. `POKE`ing a made-up address can crash the system, so poke inside memory you reserved with `DIM name size` (as here) unless you are deliberately writing to a known hardware register. Classic pokes like `POKE 53280, 0` have no meaning here.
+
+## Dynamic Evaluation - EVAL and EXEC
+
+***BerryBasiC*** parses your program from its source text every time it runs a line, so it can just as easily parse text you build **while the program is running**. Two words expose that:
+
+- `EVAL(string)` - a **function** that parses `string` as an expression and returns its value.
+- `EXEC string` - a **statement** that runs `string` as a line of BASIC.
+
+Both work in the **current context**: they see the same variables, arrays and open loops as the code around them. This is what makes a calculator, a config-file reader, a lookup table of formulas, or an in-program command line only a few lines of code.
+
+### EVAL
+
+```basic
+result = EVAL(expression$)
+```
+
+`EVAL` evaluates the string exactly as if you had typed the expression in place, using all the usual operators, functions, variables and precedence. It returns whatever the expression is - a **number** or a **string**:
+
+```basic
+10 X = 5
+20 PRINT EVAL("2*X + 1")          : REM 11 - reads the current X
+30 PRINT EVAL("SQR(9) + 3*2")     : REM 9  - functions and precedence
+40 A$ = "foo" : B$ = "bar"
+50 PRINT EVAL("A$ + B$")          : REM foobar - a string result
+```
+
+An `EVAL` result drops straight into a larger expression, and `EVAL` may even appear inside the string it evaluates:
+
+```basic
+PRINT EVAL("X*2") + 100
+```
+
+A simple calculator is now one line - read a line of text and print its value:
+
+```basic
+10 REPEAT
+20   INPUT "> " expr$
+30   PRINT EVAL(expr$)
+40 UNTIL expr$ = ""
+```
+
+If the string is not a valid expression, `EVAL` raises `Syntax error in EVAL string` (or whatever specific error the expression itself triggers, such as a type mismatch). Wrap it in `TRY  CATCH` to keep a command loop alive:
+
+```basic
+10 TRY
+20   PRINT EVAL(expr$)
+30 CATCH
+40   PRINT "Sorry: "; ERR$
+50 ENDTRY
+```
+
+### EXEC
+
+```basic
+EXEC statement$
+```
+
+`EXEC` runs the string as if it were a line you typed - one statement or several separated by colons. It is the companion to `EVAL`: `EVAL` computes a value, `EXEC` performs an action. Because it runs in the current context, an assignment inside `EXEC` sets a real variable:
+
+```basic
+10 EXEC "Y = 7 * 6"
+20 PRINT Y                         : REM 42
+```
+
+The power is that you can **build the statement as text**, which gives you dynamic dispatch and table-driven code. Here the variable *name* is computed at run time:
+
+```basic
+10 FOR I = 1 TO 3
+20   EXEC "V" + STR$(I) + " = I*I"    : REM sets V1, V2, V3
+30 NEXT
+40 PRINT V1; V2; V3                   : REM 1 4 9
+```
+
+A line of statements works too, and control flow such as `GOTO`, `GOSUB` or `END` inside the string takes effect in your program:
+
+```basic
+10 EXEC "A=1 : B=2 : PRINT A+B"       : REM 3
+20 EXEC "GOTO 100"                    : REM jumps the program to line 100
+```
+
+Execution returns to whatever followed the `EXEC`, so you can keep going on the same line:
+
+```basic
+10 EXEC "PRINT 1+1" : PRINT "done"
+```
+
+> **Keep an `EXEC` string self-contained.** It is fine to branch out of an `EXEC`, but do not *open* a block you don't also close inside the same string - an `EXEC "FOR I=1 TO 3"` with the matching `NEXT` elsewhere leaves the loop pointing at text that no longer exists. Open and close a loop, `IF` block, or `TRY` within the one string, or not at all.
+
+### Where this is useful
+
+| Pattern                                      | How                                             |
+| -------------------------------------------- | ----------------------------------------------- |
+| Calculator / formula entry                   | `PRINT EVAL(line$)`                             |
+| Config file of `KEY = value` lines           | `EXEC line$` for each line read from the file   |
+| A table of formulas by name                  | store expression strings, `EVAL` the chosen one |
+| Dynamic dispatch (name computed at run time) | `EXEC "PROC" + cmd$ + "(x)"`                    |
+| An in-program command line                   | read a line, `EXEC` it inside `TRY ... CATCH`   |
+
+## WAIT
+
+`WAIT` pauses until the next frame boundary, pacing an animation or game loop to a steady **~60 Hz** so it runs at the same speed regardless of how quickly the machine gets through a frame's work:
+
+```basic
+10 REPEAT
+20   WAIT                : REM one tick, ~1/60 s
+30   PROC draw_frame
+40 UNTIL done%
+```
+
+This is frame *pacing* from the system timer, not a hardware vertical-blank interrupt (there isn't one on this path), so it steadies the loop's rate but does not by itself eliminate tearing. Pair it with **double buffering** (next) to compose each frame off-screen and show it all at once - flicker-free.
+
+## DELAY
+
+`DELAY n` pauses the program for `n` **centiseconds** (hundredths of a second - the same units as `TIME` and `INKEY`), so `DELAY 50` waits half a second and `DELAY 100` waits one second:
+
+```basic
+10 PINMODE 17, OUTPUT
+20 REPEAT
+30   PIN 17, 1 : DELAY 50        : REM LED on for 0.5 s
+40   PIN 17, 0 : DELAY 50        : REM LED off for 0.5 s
+50 UNTIL INKEY(0) <> -1
+```
+
+Use `DELAY` for a real, fixed pause - a blink, a pause between messages, a simple timed animation. Unlike a busy “counting” loop such as `REPEAT t=t+1 UNTIL t>1000`, whose duration depends entirely on how fast the machine runs (microseconds on this hardware - far too short to see), `DELAY` waits a genuine amount of *time* and behaves the same on any machine. A value of zero or less returns immediately, and queued `SOUND`/`TONE` audio keeps playing during the wait.
+
+`DELAY` blocks for its whole duration, so event handlers (`ON TIMER`, `ON KEY`, ...) do not run *during* a `DELAY`; for a loop that stays responsive between short pauses, use `WAIT` (above) instead.
+
+## Events - ON TIMER, ON PIN, ON MOUSE
+
+Instead of writing a loop that constantly checks the clock, or a pin, or the mouse, you can ask the machine to **run a procedure when something happens**. An event handler is an ordinary parameterless `PROC`; you register it once, and it runs by itself whenever its event fires:
+
+```basic
+10 SECONDS = 0
+20 ON TIMER 100 PROC tick          : REM run tick() every 100 centiseconds
+30 REPEAT
+40   REM ... the main program does its own work here ...
+50 UNTIL SECONDS >= 10
+60 END
+70 DEF PROC tick
+80   SECONDS = SECONDS + 1          : REM a handler shares the program's variables
+90 ENDPROC
+```
+
+Handlers and the main program share all variables, so a handler's usual job is to update some state that the main loop reads - no polling in the loop itself.
+
+### How and when handlers run
+
+Events are checked and dispatched **between statements** of your running program - never in the middle of one, and never from a hardware interrupt that could catch the interpreter in an inconsistent state. The practical consequences:
+
+- A handler fires between lines while your program is executing. A program that wants events to keep flowing should keep doing something (a `REPEAT ... UNTIL` loop, `WAIT`, ongoing work) rather than blocking in a single long `GET` or `INPUT`.
+- While a handler runs, other events are **held off** until it returns, so handlers never interrupt each other.
+- Handlers stop when the program stops, and every handler is cancelled at `RUN`.
+
+### The four sources
+
+```basic
+ON TIMER cs PROC name                REM every cs centiseconds
+ON KEY PROC name                     REM when a key is pressed
+ON PIN p PROC name                   REM on any edge of BCM pin p
+ON PIN p RISING PROC name            REM only low->high
+ON PIN p FALLING PROC name           REM only high->low
+ON MOUSE PROC name                   REM when the pointer moves or a button changes
+```
+
+Each can be cancelled with `OFF`:
+
+```basic
+ON TIMER OFF
+ON KEY OFF
+ON PIN 27 OFF          : REM this pin only
+ON PIN OFF             : REM all pin handlers
+ON MOUSE OFF
+```
+
+### Reading the key in an ON KEY handler
+
+When `ON KEY` fires, the key that triggered it is waiting to be read: the handler picks it up with `GET`, `GET$` or `INKEY(0)`, which return that exact key.
+
+```basic
+10 ON KEY PROC typed
+20 REPEAT : WAIT : UNTIL FALSE       : REM idle; the handler does the work
+30 DEF PROC typed
+40   K = GET
+50   IF K = 27 THEN PRINT "escape!"  : REM 27 = Esc
+60   IF K >= 32 THEN PRINT "you typed "; CHR$(K)
+70 ENDPROC
+```
+
+If the handler doesn't read the key, it stays queued for the next `GET` in the program, so a keystroke is never lost. (As with all events, a program blocked in a plain `GET` at the top level won't dispatch `ON KEY` - keep the idle in a loop, as above.)
+
+`ON PIN` sets up the pin's edge detection for you (you'll still usually `PINMODE p, INPUT PULLUP` first so it reads cleanly); up to eight pins can have handlers at once. `ON PIN` needs real hardware - on the host build it raises `GPIO needs the Pi, not the host build`.
+
+A worked button example:
+
+```basic
+10 PINMODE 27, INPUT PULLUP
+20 ON PIN 27 FALLING PROC pressed    : REM button to ground = a falling edge
+30 REPEAT : WAIT : UNTIL FALSE       : REM idle; the handler does the work
+40 DEF PROC pressed
+50   PRINT "button!"
+60 ENDPROC
+```
+
+# Debugging
+
+***BerryBasiC*** has a built-in debugger. It can pause a running program, step through it a line (or a statement) at a time, inspect and change variables while stopped, break on a line, on a `PROC`/`FN` call, on any keyword (even `PRINT`), on a write to a variable, or on an error, and log every line it runs to a file. The same machinery drives three front-ends: the built-in console stepper (no setup - just `TRACE ON` or `BREAK`), a full-screen debugger you launch with `debug PROG.BAS`, and the debugger built into the `ed` editor (set breakpoints in the gutter, then **Basic ▸ Debug**). This section covers the BASIC surface; the graphical front-ends are in *Native Code and Toolchain*.
+
+## Turning it on
+
+`TRACE ON` arms the debugger and single-steps: it stops before the very next line. `TRACE OFF` disarms it. With nothing else set, a stop shows the current line and waits for one key:
+
+| Key | Action |
+|---|---|
+| `space` / `s` | step **into** the next line |
+| `o` | step **over** (run a `PROC`/`FN` call on this line without descending) |
+| `u` | step **out** (run to where the current `PROC`/`FN` returns) |
+| `c` | continue freely (to the next breakpoint, or the end) |
+| `v` | list the variables |
+| `b` | print the call stack |
+| `q` | abort the program (raises `Stopped by user`) |
+
+## Breakpoints
+
+| Statement | Meaning |
+|---|---|
+| `BREAK line` | stop before that line, each time it is reached |
+| `BREAK line IF expr` | stop only when `expr` is true (evaluated in the program's own context) |
+| `BREAK line EVERY n` | stop on every `n`-th hit |
+| `BREAK line AFTER n` | stop only after `n` hits have passed |
+| `BREAK PROC name` | stop when a `PROC`/`FN` is called |
+| `BREAK KEYWORD "PRINT"` | stop before every use of a keyword (any keyword, by name) |
+| `BREAK ERROR` | drop into the debugger at the line that raises an error, with state still live |
+| `UNBREAK line` | remove a line breakpoint |
+| `UNBREAK ALL` | remove every breakpoint |
+| `UNBREAK ERROR` | stop breaking on errors |
+
+Breakpoints persist across `RUN` (so you can `BREAK 20 : RUN`); `NEW` clears them.
+
+## Watchpoints
+
+`WATCH var` stops the moment `var` is written, so you can catch *what changes a value* rather than guessing where. `WATCH var IF expr` narrows it to writes where a condition holds. `SHOW var` is a display-only watch: the variable is printed at every stop but never causes one.
+
+```basic
+10 WATCH total
+20 FOR I = 1 TO 5 : total = total + I : NEXT
+```
+
+## While stopped
+
+At a stop you can read and change the live program state. `DBGLINE` is the line the program is stopped on (0 when it is running normally); `ERR` and `ERR$` hold the code and message at a `BREAK ERROR` stop. `SET var = expr` changes a variable in place; `STEP`, `STEP OVER`, `STEP OUT` and `CONT` resume; `BACKTRACE` prints the `PROC`/`FN` call stack.
+
+## A handler in BASIC - `ON DEBUG`
+
+`ON DEBUG PROC handler` registers a `PROC` that runs at every stop, so you can instrument a program without leaving BASIC. The handler can read any variable, print, even change values, then `STEP` or `CONT` to decide how to resume - a breakpoint with an action, in a few lines of BASIC.
+
+```basic
+10 ON DEBUG PROC log
+20 BREAK 60
+30 FOR I = 1 TO 3
+40   T = T + I
+50 NEXT
+60 PRINT "sum so far: "; T
+70 END
+80 DEF PROClog
+90   PRINT "  [line "; DBGLINE; " T="; T; "]"
+100  CONT
+110 ENDPROC
+```
+
+## Tracing to a file
+
+`TRACE TO "file"` logs every line as it runs to a file and keeps running (it never stops), until `TRACE OFF`. Add `,CALLS` to also log `PROC`/`FN` entry and return (`> PROCname (from line N)` on the way in, `< PROCname` on the way out). This coexists with breakpoints - you can trace to a file and still stop at a breakpoint.
+
+```basic
+10 TRACE TO "RUN.LOG", CALLS
+20 GOSUB 100
+30 TRACE OFF
+```
+
+`STEP STMT` (instead of plain `STEP`) stops between the `:`-separated statements on a line, not just at each line.
+
+## Profiling - where the time goes
+
+`PROFILE ON` arms a per-line profiler; it then counts how many times each line runs and how long each one takes, across the next `RUN`. `PROFILE OFF` disarms it. `PROFILE` (on its own) prints the report - the executed lines with their hit counts and total time, hottest first - so you can see where a slow program actually spends its time. Each `RUN` starts a fresh count.
+
+```basic
+10 FOR I = 1 TO 1000
+20   T = T + FNslow(I)
+30 NEXT
+40 END
+50 DEF FNslow(n) = n*n + SQR(n)
+```
+```
+PROFILE ON
+RUN
+PROFILE
+```
+prints something like:
+```
+  line     hits        ms  source
+    20     1000     4.021  T = T + FNslow(I)
+    50     1000     3.110  DEF FNslow(n) = n*n + SQR(n)
+    10     1000     0.240  FOR I = 1 TO 1000
+```
+The profiler shares the interpreter's line hook, so it costs nothing when it is off.
+
+# BGI: The BerryBasiC Graphics Interface
+
+***BerryBasiC*** has **two graphics coordinate modes**, chosen with `MODE`. `MODE 1` (the default) uses BBC-style **logical coordinates**: x runs 0 to 1279, y runs 0 to 1023, with the origin at the **bottom-left** (y increases upwards - the opposite of the mouse's pixel coordinates), and the whole logical space is scaled onto the panel so a program looks the same at any resolution. `MODE 2` is **native**: coordinates are physical framebuffer pixels at the current resolution, with the origin at the **top-left** and y increasing downwards - the convention every modern graphics API, the mouse, and the seed graphics all use. The two modes are compared in *MODE* below; everything else in this chapter (colours, shapes, sprites, text, buffering) works identically in both. Unless a section says otherwise, its examples are written for the default `MODE 1`.
+
+The low-level primitives below are the classic BBC set; with an extended graphics library set that follows, and adds high-level shapes, truecolour with sprites and animation on top of them.
+
+## Screen resolution
+
+Those logical coordinates are independent of the **physical** resolution: `CIRCLE 640, 512, 300` always draws in the middle of the screen whether the display is 320×240 or 1920×1080. A higher resolution just makes graphics sharper and fits more characters of text on a line; a lower one makes them chunkier.
+
+By default the machine runs at its **startup resolution** (set at build time / in `config.txt`). A program can pick a different resolution while it runs with `SCREEN`, and the system returns to the startup resolution automatically when the program finishes.
+
+### SCREEN
+
+Switch the physical display resolution.
+
+```basic
+SCREEN width, height
+```
+
+`width` and `height` are in pixels (clamped to a sensible range). Switching clears the screen. Use it at the start of a program that wants a particular resolution:
+
+```basic
+10 SCREEN 320, 240      : REM small and chunky
+20 CIRCLE 640, 512, 400 : REM still addressed in logical coordinates
+```
+
+The previous sentence can be exemplified by the following illustration:
+
+![The mapping of Logical Screen Space to Physical Resolution](screen.png)
+
+`SCREEN` on its own restores the **startup** resolution:
+
+```basic
+SCREEN
+```
+
+You normally don't need it: when a program ends (or stops with an error), the startup resolution is restored for you. If a program never calls `SCREEN`, nothing changes and the screen is not cleared.
+
+> Because the framebuffer is genuinely re-allocated by the GPU, `SCREEN` only takes effect on real hardware and under QEMU. On backends without a display it is a no-op.
+
+### SCREENW / SCREENH
+
+Report the current physical resolution in pixels.
+
+```basic
+10 PRINT "Running at "; SCREENW; " x "; SCREENH
+```
 
 ## MODE
 
-MODE 1
+`MODE n` selects the graphics **coordinate mode** and, like the BBC's `MODE`, resets the graphics state - it restores the default palette, clears the text and graphics viewports, resets the graphics origin, and clears the screen. Unlike BBC BASIC the number does **not** change the resolution (use `SCREEN` for that); what it chooses is how coordinates are read.
 
-Select graphics mode.
+```basic
+MODE 1        : REM BBC logical coordinates (the default)
+MODE 2        : REM native pixel coordinates
+```
 
+Only `1` and `2` are valid; any other number raises `No such graphics mode` and leaves the mode unchanged.
 
+|  | `MODE 1` (legacy BBC, default) | `MODE 2` (native) |
+|---|---|---|
+| Coordinate space | fixed 1280 × 1024 logical | current resolution (`SCREENW` × `SCREENH`) |
+| Origin | bottom-left | **top-left** |
+| y direction | up | **down** |
+| Scaling | logical → physical, resolution-independent | **1:1, none** |
+| Lengths (radius, etc.) | scaled to the panel | 1:1 pixels |
+| Same program on a bigger screen | same layout, sharper | **covers more area** (pixels are absolute) |
+| Matches `MOUSEX`/`MOUSEY` | no (needs a flip + scale) | **yes, exactly** |
+| Matches seed graphics coords | no (needs conversion) | **yes, exactly** |
 
-## GCOL
+`MODE 1` is the default and the mode every other example in this manual assumes. **Boot, `RUN`, `NEW` and the end of a program all return to `MODE 1`**, so the prompt is always in `MODE 1` and an existing program never inherits `MODE 2` from a previous run.
 
-GCOL 1
+### MODE 2 - native coordinates
 
-or
+In `MODE 2` one BASIC unit is one physical pixel, the origin is the top-left corner, and y grows downward. Use it when you want **pixel-exact** work:
 
-GCOL action,colour
+- a UI or HUD laid out to the pixel;
+- a sprite-heavy game where positions are absolute pixels;
+- anything that mixes drawing with the **mouse** (`MOUSEX`/`MOUSEY` are already in these coordinates - no flip, no scale) or with a **native seed** (seed graphics draw in exactly this space, so a seed and the BASIC program that calls it finally agree on where a pixel is).
 
-Example:
+```basic
+10 MODE 2
+20 GCOL 255, 0, 0 : PLOT 69, 0, 0                 : REM the TOP-LEFT pixel
+30 CIRCLE FILL SCREENW/2, SCREENH/2, 100          : REM centred, radius exactly 100 px
+```
 
-GCOL 0,3
+Because coordinates are physical pixels, in `MODE 2` a `SCREEN` change moves the **drawable range**: after `SCREEN 800, 600`, valid x is 0..799 and y is 0..599. (In `MODE 1` a `SCREEN` change leaves coordinates alone - that is the point of logical units.)
 
+> **The trade-off.** A `MODE 2` program is **not** resolution-independent: the same code covers a different amount of screen on a different panel, because a pixel is a pixel. That is the deliberate price of pixel-exactness. If you want a layout that looks the same everywhere, use `MODE 1`; if you want to address the panel exactly as it is, use `MODE 2`.
 
+The same square in each mode - both fill the upper-left quadrant, from opposite conventions:
+
+```basic
+10 MODE 1 : RECTANGLE FILL 0, 512, 640, 512               : REM upper-left (y up)
+20 A = GET
+30 MODE 2 : RECTANGLE FILL 0, 0, SCREENW/2, SCREENH/2     : REM upper-left (y down)
+```
+
+### GMODE
+
+`GMODE` reads back the active graphics mode (`1` or `2`) - so a library that must work in either can branch on it:
+
+```basic
+IF GMODE = 2 THEN y = MY ELSE y = 1023 - MY      : REM adapt to the coordinate convention
+```
+
+## GCOL - graphics colour and plot action
+
+`GCOL` sets the colour (and, optionally, the *plot action*) used by all subsequent plotting. It has three forms:
+
+```basic
+GCOL c               : logical colour c (0-7), plot action 0 (store)
+GCOL action, c       : logical colour c with an explicit plot action
+GCOL r, g, b         : a 24-bit truecolour foreground (see the Graphics Library)
+```
+
+The **plot action** controls how a plotted pixel combines with what is already on the screen:
+
+| Action | Effect                                            |
+| ------ | ------------------------------------------------- |
+| 0      | store the colour (overwrite)                      |
+| 1      | OR with the existing pixel                        |
+| 2      | AND with the existing pixel                       |
+| 3      | EOR (exclusive-or) with the existing pixel        |
+| 4      | invert the existing pixel (the colour is ignored) |
+
+EOR (action 3) is especially useful for animation: drawing the same shape twice in EOR mode leaves the screen unchanged, so you can move a sprite without erasing the background.
+
+```basic
+GCOL 0, 3            : REM plot in logical colour 3, overwrite
+GCOL 3, 1            : REM EOR mode, logical colour 1
+```
 
 ## PLOT
 
-PLOT code,x,y
+`PLOT code, x, y` is the low-level drawing primitive; the *code* selects what to draw and whether the coordinates are absolute or relative to the last point. `MOVE` and `DRAW` (below) are the two you will use most; a fuller set of the standard codes:
 
-Example:
+| Code | Meaning                                                                  |
+| ---- | ------------------------------------------------------------------------ |
+| 4    | move to absolute (x, y) - same as `MOVE`                                 |
+| 5    | draw a line to absolute (x, y) in the foreground colour - same as `DRAW` |
+| 0    | move *relative* by (x, y)                                                |
+| 1    | draw a line *relative* by (x, y)                                         |
+| 69   | plot a single point at absolute (x, y)                                   |
 
-PLOT 69,100,100
+```basic
+PLOT 69, 100, 100    : REM a single point
+PLOT 4, 0, 0         : REM move to the origin
+PLOT 5, 500, 500     : REM draw a line to (500,500)
+```
 
-
+(The exact set of higher-numbered codes - filled triangles, circles and so on - depends on the display driver; `LINE`, `RECTANGLE`, `CIRCLE` and friends in the *Graphics Library* give a friendlier way to reach the same results.)
 
 ## MOVE
 
-Equivalent to:
+Move the graphics cursor to (x, y) without drawing. Equivalent to `PLOT 4, x, y`.
 
-PLOT 4,x,y
-
-Usage:
-
-MOVE 100,100
-
-
+```basic
+MOVE 100, 100
+```
 
 ## DRAW
 
-Equivalent to:
+Draw a line from the graphics cursor to (x, y) in the current foreground colour, then leave the cursor there. Equivalent to `PLOT 5, x, y`.
 
-PLOT 5,x,y
-
-Usage:
-
-DRAW 200,200
-
-
+```basic
+MOVE 100, 100
+DRAW 200, 200
+```
 
 ## CLG
 
-Clear graphics screen.
+Clears the graphics area (to the graphics background colour), within the current graphics viewport.
 
+```basic
 CLG
-
-
+```
 
 ## POINT
 
-Read pixel colour/value.
+`POINT(x, y)` reads back the logical colour of the pixel at (x, y) - the inverse of plotting.
 
-C = POINT(X,Y)
+```basic
+C = POINT(100, 100)
+```
 
+## The Extended Graphics Library
 
+The extended graphics library adds high-level shape, colour and sprite statements on top of the low-level `PLOT`/`MOVE`/`DRAW` primitives. All coordinates are BBC logical units (x in 0..1279, y in 0..1023, origin bottom-left). Every shape is drawn in the current graphics foreground colour and honours the current `GCOL` plot action (store / OR / AND / EOR / invert).
 
-# Program Control Commands
+### Truecolour (RGB)
 
-## RUN
+The eight logical colours (0..7) still exist, but you can also draw in any 24-bit colour. There are two ways.
 
-Execute program.
+Give `GCOL` three arguments - red, green and blue, each 0..255:
 
-RUN
+```basic
+GCOL 255, 128, 0         : REM orange foreground
+```
 
-RUN clears variables before execution.
+Or use the `RGB` function to pack a colour into a single value that `GCOL` accepts wherever a colour number is expected:
 
+```basic
+GCOL RGB(0, 128, 255)    : REM sky-blue foreground
+C = RGB(255, 0, 255)
+GCOL 3, C                : REM plot action 3 (EOR) in magenta
+```
 
+`RGB(r, g, b)` returns a tagged value that is distinct from the logical colour numbers 0..7, so `GCOL c` and `GCOL action, c` recognise it automatically.
 
-## LIST
+The following short snippet generates the colourful circle below it.
 
-Display the stored program. Keywords are shown in UPPERCASE; variable names,
-strings and REM comments are shown as you typed them.
+```basic
+10 REM RainbowCircle - BerryBasiC TrueColor Demo
+20 MODE 1
+30 DIM RR(6), GG(6), BB(6)
+40 FOR I = 0 TO 6 : READ RR(I), GG(I), BB(I) : NEXT
+50 DATA 255,0,0, 255,127,0, 255,255,0, 0,255,0
+60 DATA 0,0,255, 75,0,130, 148,0,211
+70 CX = 640 : CY = 512 : MAXR = 400
+80 FOR RD = MAXR TO 1 STEP -1
+90   P = (MAXR - RD) / MAXR * 6
+100  I = INT(P) : IF I > 5 THEN I = 5
+110  F = P - I
+120  R = RR(I) + (RR(I+1) - RR(I)) * F
+130  G = GG(I) + (GG(I+1) - GG(I)) * F
+140  B = BB(I) + (BB(I+1) - BB(I)) * F
+150  GCOL R, G, B
+160  CIRCLE FILL CX, CY, RD
+170 NEXT
+180 END
+```
 
-LIST
+![Rainbow Circle](circle.png)
 
-List a single line, a range, from a line, or up to a line:
+ 
 
-LIST 100
+### COLOUR l, r, g, b - Redefine a Palette Slot
 
-LIST 100,200
+Redefine one of the eight logical colours to an arbitrary RGB value. After this, `GCOL 2` (and text `COLOUR 2`) use the new colour:
 
-LIST 100,
+```basic
+COLOUR 2, 255, 128, 0    : REM make logical colour 2 orange
+```
 
-LIST ,200
+(The single-argument `COLOUR n` still selects a text colour - see *Screen Control*.)
 
+### LINE
 
+Draw a straight line between two points.
 
-## AUTO
+```basic
+LINE x1, y1, x2, y2
+LINE 100, 100, 1100, 700
+```
 
-Enter automatic line-numbering. After AUTO, each line you type is given the next
-number automatically, so you can just type the program. Press Return on an empty
-line (i.e. without adding anything after the offered number) to leave AUTO.
+### RECTANGLE
 
-AUTO
+Draw a rectangle whose bottom-left corner is (x, y), `w` wide and `h` high. Add `FILL` for a solid rectangle; without it only the outline is drawn.
 
-or, choosing the first number and the step:
+```basic
+RECTANGLE x, y, w, h
+RECTANGLE FILL x, y, w, h
+RECTANGLE FILL 500, 400, 200, 150
+```
 
-AUTO 100,10
+### CIRCLE
 
-The default is AUTO 10,10 (start at 10, step 10).
+Draw a circle centred at (x, y) with radius `r` (outline, or solid with `FILL`). The circle is round on screen regardless of the physical aspect ratio.
 
+```basic
+CIRCLE x, y, r
+CIRCLE FILL x, y, r
+CIRCLE FILL 300, 500, 120
+```
 
+### ELLIPSE
 
-## RENUMBER
+Draw an ellipse centred at (x, y) with horizontal radius `rx` and vertical radius `ry` (outline, or solid with `FILL`).
 
-Renumber the whole program, and fix up every line-number reference (the targets
-of GOTO, GOSUB, RESTORE, THEN, ELSE and the lists of ON ... GOTO / ON ... GOSUB)
-so the program still runs correctly.
+```basic
+ELLIPSE x, y, rx, ry
+ELLIPSE FILL x, y, rx, ry
+ELLIPSE FILL 640, 512, 300, 150
+```
 
-RENUMBER
+### FILL
 
-or, choosing the first number and the step:
+Flood-fill the connected region containing the point (x, y) with the current foreground colour. The region is bounded by any pixel of a different colour.
 
-RENUMBER 100,10
+```basic
+RECTANGLE 200, 150, 150, 120
+GCOL 255, 0, 255
+FILL 275, 210            : REM fill the inside of the outline
+```
 
-The default is RENUMBER 10,10. References to a line that does not exist are left
-unchanged.
+Note the two uses of the word `FILL`: as a *modifier* right after a shape keyword (`RECTANGLE FILL ...`) it makes that shape solid; as a *statement* on its own (`FILL x, y`) it flood-fills from a point.
 
+### Line width, joins and caps
 
+By default every line and outline is a **hairline** - one pixel wide. `LINEWIDTH` sets a thicker pen, and `LINEJOIN` / `LINECAP` control how the corners and ends of those thick strokes are finished. The pen affects `LINE`, `DRAW`, `PLOT` lines, and the *outline* form of `RECTANGLE`, `CIRCLE` and `ELLIPSE` (a `FILL`ed shape is unaffected).
 
-## EDIT
+#### LINEWIDTH
 
-Recall a program line into the input line so you can edit it instead of retyping
-it. The line appears ready to edit; press Return to store the changes.
+`LINEWIDTH n` sets the pen width in **coordinate units** - so it scales with the screen the same way a radius does (`LINEWIDTH 10` in `MODE 1` is ten logical units; in `MODE 2` it is ten pixels). `LINEWIDTH 1` (or 0) restores the fast one-pixel hairline.
 
-EDIT 150
+```basic
+10 LINEWIDTH 6
+20 LINE 100, 100, 900, 700        : REM a 6-unit-thick line
+30 CIRCLE 500, 400, 200           : REM ... and a 6-unit-thick ring
+```
 
+#### LINEJOIN - corners of an outline
 
+`LINEJOIN` chooses how the corners of a stroked outline (a `RECTANGLE`, or a seed polygon) are joined:
 
-## Line editing
+| `LINEJOIN` | Corner |
+|-----------|--------|
+| `MITER` (the default) | extended to a **sharp** point (`MITRE` is accepted too) |
+| `BEVEL` | cut off **flat** across the corner |
+| `ROUND` | **rounded** off with an arc |
 
-While typing a line (at the prompt, during AUTO, or after EDIT) the following
-keys are available:
+```basic
+10 LINEWIDTH 16
+20 LINEJOIN BEVEL : RECTANGLE 100, 100, 300, 200    : REM clipped corners
+30 LINEJOIN ROUND : RECTANGLE 500, 100, 300, 200    : REM rounded corners
+```
 
-| Key            | Action |
-|----------------|--------|
-| Left / Right   | move the cursor within the line |
-| Home / End     | jump to the start / end of the line |
-| Backspace      | delete the character before the cursor |
-| Delete         | delete the character at the cursor |
-| Up / Down      | recall previous / next commands from the history |
+A very sharp miter (a narrow spike) automatically falls back to a bevel, so it never shoots off to infinity.
 
+#### LINECAP - ends of a line
 
+`LINECAP` chooses how the open ends of a thick line are finished:
 
-## NEW
+| `LINECAP` | End |
+|----------|-----|
+| `BUTT` (the default) | cut off **square** exactly at the end point |
+| `ROUND` | a **half-disc** past the end point |
+| `SQUARE` | a **square** extending half the width past the end point |
 
-Delete current program.
+```basic
+10 LINEWIDTH 20 : LINECAP ROUND
+20 LINE 200, 400, 900, 400        : REM a thick line with rounded ends
+```
 
-NEW
+The pen resets to its default (width 1, miter joins, butt caps) on `MODE`, `RUN` and `NEW`, so a program always starts with a hairline.
 
-Also clears variables and control stacks.
+> Thick strokes are drawn as filled shapes, so they compose correctly in **store** mode (the default) and under a truecolour `GCOL`. A thick stroke drawn in an `EOR`/`AND` plot action can double-hit where its pieces overlap at a join, so those actions are best kept for hairlines.
 
+### Sprites - GGET and GPUT
 
+A sprite is a rectangular block of pixels captured from the screen into a reserved memory buffer (see `DIM`), so it can be stamped back elsewhere.
 
-## STOP
+`GGET` captures the rectangle between the two corners (x1, y1) and (x2, y2) into the buffer at `addr`. The buffer must be large enough to hold an 8-byte header plus 4 bytes per pixel: `width * height * 4 + 8` bytes.
 
-Terminate execution.
+```basic
+GGET addr, x1, y1, x2, y2
+```
 
-STOP
+`GPUT` stamps a previously captured sprite so that its top-left corner sits at the logical point (x, y). The blit honours the current `GCOL` plot action, so an EOR sprite can be drawn and un-drawn for flicker-free animation.
 
+```basic
+GPUT addr, x, y
+```
 
+Example:
 
-## END
+```basic
+DIM S% 60000             : REM reserve a sprite buffer
+GGET S%, 220, 440, 340, 560
+GPUT S%, 800, 300
+```
 
-Terminate execution immediately.
+#### Loading sprites from image files - LOADSPRITE
 
-END
+`LOADSPRITE` decodes an image file from the SD card into a sprite and returns its address, ready to pass to `GPUT`. Supported formats are **PNG**, **JPEG** and **BMP**. Unlike `GGET`, you do not reserve a buffer with `DIM` - the sprite is stored in a managed pool sized for the image, and the pool is emptied whenever a program is `RUN` or the variables are cleared.
 
+```basic
+addr = LOADSPRITE("filename")
+```
 
+`addr` is the sprite address, or **0** if the file is missing, unreadable, of an unsupported format, or too large for the pool. Always check for 0.
 
-# Storage (SD card)
+`SPRW(addr)` and `SPRH(addr)` return a sprite's width and height in pixels (read from its header), so you can centre or tile it.
 
-Programs and data live on the SD card's FAT filesystem. File names may be given
-quoted or bare; if you give no extension, `.BAS` is assumed (so `LOAD WELCOME`
-opens `WELCOME.BAS`). Names are 8.3 (up to eight characters, a dot, a three-letter
-extension), as the card is FAT.
+The image is drawn at one screen pixel per image pixel (no scaling), with the image's top-left corner placed at the logical point given to `GPUT`. Only images up to the screen size can be stamped.
 
-## SAVE
+**Transparency:** `GPUT` honours a sprite's alpha channel. Fully transparent pixels are skipped (the background shows through), fully opaque pixels are drawn normally, and partially transparent pixels (e.g. the smooth edges of a PNG cut-out) are blended over whatever is already on screen. So a PNG of a character on a transparent background draws cleanly over your scene. Images with no alpha channel (JPEG/BMP, or an opaque PNG) are fully opaque, as are `GGET` captures.
 
-Writes the current program to a file.
+```basic
+128 cat% = LOADSPRITE("CAT.PNG")
+130 IF cat% = 0 THEN PRINT "Could not load CAT.PNG" : END
+140 PRINT "Loaded "; SPRW(cat%); " x "; SPRH(cat%)
+150 GPUT cat%, 500, 700
+```
 
-    SAVE "GAME"           : REM -> GAME.BAS
-    SAVE "DATA.TXT"
+#### Saving sprites to image files - SAVESPRITE
 
-## LOAD
+`SAVESPRITE` writes a sprite back out to an image file on the SD card. The sprite can be one loaded with `LOADSPRITE`, or a region of the screen captured with `GGET` - so `GGET` + `SAVESPRITE` is also a way to take a **screenshot**.
 
-Clears the current program and variables, then loads a program from a file.
+```basic
+SAVESPRITE addr, "filename"
+```
 
-    LOAD "GAME"
+The format is **PNG** (which preserves the alpha channel), unless the filename ends in `.bmp`, in which case a 24-bit BMP is written. If the file cannot be written, the program stops with a `Could not save sprite` error.
 
-## CAT / DIR
+```basic
+200 DIM S% 200000               : REM room for the captured pixels
+210 GGET S%, 100, 900, 400, 600 : REM grab a rectangle of the screen
+220 SAVESPRITE S%, "SHOT.PNG"
+```
 
-Lists the files on the card. `CAT` and `DIR` are the same command.
+Because PNG round-trips alpha, you can load a transparent sprite and save it again without losing its transparency.
 
-    CAT
+#### Scaled and rotated blits - GPUT with transforms
 
-## DELETE
+`GPUT` takes two optional extra arguments, a **scale** and an **angle**, to stamp a sprite enlarged/shrunk and spun:
 
-Removes a file from the card.
+```basic
+GPUT addr, x, y, scale, angle
+```
 
-    DELETE "OLD.BAS"
+`scale` is a floating-point factor (`1.0` = original size, `2.0` = double, `0.5` = half). `angle` is in **degrees, clockwise**, about the sprite's centre. The transformed sprite is positioned so its centre lands where the plain `GPUT addr, x, y` would put the un-transformed sprite's centre - so `GPUT a, x, y, 1, 0` is identical to `GPUT a, x, y`. A `scale` of zero or less draws nothing; the angle is taken modulo 360. Alpha, the `GCOL` plot action and the tint (below) all still apply.
 
-These commands work on a whole program (or, for `DELETE`, any file). To read and
-write your own **data files** byte by byte, use the file-handling commands below.
+```basic
+10 cat% = LOADSPRITE("CAT.PNG")
+20 a = 0
+30 REPEAT
+40   WAIT : CLG
+50   GPUT cat%, 500, 400, 2.0, a     : REM double size, spinning
+60   FLIP
+70   a = (a + 3) MOD 360
+80 UNTIL INKEY(0) <> -1
+```
 
+Rotation and scaling use nearest-pixel sampling (fast, with a slightly blocky look on steep angles).
 
+#### Tinting sprites - GTINT
 
-# File Handling
+`GTINT` sets a **tint** colour that every subsequently blitted sprite is blended toward, like `GCOL` is drawing state:
 
-A program can open a file on the SD card as a **channel** and read or write its
-bytes directly. Writes go straight to the real FAT filesystem, so the files can be
-read on a PC (and by other programs). Up to four files may be open at once.
+```basic
+GTINT r, g, b, a      : REM tint toward (r,g,b) by strength a (0-255)
+GTINT OFF             : REM stop tinting
+```
 
-Open a file with one of three functions, each returning a channel number (a small
-positive integer), or **0** if it could not be opened:
+Each drawn pixel becomes `lerp(sprite, (r,g,b), a/255)` while its own transparency is preserved, so `GTINT 255,0,0,128` gives a half-strength red flash and `GTINT 255,255,255,255` whites a sprite out completely. The tint applies to both `GPUT` forms and is reset when a program is `RUN`.
 
-| Function | Opens a file for… | If the file… |
-|----------|-------------------|--------------|
-| `OPENIN "name"`  | reading            | doesn't exist → returns 0 |
-| `OPENOUT "name"` | writing (creates, or **empties** an existing file) | is created fresh |
-| `OPENUP "name"`  | reading *and* writing | doesn't exist → returns 0 |
+```basic
+100 GTINT 255, 0, 0, 120 : GPUT hero%, x, y : GTINT OFF   : REM hero flashes red when hit
+```
+
+#### Rendering Into a Sprite - NEWSPRITE and SPRITETARGET
+
+You can draw *into* a sprite instead of onto the screen, then stamp the finished sprite cheaply many times. `NEWSPRITE` initialises a `DIM` buffer as a blank, fully **transparent** sprite of a given pixel size:
+
+```basic
+NEWSPRITE addr, w, h      : REM buffer needs w*h*4 + 8 bytes, as for GGET
+```
+
+`SPRITETARGET addr` then redirects **all** drawing (`PLOT`, shapes, `GPUT`, text, `CLG`, `POINT`) into that sprite. While a sprite is the target, coordinates are the sprite's own pixels with the origin at the **bottom-left**, `0 ... w-1` by `0 ... h-1` - so a shape at `(w/2, h/2)` sits in the middle. `CLG` clears the sprite back to transparent. `SPRITETARGET OFF` returns drawing to the screen (or the back buffer, if `BUFFER ON`).
+
+```basic
+10 DIM badge% 40000
+20 NEWSPRITE badge%, 96, 96
+30 SPRITETARGET badge%
+40   CLG : GCOL 0,1 : CIRCLE FILL 48, 48, 46    : REM compose the badge once...
+50   GCOL 0,3 : MOVE 20,48 : DRAW 76,48
+60 SPRITETARGET OFF
+70 FOR i = 0 TO 9 : GPUT badge%, i*120, 700 : NEXT   : REM ...then stamp it cheaply
+```
+
+Only one sprite target is active at a time. Use render-to-sprite to pre-compose complex sprites, build a tilesheet at run time, or capture a scene for a transition.
+
+### Tilemaps - TILEMAP
+
+`TILEMAP` draws a scrolling grid of tiles in a single call - a whole background in one statement instead of a BASIC loop:
+
+```basic
+TILEMAP sheet, map, cols, rows, tilew, tileh, scrollx, scrolly
+```
+
+- `sheet` - a sprite (from `LOADSPRITE`, `GGET`, or a `NEWSPRITE`/`SPRITETARGET` render) holding the tiles, packed left-to-right then top-to-bottom; the tiles-per-row is `SPRW(sheet) DIV tilew`.
+- `map` - a block of `cols*rows` 32-bit words, row-major (top row first). Build it in a `DIM` buffer with the `!` word operator. A value of **0 means empty** (that cell is skipped, so the background shows through); a value **k ≥ 1** draws sheet tile **k-1**.
+- `tilew`, `tileh` - the tile size in pixels.
+- `scrollx`, `scrolly` - a pixel offset; increase them to scroll the world left/up.
+
+Only the visible tiles are drawn, clipped to the current viewport, honouring the tint and the current draw target (screen, back buffer, or a sprite). A smooth scroller is then just a `BUFFER`/`WAIT`/`TILEMAP`/`FLIP` loop:
+
+```basic
+10 sheet% = LOADSPRITE("TILES.PNG")     : REM e.g. a 64px, 4-tile sheet
+20 DIM map% 8*8*4                        : REM an 8x8 grid of tile indices
+30 FOR i = 0 TO 63 : map%!(i*4) = 1 + (i MOD 3) : NEXT
+40 BUFFER ON : sx = 0
+50 REPEAT
+60   WAIT : CLG
+70   TILEMAP sheet%, map%, 8, 8, 64, 64, sx, 0
+80   FLIP
+90   sx = (sx + 4) MOD (8*64)
+100 UNTIL INKEY(0) <> -1
+```
+
+### TrueType Fonts
+
+The built-in font is a chunky bitmap face, perfect for a retro screen. When you want **smooth, scalable lettering** - titles, labels, a game's score, a clock - ***BerryBasiC*** can load a real **TrueType font** (`.ttf`) from the SD card and draw anti-aliased text at any size, in any colour, with bold, italic and underline. It uses the same rendering path as sprites, so text honours the graphics colour, the plot action, the viewport, `GTINT` and the current draw target (back buffer or `SPRITETARGET`).
+
+Put a `.ttf` on the card (the Philosopher font ships as `PHILO.TTF`) and the flow is: load it, choose a size and style, then draw.
+
+```basic
+10 F = LOADFONT("PHILO.TTF")
+20 IF F = 0 THEN PRINT "No font" : END
+30 GCOL 255, 220, 0
+40 FONTSIZE 64
+50 GTEXT 100, 500, "Hello, world!"
+```
+
+#### LOADFONT - load a font file
+
+`LOADFONT(filename$)` reads a TrueType font and returns a **handle** (a small number, 1 upward) that identifies it; it also makes that font the current one. It returns **0** on failure - the file is missing, is not a font, or too many fonts are loaded (up to 8 at once). Loaded fonts are released when a program is `RUN` or `NEW`ed, so load them at the start of a run.
+
+A bare name (no `/`) is searched for first in the **program's own directory**, then in **`/sys/fonts`** - the home for every installed font, so `LOADFONT("PHILO.TTF")` finds the bundled Philosopher font from anywhere on the card. Put your own `.ttf` next to your program to override, or in `/sys/fonts` to make it available everywhere. A name that contains a path (`"art/title.ttf"`) is taken exactly as given. The same search backs `<graphics.h>`'s `loadfont` in a seed or POD, so native code finds fonts the same way.
+
+```basic
+TITLE = LOADFONT("PHILO.TTF")
+BODY  = LOADFONT("SERIF.TTF")     : REM several fonts can be open at once
+```
+
+#### FONT - choose the current font
+
+`FONT handle` makes a previously loaded font current. Everything drawn afterwards uses it, until the next `FONT`. An unknown handle raises `No such font`.
+
+```basic
+FONT TITLE : FONTSIZE 72 : GTEXT 80, 900, "Chapter One"
+FONT BODY  : FONTSIZE 28 : GTEXT 80, 820, "Once upon a time..."
+```
+
+#### FONTSIZE - set the size
+
+`FONTSIZE pixels` sets the glyph height, in **pixels**, for the current font. Text is rendered crisply at that pixel size regardless of the logical coordinate system, so it stays sharp at every screen resolution. The size takes effect for the following `GTEXT` calls.
+
+```basic
+FONTSIZE 96 : GTEXT 100, 700, "BIG"
+FONTSIZE 18 : GTEXT 100, 660, "small"
+```
+
+#### FONTSTYLE - bold, italic, underline
+
+`FONTSTYLE bold [, italic [, underline]]` turns each attribute on (`1`) or off (`0`); omitted flags default to `0`. Bold and italic are **synthetic** (the strokes are thickened and slanted), so they work with any font, not just ones that ship a bold or italic file.
+
+```basic
+FONTSTYLE 1          : REM bold
+FONTSTYLE 0, 1       : REM italic
+FONTSTYLE 1, 1, 1    : REM bold + italic + underline
+FONTSTYLE 0, 0, 0    : REM back to plain
+```
+
+#### GTEXT - draw text
+
+`GTEXT x, y, string$` draws the text with the current font, size, style and graphics colour. `(x, y)` is the logical coordinate of the **baseline** at the start of the string (the same coordinate space as `LINE`, `CIRCLE` and the rest), with the letters sitting upright above it. Set the colour first with `GCOL`.
+
+```basic
+GCOL 120, 200, 255
+FONTSIZE 40
+GTEXT 60, 500, "cornflower text"
+```
+
+Because text is drawn like a sprite, it works inside a double-buffered frame, into a `SPRITETARGET`, and under `GTINT` - so it animates and composites just like everything else.
+
+#### Measuring text - TEXTWIDTH and FONTHEIGHT
+
+To position text precisely you need its size. `TEXTWIDTH(string$)` returns how many **pixels** wide the string is in the current font, size and style; `FONTHEIGHT` returns the line height (ascent plus descent) in pixels. Together they let you centre, right-align, or lay out lines.
+
+```basic
+100 M$ = "Centred!"
+110 X = 640 - TEXTWIDTH(M$) / 2      : REM centre horizontally on a 1280-wide screen
+120 GTEXT X, 500, M$
+130 REM stack lines one FONTHEIGHT apart
+140 Y = 400
+150 FOR I = 1 TO 3
+160   GTEXT 60, Y, "line " + STR$(I)
+170   Y = Y - FONTHEIGHT - 4
+180 NEXT
+```
+
+> **Getting a font onto the card.** `make sdimage` copies every `.ttf` in the repo's `fonts/` folder onto the data partition (and adds the short `PHILO.TTF` alias of the bundled Philosopher font). To add your own, drop the `.ttf` in `fonts/` and rebuild the card, or copy it straight onto the FAT partition. Names follow the usual filesystem rules (a long name works, but a short 8.3 name like `MYFONT.TTF` is tidiest to type).
+
+### Double Buffering
+
+Without help, a clear-then-draw loop can *flicker*: the screen is briefly blank (or half-drawn) between the `CLG` and the last shape, and you see it. **Double buffering** fixes this. You draw the whole frame into a hidden **back buffer**, then present it in one step with `FLIP`, so the viewer only ever sees complete frames.
+
+#### BUFFER ON / BUFFER OFF
+
+`BUFFER ON` allocates a full-screen back buffer and routes *all* drawing to it - `PLOT`, `MOVE`/`DRAW`, the shape library, `GPUT`, `TILEMAP`, text, and `CLG` - while the visible screen is frozen. `BUFFER OFF` sends drawing straight back to the visible screen. Buffering is turned off automatically when a program ends, so the prompt is always visible.
+
+#### FLIP
+
+`FLIP` copies the back buffer onto the visible screen. Nothing you draw while buffered appears until you `FLIP`. With buffering off, `FLIP` does nothing (harmless).
+
+#### The Standard Frame Loop
+
+`WAIT` · `CLG` · draw · `FLIP` is the animation loop this pairs with:
+
+```basic
+10 BUFFER ON
+20 x = 0
+30 REPEAT
+40   WAIT                       : REM steady ~60 Hz
+50   CLG                        : REM clear the back buffer
+60   CIRCLE FILL x, 512, 60      : REM draw this frame off-screen
+70   FLIP                       : REM show it, all at once
+80   x = (x + 8) MOD 1280
+90 UNTIL INKEY(0) <> -1
+100 BUFFER OFF
+```
+
+The circle glides across with no flicker. Because the back buffer keeps its contents after a `FLIP`, you normally `CLG` and redraw every frame (as above). `POINT` while buffered reads the **back** buffer, so a program can test what it has drawn this frame.
+
+Combining all this information presented till now into the following program, feel free to study it and learn how sprite rendering and animation work in one stage.
+
+``` basic
+10 REM Rainbow disc pre-rendered into a sprite, then glided
+20 MODE 1
+30 SZ = 160 : RMAX = 80
+40 DIM SPR% SZ * SZ * 4 + 8
+50 NEWSPRITE SPR%, SZ, SZ
+60 DIM RR(6), GG(6), BB(6)
+70 FOR I = 0 TO 6 : READ RR(I), GG(I), BB(I) : NEXT
+80 DATA 255,0,0, 255,127,0, 255,255,0, 0,255,0
+90 DATA 0,0,255, 75,0,130, 148,0,211
+100 REM --- render the rainbow ONCE, off-screen into the sprite ---
+110 SPRITETARGET SPR%
+120 FOR RD = RMAX TO 1 STEP -1
+130   P = (RMAX - RD) / RMAX * 6
+140   I = INT(P) : IF I > 5 THEN I = 5
+150   F = P - I
+160   GCOL RR(I)+(RR(I+1)-RR(I))*F, GG(I)+(GG(I+1)-GG(I))*F, BB(I)+(BB(I+1)-BB(I))*F
+170   CIRCLE FILL SZ/2, SZ/2, RD
+180 NEXT
+190 SPRITETARGET OFF
+200 REM --- now just stamp it each frame ---
+210 BUFFER ON
+220 x = 0
+230 REPEAT
+240   WAIT
+250   CLG
+260   GPUT SPR%, x, 592
+270   FLIP
+280   x = (x + 8) MOD 1280
+290 UNTIL INKEY(0) <> -1
+300 BUFFER OFF
+```
+
+# Sound
+
+BerryBasiC plays sound through the Raspberry Pi 4's **3.5 mm analogue jack** (a single square-wave voice driven by the PWM hardware). Sound is **queued and plays in the background**: a `SOUND` or `TONE` statement returns immediately and the note plays while your program carries on. There are four channels, each with its own note queue; because there is one physical voice, when several channels have a note due the lowest-numbered channel is the one you hear (the others still count down, so they are never starved).
+
+> Sound only comes out on **real hardware**. QEMU's `raspi4b` does not emulate the PWM audio device, so under the emulator `SOUND` / `TONE` run but stay silent.
+
+## SOUND
+
+BBC-style tone. Queues a note on a channel.
+
+```basic
+SOUND channel, amplitude, pitch, duration
+```
+
+| Argument    | Meaning                                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `channel`   | 0-3. Independent note queues.                                                                                             |
+| `amplitude` | Loudness. BBC's `-15`...`0` and a plain `0`...`15` both work; `0` is silent, `15` (or `-15`) is loudest.                  |
+| `pitch`     | 0-255 in **quarter-semitone** steps (4 = one semitone, 48 = one octave). `53` = middle C, `89` = the A above it (440 Hz). |
+| `duration`  | Length in **twentieths of a second** (`20` = one second). `-1` plays until replaced.                                      |
+
+```basic
+10 REM a rising arpeggio on channel 1
+20 SOUND 1, -15, 53, 10      : REM middle C
+30 SOUND 1, -15, 69, 10      : REM E
+40 SOUND 1, -15, 81, 10      : REM G
+50 SOUND 1, -15, 89, 20      : REM high A, held longer
+```
+
+The four notes queue up and play one after another while the program continues past line 50.
+
+## TONE
+
+A direct, non-BBC helper: play an exact frequency for a number of milliseconds. Queues on channel 0.
+
+```basic
+TONE frequency_hz, duration_ms [, volume]
+```
+
+`volume` is 0-15 and defaults to 15 (full). A `duration_ms` of `-1` plays until replaced.
+
+```basic
+10 TONE 440, 500            : REM concert A for half a second
+20 TONE 880, 500, 8         : REM an octave up, quieter
+```
+
+## SOUND OFF
+
+Silence everything immediately and empty all the queues.
+
+```basic
+SOUND OFF
+```
+
+Sound is also reset automatically whenever a program is `RUN`.
+
+---
+
+# Raw Basic
+
+Without taking into consideration that ***BerryBasiC*** runs directly on a real Raspberry Pi 4, it would be just another fancy BASIC dialect - perhaps with a few modern conveniences and a nostalgic feel, but ultimately living in the same category as countless other BASIC implementations.
+
+The real difference comes from its ability to interact directly with the hardware. ***BerryBasiC*** is not merely a language running *on top of* an operating system; it has access to the underlying machine itself. It can communicate with the GPIO pins, interact with peripherals, access memory-mapped hardware, and perform operations that are normally hidden behind multiple layers of abstraction.
+
+This raw machine access changes the role of the language completely. A program written in BerryBasiC is not limited to printing text and calculating numbers - it can control the physical world. LEDs can blink, sensors can be read, motors can be driven, and custom hardware projects can be built using the same simplicity that made BASIC popular decades ago.
+
+That combination of an approachable programming language and direct hardware control is what elevates ***BerryBasiC*** beyond being just another BASIC dialect. It brings back the spirit of early home computers, where learning to program also meant learning how the machine itself worked.
+
+## GPIO (the 40-pin header)
+
+BerryBasiC can drive and read the Raspberry Pi 4's **40-pin GPIO header** - the pins that connect to LEDs, buttons, sensors and add-on boards. Phase one is plain **digital I/O**: set a pin as an output and turn it on or off, or set it as an input and read whether it is high or low.
+
+> **Pin numbers are BCM, not header positions.** `PIN 17` means **BCM GPIO 17**, which is physical pin 11 on the header - *not* the eleventh... not the seventeenth pin along. Every command and function on this page uses BCM numbering. Mixing this up is the single most common wiring mistake; keep a BCM pinout diagram next to you.
+
+![Pi GPIO Pinout](GPIO.png)
+
+Valid pins are **BCM 0-27** (the pins broken out on the header). Anything outside that range raises `No such pin`; the higher-numbered lines drive the SD card and other system hardware and are deliberately out of reach. BCM **0** and **1** are reserved for a HAT's ID EEPROM - avoid them for your own wiring.
+
+> GPIO works on **real hardware and under QEMU**. On the host test build there is no header, so every GPIO command raises `GPIO needs the Pi, not the host build`.
+
+### Safety: pins reset on RUN
+
+Every time a program is `RUN` (and on `NEW`, `LOAD`, and at power-on) **all header pins are reset to inputs with no pull resistor**. A program can never leave a pin still driving an LED or a motor after it stops - starting a new program always begins from a clean, safe state.
+
+### PINMODE
+
+Configure what a pin does.
+
+```basic
+PINMODE pin, OUTPUT
+PINMODE pin, INPUT
+PINMODE pin, INPUT PULLUP
+PINMODE pin, INPUT PULLDOWN
+PINMODE pin, ALT function
+```
+
+| Mode             | Meaning                                                                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `OUTPUT`         | The pin drives a voltage - use it to light an LED or switch something on.                                           |
+| `INPUT`          | The pin reads a voltage; no internal pull resistor (the pin floats unless something drives it).                     |
+| `INPUT PULLUP`   | Input with an internal **pull-up**, so it idles **high** (1) and a button to ground reads **low** (0) when pressed. |
+| `INPUT PULLDOWN` | Input with an internal **pull-down**, so it idles **low** (0).                                                      |
+| `ALT function`   | Select an **alternate function** `0`-`5` - used to hand the pin to a bus peripheral (I²C, SPI, UART, PWM).          |
+
+An unknown mode word, or an `ALT` function outside 0-5, raises `Bad pin mode`.
+
+### PIN - write and read
+
+As a **statement**, `PIN` drives an output pin:
+
+```basic
+PIN pin, level          : REM level 0 = low, any non-zero = high
+```
+
+As a **function**, `PIN(pin)` reads a pin's current level and returns `0` or `1`:
+
+```basic
+IF PIN(27) = 0 THEN PRINT "button pressed"
+```
+
+### PINS, PINSET, PINCLR - the whole port at once
+
+For speed, or to change several pins together, you can work with all the header pins as one 32-bit value (bit *n* is BCM pin *n*; only bits 0-27 are on the header, and bits 28-31 read back as 0).
+
+```basic
+PINSET mask       : REM drive high every pin whose bit is 1 in mask (atomic)
+PINCLR mask       : REM drive low  every pin whose bit is 1 in mask (atomic)
+x = PINS          : REM read all pin levels at once
+```
+
+`PINSET` and `PINCLR` are **atomic**: they touch only the pins in the mask and leave the rest exactly as they were. Build a mask with `SHL` (shift a 1 into position):
+
+```basic
+PINSET SHL(1,17) OR SHL(1,22)     : REM turn BCM 17 and 22 on together
+```
+
+### PINWAIT - wait for an edge
+
+Polling a pin in a tight `REPEAT` loop works, but if all you want is to block until something happens, `PINWAIT` does it in one call:
+
+```basic
+p = PINWAIT(pin, edge, timeout)
+```
+
+It waits for an **edge** - a change of level - on `pin`, and returns:
+
+- the **pin number** when the edge arrives, or
+- **`-1`** if `timeout` centiseconds (hundredths of a second) pass first.
+
+`edge` is `0` for a **falling** edge (hightolow) or `1` for a **rising** edge (lowtohigh). A `timeout` of `0` checks once and returns immediately. The shape mirrors `INKEY`: a real result, or `-1` for "nothing happened in time".
+
+```basic
+10 PINMODE 27, INPUT PULLUP
+20 PRINT "Press the button..."
+30 IF PINWAIT(27, 0, 500) = -1 THEN PRINT "timed out" ELSE PRINT "got it"
+```
+
+Here the button idles high (pull-up) and grounds the pin when pressed, so the press is a **falling** edge; we wait up to five seconds for it.
+
+### Examples
+
+**Blink** an LED (with a series resistor) on BCM 17 once a second, until a key is pressed. `DELAY` gives each on/off phase a real half-second, so the blink looks the same on any machine:
+
+```basic
+10 PINMODE 17, OUTPUT
+20 REPEAT
+30   PIN 17, 1 : DELAY 50         : REM LED on for 0.5 s
+40   PIN 17, 0 : DELAY 50         : REM LED off for 0.5 s
+50 UNTIL INKEY(0) <> -1
+```
+
+> **Don't time with an empty loop.** A busy-wait such as `REPEAT t=t+1 UNTIL t>10` is *not* a reliable delay: it runs in microseconds on this hardware, so the LED toggles hundreds of thousands of times a second and just looks steadily lit. Use `DELAY` (centiseconds) for a real, CPU-independent pause. See *DELAY* for details.
+
+**Read a button** wired from BCM 27 to ground, using the internal pull-up so it idles high and reads 0 when pressed:
+
+```basic
+10 PINMODE 27, INPUT PULLUP
+20 REPEAT
+30   IF PIN(27) = 0 THEN PRINT "pressed"
+40 UNTIL FALSE
+```
+
+**Self-test with a single jumper** from BCM 23 to BCM 24 - proves write, read and whole-port access all agree:
+
+```basic
+10 PINMODE 23, OUTPUT
+20 PINMODE 24, INPUT
+30 PIN 23, 1 : IF PIN(24) <> 1 THEN PRINT "FAIL high" : END
+40 PIN 23, 0 : IF PIN(24) <> 0 THEN PRINT "FAIL low"  : END
+50 PINSET SHL(1,23) : IF (PINS AND SHL(1,24)) = 0 THEN PRINT "FAIL mask" : END
+60 PRINT "GPIO OK"
+```
+
+### GPIO errors
+
+| Message                                 | Cause                                                                |
+| --------------------------------------- | -------------------------------------------------------------------- |
+| `No such pin`                           | A pin number outside BCM 0-27.                                       |
+| `Bad pin mode`                          | An unrecognised `PINMODE` mode, or an `ALT` function outside 0-5.    |
+| `GPIO needs the Pi, not the host build` | A GPIO command was used on the host test build, which has no header. |
+
+## I2C
+
+Many add-on boards - LCD/OLED displays, real-time clocks, temperature and motion sensors, port expanders - talk over **I2C**, a two-wire bus. The Pi 4's primary I2C bus is on the header: **SDA** on BCM 2 (physical pin 3) and **SCL** on BCM 3 (physical pin 5). BerryBasiC drives it as a bus *master*: you address a device by its **7-bit address** and write or read bytes.
+
+You do not need to set the pins up - the first I2C statement configures BCM 2/3 for you (and the bus is released, like the GPIO pins, whenever a program is `RUN`).
+
+> **Real hardware only.** The BSC controller behind I2C is not emulated by QEMU, so these words work only on a real Pi 4. On the emulator or the host build they raise `I2C needs real Pi hardware` (rather than hang). Wiring notes: I2C needs pull-up resistors on SDA and SCL to 3.3 V (many breakout boards include them); use 3.3 V logic, never 5 V, on these pins.
+
+### Writing - I2CWRITE
+
+```basic
+I2CWRITE addr, byte1 [, byte2, ...]
+```
+
+Sends the listed bytes to the device at `addr` in one transaction. The bytes are ordinary numbers 0-255. This is the common case - a register number followed by the value(s) to put there, or a single control byte:
+
+```basic
+10 I2CWRITE &27, &08              : REM one control byte to the device at 0x27
+20 I2CWRITE &68, 0, 30            : REM write value 30 into register 0 of device 0x68
+```
+
+(`&` introduces a hexadecimal number, so `&27` is 39 and `&68` is 104.) If no device acknowledges, the statement raises `I2C write failed` - which you can catch with `TRY ... CATCH`.
+
+### Reading - I2CREAD
+
+```basic
+I2CREAD addr, buf, count
+```
+
+Reads `count` bytes from the device at `addr` into the reserved buffer `buf` (a block from `DIM buf n`). Read the bytes back out with the `?` byte-indirection operator. To read a device *register*, write the register number first, then read:
+
+```basic
+10 DIM buf 8
+20 I2CWRITE &68, 0                : REM point the device at register 0
+30 I2CREAD  &68, buf, 2           : REM read 2 bytes from it
+40 PRINT ?buf; " "; ?(buf + 1)    : REM the two bytes
+```
+
+A failed read raises `I2C read failed`.
+
+### Scanning - I2CPROBE
+
+`I2CPROBE(addr)` returns `TRUE` if a device acknowledges at `addr`, `FALSE` otherwise - the building block of a bus scan, handy for finding a board whose address you don't know:
+
+```basic
+10 PRINT "Devices found:"
+20 FOR a = 8 TO 119               : REM the valid 7-bit address range
+30   IF I2CPROBE(a) THEN PRINT "  address "; a
+40 NEXT
+```
+
+(Addresses are shown here in decimal; the same numbers written in hex - e.g. `&27` for 39 - are what a device's datasheet usually quotes.)
+
+## Notes and limits
+
+- Addresses are **7-bit** (`8` ... `119`); the read/write direction bit is handled for you.
+- The bus runs in standard mode (about 100 kHz), which every device supports.
+- `I2CWRITE` sends up to 64 bytes per statement; more than that raises `Too many bytes`.
+- A register read is done as a write followed by a separate read (a stop in between), which nearly all devices accept. A tiny number of devices insist on a *repeated start* and won't work this way.
+- A stuck bus can't lock the machine up: each transfer gives up after a short safety timeout and raises an error.
+
+# Files and Storage
+
+BerryBasiC provides extensive support for file management, allowing programs and data to be stored directly on the SD card's FAT filesystem. The file system is an essential part of any practical programming environment, and BerryBasiC treats it as a first-class feature rather than an afterthought.
+
+Files can be accessed using either quoted file names or bare names, giving programmers flexibility depending on the situation. For example, the following commands refer to the same file:
+
+```basic
+LOAD "WELCOME.BAS"
+LOAD WELCOME
+```
+
+When no file extension is specified, BerryBasiC automatically assumes the `.BAS` extension for BASIC programs. This means that:
+
+```basic
+LOAD WELCOME
+```
+
+will automatically open:
+
+```
+WELCOME.BAS
+```
+
+This small convenience saves typing and keeps programs cleaner, while still allowing full file names to be used when working with other types of files.
+
+BerryBasiC also supports long file names, removing one of the classic limitations of early FAT-based systems. Programs are no longer restricted to the traditional 8.3 naming convention, allowing files to have descriptive names that are easier to recognize and manage.
+
+Behind the scenes, BerryBasiC works directly with the FAT filesystem on the Raspberry Pi's SD card, bringing together the simplicity of BASIC programming with the flexibility of modern file storage.
+
+## Long file names
+
+The card is FAT, whose native names are **8.3** - up to eight characters, a dot, a three-letter extension. BerryBasiC supports **VFAT long file names** on top of that, so you are not limited to 8.3:
+
+```basic
+SAVE "My Space Game"                 : REM -> "My Space Game.bas"
+CH = OPENOUT("Weather Log 2026.txt") : REM create a long-named data file
+MKDIR "My Projects"                  : REM long-named directory
+CH = OPENIN("My Holiday Photos.txt") : REM open one a PC made
+```
+
+Long names are **created** by `SAVE`, `OPENOUT`, `MKDIR` (and read by `LOAD`, `OPENIN`, `DIR`, `DIROPEN`/`DIRNAME$`, `CD`), and are **deleted** cleanly by `DELETE`/`RMDIR` and replaced by overwriting. Matching is case-insensitive, and names may contain accented letters (`brød.bas`, `Größe.dat`) - they display and round-trip because the console is 8-bit.
+
+Behind the scenes each long name also gets a classic `NAME~1.EXT` short alias, so the files are fully interchangeable with a PC: names you make here read correctly on a computer, and long names a computer made read correctly here. A name that already fits 8.3 (like `GAME.BAS`) is stored as a plain 8.3 entry with no overhead.
+
+## Directories
+
+The card can hold **subdirectories**, and every file command accepts a **path**. Components are separated by `/`. A path starting with `/` is absolute (from the top of the card); otherwise it is relative to the **current directory**.
+
+| Command      | Meaning                                                             |
+| ------------ | ------------------------------------------------------------------- |
+| `MKDIR name` | create a directory                                                  |
+| `CD name`    | change the current directory (`CD ..` goes up, `CD /` to the top)   |
+| `RMDIR name` | remove a directory (it must be empty)                               |
+| `PWD`        | print the current directory                                         |
+
+Because file commands take paths, you can read and write anywhere on the card:
+
+```basic
+MKDIR "SPRITES"
+cat% = LOADSPRITE("SPRITES/CAT.PNG")
+SAVE "LEVELS/LEVEL1"          : REM -> LEVELS/LEVEL1.BAS
+OPENIN("/DATA/SCORES.DAT")    : REM absolute path
+```
+
+The path may be typed **with or without quotes**: `CD examples`, `CD ..` and `CD /SYS/LIB` all work bare, and so do `CAT`, `LOAD`, `SAVE`, `DELETE`, `PODINFO` and friends (`LOAD welcome` finds `WELCOME.BAS`). Quotes are only needed when a name contains a **space**: `MKDIR "My Projects"` then `CD "My Projects"` (see *Long file names* above). The path is a **literal** either way (quoted or not) rather than an expression, so it is taken exactly as typed; `MKDIR`, `CD` and `RMDIR` add no automatic `.BAS`.
+
+### Reading a directory in a program
+
+`CAT` prints a listing, but a program can also **walk** a directory itself and read each entry's details. Point the scanner at a directory with `DIROPEN`, then call `DIRNEXT` repeatedly; each time it returns `TRUE` (`-1`) it has stepped onto the next entry, whose fields you then read with the words below. It returns `FALSE` (`0`) when there are no more entries.
+
+| Word              | Result                                                                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `DIROPEN("path")` | begin scanning a directory. Returns `TRUE` if it opened, `FALSE` if not. `DIROPEN(".")` or `DIROPEN("")` scans the current directory. |
+| `DIRNEXT`         | step to the next entry; `TRUE` while one was read, `FALSE` at the end                                                                 |
+| `DIRNAME$`        | the current entry's name (e.g. `"CAT.PNG"`)                                                                                           |
+| `DIRTYPE`         | `TRUE` if the entry is a directory, `FALSE` if it is a file                                                                           |
+| `DIRSIZE`         | the file's size in bytes (`0` for a directory)                                                                                        |
+| `DIRDATE$`        | last-modified date as `"YYYY-MM-DD"`                                                                                                  |
+| `DIRTIME$`        | last-modified time as `"HH:MM"`                                                                                                       |
+
+Only one scan is active at a time, and `.` / `..` are not reported. Test `DIROPEN` directly as a condition - `IF DIROPEN(p$) THEN ...` - rather than comparing it (writing `DIROPEN(p$) = 0` does not work).
+
+```basic
+10 IF DIROPEN("/") THEN 30
+20 PRINT "cannot open" : END
+30 IF DIRNEXT = FALSE THEN 80
+40 IF DIRTYPE THEN PRINT DIRNAME$, "<DIR>" : GOTO 30
+50 PRINT DIRNAME$, DIRSIZE; " bytes  "; DIRDATE$; " "; DIRTIME$
+60 GOTO 30
+80 PRINT "done"
+```
+
+## File Handling
+
+A program can open a file on the SD card as a **channel** and read or write its bytes directly. Writes go straight to the real FAT filesystem, so the files can be read on a PC (and by other programs). Up to four files may be open at once.
+
+Open a file with one of three functions, each returning a channel number (a small positive integer). If the file cannot be opened they **raise an error** (which a `TRY ... CATCH` can handle - see *Error Handling*), rather than returning a value you must remember to test:
+
+| Function         | Opens a file for...                                          | If the file...                          |
+| ---------------- | ------------------------------------------------------------ | --------------------------------------- |
+| `OPENIN "name"`  | reading                                                      | doesn't exist to raises `File not found`  |
+| `OPENOUT "name"` | writing (creates a new file, or **empties** an existing one) | is created fresh (`Can't create file` if it can't be) |
+| `OPENUP "name"`  | reading *and* writing                                        | doesn't exist to raises `File not found`  |
+
+To open a file that may not exist without stopping the program, wrap the `OPENIN` in a `TRY ... CATCH` block:
+
+```basic
+10 TRY
+20   C = OPENIN "SCORES.DAT"
+30   PRINT "loaded, "; EXT# C; " bytes" : CLOSE# C
+40 CATCH
+50   PRINT "no saved scores yet"
+60 ENDTRY
+```
 
 All the other file words take a channel after a `#`:
 
-| Command | Meaning |
-|---------|---------|
-| `BGET# ch`         | Read and return the next byte (`0`–`255`), or `-1` at end of file |
-| `BPUT# ch, n`      | Write the byte `n AND 255` |
-| `BPUT# ch, A$`     | Write every byte of the string `A$` |
-| `EOF# ch`          | `TRUE` (`-1`) when the file pointer is at the end, else `FALSE` (`0`) |
-| `EXT# ch`          | The length of the file in bytes |
-| `PTR# ch`          | The current read/write position (0 = start) |
-| `PTR# ch = n`      | Move the position to byte `n` (0 to `EXT#`, so `PTR# ch = EXT# ch` appends) |
-| `CLOSE# ch`        | Close the channel (writes are finalised here); `CLOSE# 0` closes every open channel |
+| Command        | Meaning                                                                             |
+| -------------- | ----------------------------------------------------------------------------------- |
+| `BGET# ch`     | read and return the next byte (0-255), or `-1` at end of file                       |
+| `BPUT# ch, n`  | write the byte `n AND 255`                                                          |
+| `BPUT# ch, A$` | write every byte of the string `A$`                                                 |
+| `EOF# ch`      | `TRUE` (`-1`) when the file pointer is at the end, else `FALSE` (`0`)               |
+| `EXT# ch`      | the length of the file in bytes                                                     |
+| `PTR# ch`      | the current read/write position (0 = start)                                         |
+| `PTR# ch = n`  | move the position to byte `n` (0 to `EXT#`; `PTR# ch = EXT# ch` appends)            |
+| `CLOSE# ch`    | close the channel (writes are finalised here); `CLOSE# 0` closes every open channel |
 
-Reading advances the pointer by one byte; so does writing. Seeking with `PTR#`
-lets you re-read or overwrite any part of the file.
+Reading advances the pointer by one byte; so does writing. Seeking with `PTR#` lets you re-read or overwrite any part of the file.
 
-    10 C = OPENOUT "SCORES.DAT"
-    20 FOR I = 1 TO 8 : BPUT# C, I*I : NEXT   : REM write eight bytes
-    30 BPUT# C, "END"                          : REM append the bytes of a string
-    40 CLOSE# C
-    50 C = OPENIN "SCORES.DAT"
-    60 PRINT "length ="; EXT# C
-    70 REPEAT : PRINT BGET# C; " "; : UNTIL EOF# C
-    80 PRINT
-    90 PTR# C = 3 : PRINT "byte 3 ="; BGET# C   : REM random access
-    100 CLOSE# C
+```basic
+10 C = OPENOUT "SCORES.DAT"
+20 FOR I = 1 TO 8 : BPUT# C, I * I : NEXT   : REM write eight bytes
+30 BPUT# C, "END"                            : REM append the bytes of a string
+40 CLOSE# C
+50 C = OPENIN "SCORES.DAT"
+60 PRINT "length = "; EXT# C
+70 REPEAT : PRINT BGET# C; " "; : UNTIL EOF# C
+80 PRINT
+90 PTR# C = 3 : PRINT "byte 3 = "; BGET# C   : REM random access
+100 CLOSE# C
+```
 
-> Always `CLOSE#` a file you have written — the final data and the file's length
-> are committed to the card on close. `CLOSE# 0` is a quick way to close everything
-> (for example in an error handler or at the end of a program).
+> Always `CLOSE#` a file you have written - the final data and the file's length are committed to the card on close. `CLOSE# 0` is a quick way to close everything (for example in an error handler or at the end of a program).
 
-## PRINT# and INPUT# (typed records)
+### `PRINT#` and `INPUT#` (typed records)
 
-`BGET#`/`BPUT#` work a byte at a time. When you want to store whole **numbers and
-strings** and get them back with their types intact, use `PRINT#` to write and
-`INPUT#` to read. Each value is stored as a self-describing record, so you read
-them back in the same order you wrote them:
+`BGET#` / `BPUT#` work a byte at a time. When you want to store whole **numbers and strings** and get them back with their types intact, use `PRINT#` to write and `INPUT#` to read. Each value is stored as a self-describing record, so you read them back in the same order you wrote them:
 
-    PRINT# ch, expr, expr, ...   : REM write a list of numbers and/or strings
-    INPUT# ch, var,  var,  ...   : REM read them back into variables
+```basic
+PRINT# ch, expr, expr, ...   : REM write a list of numbers and/or strings
+INPUT# ch, var,  var,  ...   : REM read them back into variables
+```
 
-The variables in `INPUT#` may be simple variables or array elements, and their
-types must match the records in the file (a number into a numeric variable, a
-string into a `$` variable).
+The variables in `INPUT#` may be simple variables or array elements, and their types must match the records in the file (a number into a numeric variable, a string into a `$` variable).
 
-    10 C = OPENOUT "SAVE.DAT"
-    20 PRINT# C, "Level", 7, SCORE, NAME$      : REM mix strings and numbers freely
-    30 CLOSE# C
-    40 C = OPENIN "SAVE.DAT"
-    50 INPUT# C, TITLE$, LVL, SC, NAME$
-    60 CLOSE# C
+```basic
+10 C = OPENOUT "SAVE.DAT"
+20 PRINT# C, "Level", 7, SCORE, NAME$      : REM mix strings and numbers freely
+30 CLOSE# C
+40 C = OPENIN "SAVE.DAT"
+50 INPUT# C, TITLE$, LVL, SC, NAME$
+60 CLOSE# C
+```
 
-On disk each record is a tag byte followed by its data — a number is `&40` plus
-eight bytes (an IEEE-754 double, little-endian); a string is `&00`, a one-byte
-length, then the characters. You can freely mix `BPUT#`/`BGET#` and
-`PRINT#`/`INPUT#` on the same file if you keep track of the layout yourself.
+On disk each record is a tag byte followed by its data - a number is `&40` plus eight bytes (an IEEE-754 double, little-endian); a string is `&00`, a one-byte length, then the characters. You can freely mix `BPUT#`/`BGET#` and `PRINT#`/`INPUT#` on the same file if you keep track of the layout yourself.
 
-See `examples/fileio.bas` (byte level) and `examples/records.bas` (typed records)
-for complete demos.
+See `examples/files/fileio.bas` (byte level) and `examples/language/records.bas` (typed records) for complete demos.
 
+# Basically Extending the Programs
 
+A good programming language should make it easy to organize larger projects. While small programs can happily live in a single file, more ambitious applications quickly benefit from a way to split functionality into separate, reusable components. BerryBasiC provides this capability through support for importing other BASIC files as modules.
 
-# Native Seeds
+A ***BerryBasiC*** program can load additional BASIC source files and use the routines they provide, allowing common functionality to be shared between multiple projects. Instead of copying the same code over and over again, programmers can build their own libraries of reusable procedures and functions.
 
-Interpreting BASIC is convenient but not fast. A **seed** is a small piece of compiled native (AArch64) code that a program can load from the storage card and call directly, for the parts of a job that are too slow to interpret, like some image filters, simulations, tight numeric loops. It is the modern equivalent of the
-machine-code `CALL`/`USR` of classic BASICs.
+This modular approach keeps programs cleaner, easier to maintain, and encourages the creation of a growing ecosystem of ***BerryBasiC*** utilities and extensions.
 
-A seed is an ordinary C function, cross-compiled and turned into a `.SED` file on your Linux machine (see *Writing a seed* below), then copied onto the card. At run time the program loads it with `SEED` and calls it with `CALL` (for a number) or `CALL$` (for a string).
+However, sometimes even BASIC reaches its limits. Certain tasks - such as intensive calculations, low-level hardware manipulation, or performance-critical routines - simply require more speed than an interpreted language can provide. For these situations, ***BerryBasiC*** can make use of native machine code.
 
-## SEED
+Native code routines allow programmers to write time-critical sections in a lower-level language and call them directly from ***BerryBasiC***. This provides the best of both worlds: the simplicity and productivity of BASIC combined with the raw performance and hardware access of native execution.
+
+This hybrid approach follows the tradition of classic home computers, where BASIC provided an accessible programming environment while still allowing advanced users to drop down to machine code when every clock cycle mattered. 
+
+## Modules (IMPORT)
+
+A **module** is an ordinary BASIC file that holds a collection of functions and procedures. `IMPORT` pulls a module into your program so you can call everything it defines - a simple way to build a library of reusable code and share it between programs.
+
+### Writing a module
+
+A module is just a normal `.BAS` file containing `DEF FN` / `DEF PROC` definitions. For example, save this as `MATHLIB`:
+
+```basic
+10 DEF FN gcd(a, b)
+20   IF b = 0 THEN gcd = a ELSE gcd = gcd(b, a MOD b)
+30 END FN
+40 DEF FN lcm(a, b)
+50   lcm = a * b / gcd(a, b)
+60 END FN
+```
+
+### Using a module
+
+Put `IMPORT "name"` in your program (usually near the top). Every function and procedure the module defines then becomes callable, exactly as if you had typed it into your own program:
+
+```basic
+10 IMPORT "MATHLIB"
+20 PRINT "gcd = "; gcd(48, 36)
+30 PRINT "lcm = "; lcm(4, 6)
+```
+
+As with `LOAD`, a name with no extension gets `.BAS` added, so `IMPORT "MATHLIB"` reads `MATHLIB.BAS`.
+
+### Line numbers don't clash
+
+A module keeps its **own line-number space**. The module above uses lines 10-60, and the program that imports it *also* uses 10-30 - that is completely fine. `GOTO`, `GOSUB`, `RESTORE` and labels inside a module only ever see that module's own lines, and the same in your main program. You never have to renumber a module to avoid overlapping with the code that imports it.
+
+### Notes
+
+- Modules may import other modules; imports are followed automatically. A module is loaded only once even if several modules ask for it. Up to 16 modules may be imported.
+- Imported lines are not part of your program: `LIST` and `SAVE` show only the code you typed, and imports are resolved fresh each time you `RUN`.
+- Keep to functions and procedures in a module. `IMPORT` itself does nothing at run time - it is handled once, before the program starts.
+
+## Native Seeds
+
+Interpreting BASIC is convenient but not fast. A **seed** is a small piece of compiled native (AArch64) code that a program can load from the storage card and call directly, for the parts of a job that are too slow to interpret - some image filters, simulations, tight numeric loops. It is the modern equivalent of the machine-code `CALL`/`USR` of classic BASICs.
+
+A seed is an ordinary C function, cross-compiled and turned into a `.SED` file on your Linux machine (see *Writing a seed* below), then copied onto the card. Seeds live together in the **`/seed` directory** on the data card, which keeps them out of the way of your programs (a plain `CAT` of the root shows a `[DIR] SEED` entry rather than a clutter of `.SED` files). At run time the program loads it with `SEED` and calls it with `CALL` (for a number) or `CALL$` (for a string).
+
+> Seeds run only on the Raspberry Pi (and the QEMU emulator), which is where the AArch64 code executes. On a host test build, loading or calling a seed raises `Native seeds run on the Pi, not the host build`.
+
+### SEED
 
 Loads a `.SED` file and stores a *handle* (a small number) in a numeric variable:
 
-    SEED H%, "FILT.SED"
+```basic
+SEED H%, "FILT.SED"
+```
 
-The handle is how later `CALL`s refer to this seed. Up to 4 seeds may be loaded at once. The file is searched on the storage card; `.SED` is assumed if you give no extension. A fresh `RUN` reloads the program's seeds, so the `SEED` lines normally live in the program itself.
+The handle is how later `CALL`s refer to this seed. Up to **8** seeds may be loaded at once. A bare file name is loaded from the **`/seed` directory** - `SEED H%, "FILT.SED"` reads `/seed/FILT.SED` - and `.SED` is assumed if you give no extension, so `SEED H%, "FILT"` works too. If you need a seed kept somewhere else, give a name that contains a path (for example `SEED H%, "PROJECT/FILT.SED"` or an absolute `"/tmp/FILT.SED"`) and it is used exactly as written. A fresh `RUN` reloads the program's seeds, so the `SEED` lines normally live in the program itself.
 
-## CALL
+### CALL
 
 Calls a loaded seed and returns its numeric result. The first operand is the handle; any further operands are passed to the seed as arguments:
 
-    R = CALL(H%, 40, 2)        : REM -> 42, if the seed adds its two arguments
+```basic
+R = CALL(H%, 40, 2)      : REM -> 42, if the seed adds its two arguments
+```
 
 As a statement (when you only want the side effect and not the result):
 
-    CALL H%, X, Y
+```basic
+CALL H%, X, Y
+```
 
 Arguments may be numbers or strings, mixed freely. Up to 16 may be passed.
 
-## CALL$
+### CALL$
 
-Like `CALL`, but returns a string — the text the seed produced with its `set_return_str` service. If the seed returns no string, the result is empty.
+Like `CALL`, but returns a string - the text the seed produced with its `set_return_str` service. If the seed returns no string, the result is empty.
 
-    NAME$ = CALL$(H%, "berry pi")    : REM e.g. -> "BERRY PI"
+```basic
+NAME$ = CALL$(H%, "berry pi")    : REM e.g. -> "BERRY PI"
+```
 
-## What a seed can do
+### Keyword seeds - extending the language
+
+`SEED`/`CALL` load a seed by hand. A seed can instead **register a keyword**, so it becomes part of the language: the interpreter scans the `/seed` directory once at start-up and wires each keyword seed straight into the parser. You then use it like any built-in command, without the need to `SEED`, or a `CALL`, nor a handle:
+
+```basic
+PRINT HYPOT(3, 4)        : REM -> 5     (a numeric function keyword)
+SHOUT "hello"            : REM -> HELLO!  (a statement keyword)
+PRINT REVERSE$("abc")    : REM -> cba   (a string function keyword)
+```
+
+A keyword comes in one of three **kinds**, chosen by the seed:
+
+| Kind             | Used as                                   | Example             |
+| ---------------- | ----------------------------------------- | ------------------- |
+| statement        | a command:            `NAME arg, arg`     | `SHOUT "hi"`        |
+| numeric function | `x = NAME(arg, arg)`                      | `d = HYPOT(dx, dy)` |
+| string function  | `a$ = NAME$(arg, arg)` (name ends in `$`) | `s$ = REVERSE$(t$)` |
+
+Notes:
+
+- Keyword names are matched as whole words and are **case-insensitive**, but they **cannot shadow a built-in** keyword - the built-ins always win. Pick a distinctive name, since a registered keyword otherwise becomes reserved (a variable of the same name is no longer reachable).
+- The interpreter checks the **argument count** against the range the seed declared and raises `Wrong number of arguments` if it is out of range.
+- Function keywords are called **with parentheses** (`HYPOT(3,4)`); statement keywords take a bare, comma-separated list (`BOX 1, 2, 3, 4`).
+- Keyword seeds are registered at startup and stay resident for the whole session - a `RUN` or `NEW` does not unload them - so a keyword is always available. Only seeds built with `SEED_KEYWORD` (below) become keywords; plain `SEED_EXPORT` seeds are untouched and still load on demand. There is no fixed limit on the size of a seed or on how many you load: each is given a block sized to it, carved from the seed heap.
+
+To make one, a seed uses the `SEED_KEYWORD` macro from `seed.h` instead of `SEED_EXPORT`, giving the keyword name, its kind, and the minimum/maximum argument count. The function body is the implementation; the gathered arguments arrive in `argv[]`:
+
+```c
+#include "seed.h"
+
+SEED_KEYWORD("HYPOT", SEED_KW_NUMFN, 2, 2) {     // r = HYPOT(dx, dy)
+    double dx = argv[0].num, dy = argv[1].num;
+    return my_sqrt(dx*dx + dy*dy);
+}
+```
+
+```c
+SEED_KEYWORD("SHOUT", SEED_KW_STATEMENT, 1, 1) { // SHOUT "hi"
+    for (int i = 0; i < argv[0].len; i++) svc->putc(toupper(argv[0].str[i]));
+    svc->putc('!'); svc->putc('\n');
+    return 0;                                     // a statement's result is ignored
+}
+```
+
+A string function (`SEED_KW_STRFN`) returns its text through `svc->set_return_str`, exactly as `CALL$` does, and is named with a trailing `$`. Build and install a keyword seed the usual way (`make seeds`, then `make sdimage`, or drop the `.SED` into `/seed`); it is picked up on the next start. The bundled examples are `examples/seeds/hypot/hypot.c`, `shout.c` and `revstr.c` (plus `particle.c` / `uprecs.c` for records, and `inputlog.c` / `paint.c` for interactive keyboard-and-mouse loops).
+
+### What a seed can do
 
 A seed never links against the interpreter; instead it is handed a small set of *services* it may call back into. Through these it can print, read the keyboard, read and write BASIC variables and arrays, and return a string:
 
-| Service          | Purpose                                              |
-| ---------------- | ---------------------------------------------------- |
-| `putc`, `puts`   | Write characters to the screen                       |
-| `getkey`, `inkey`| Read a key (blocking, or with a timeout)             |
-| `get_num`, `set_num` | Read / write a numeric BASIC variable            |
-| `get_str`, `set_str` | Read / write a string BASIC variable             |
-| `num_array`      | Get a direct pointer to a numeric array's storage    |
-| `set_return_str` | Provide the string that `CALL$` returns              |
-| `time_cs`        | Centiseconds since power-on                          |
-| `alloc`, `free`  | Allocate / release working memory from the seed heap |
-| `realloc`, `alloc_aligned` | Resize a block / allocate with a given alignment |
+| Service                                      | Purpose                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `putc`, `puts`                               | write characters to the screen                                                                   |
+| `getkey`, `inkey`                            | read a key (blocking, or with a timeout) - the same stream as `GET` / `INKEY`                    |
+| `keymods`                                    | which modifiers are held / locks set (see below)                                                 |
+| `mouse`                                      | poll the pointer: position and buttons (see below)                                               |
+| `get_num`, `set_num`                         | read / write a numeric BASIC variable                                                            |
+| `get_str`, `set_str`                         | read / write a string BASIC variable                                                             |
+| `num_array`                                  | get a direct pointer to a numeric array's storage                                                |
+| `rec_array`, `rec_field`                     | get a direct pointer to a record's numeric fields (see below)                                    |
+| `rec_get_str`, `rec_set_str`                 | read / write a record's text field                                                               |
+| `set_return_str`                             | provide the string that `CALL$` returns                                                          |
+| `time_cs`                                    | centiseconds since power-on                                                                      |
+| `alloc`, `free`                              | allocate / release working memory from the seed heap                                             |
+| `realloc`, `alloc_aligned`                   | resize a block / allocate with a given alignment                                                 |
+| GPIO (`gpio_write`, `gpio_read`, ...)        | drive and read the 40-pin header (see below)                                                     |
+| files (`file_open`, `file_read`, ...)        | read and write SD-card files - the base of the seed `<stdio.h>` (see below)                      |
+| graphics (`gfx_line`, `gfx_fillcircle`, ...) | draw straight onto the framebuffer - the base of the seed `<graphics.h>` BGI library (see below) |
+| `gfx_backbuffer`, `gfx_flip`, `gfx_buffered` | double buffering - the same back buffer as BASIC's `BUFFER`/`FLIP` (see below)                   |
+| `gfx_mode`                                   | BASIC's graphics mode (1 or 2), to convert coordinates BASIC passed in (see *Graphics from a Seed*) |
+| `gfx_line_style`, `gfx_polyline`             | the seed line pen (width/join/cap) and a stroked polyline - the base of `setlinewidth` etc. (see below) |
+| text (`font_load`, `gfx_text`, ...)          | load and draw TrueType fonts                                                                     |
 
-Variable and array names are passed exactly as BASIC stores them: upper case, including the `$` or `%` suffix, e.g. `"X"`, `"N%"`, `"A$"`.
+Variable and array names are passed exactly as BASIC stores them: upper case, including the `$` or `%` suffix - e.g. `"X"`, `"N%"`, `"A$"`.
 
 The `num_array` service is the real prize for heavy work: it hands the seed a direct pointer to the array's numbers, so a thousand-element array can be crunched at full native speed with no copying. (String data is always copied in and out, because the interpreter is free to move strings around in memory.)
 
 String *arguments* are snapshots: they are valid for the duration of the call. A seed that wants to keep one must copy it.
 
-## Working memory
+### Double buffering from a seed
 
-For tasks that need scratch space — a sorted copy, a lookup table, an image
-buffer — a seed allocates from its own heap with the **ordinary C functions**
-`malloc`, `calloc` and `free`:
+A loop that **clears something and draws it again** - a panel, a scoreboard, a moving shape - will flicker if it draws straight to the screen, because the display can scan out the gap between the clearing and the drawing. The cure is to draw off-screen and show each finished frame in one go:
 
-    double *tmp = malloc(n * sizeof(double));
-    if (!tmp) return 0;                 // heap exhausted
-    ... use tmp ...
-    free(tmp);
+```c
+#include <graphics.h>
 
-These read like normal C, but they draw from the *seed heap* rather than any
-system allocator (under the hood they route to the services). `malloc` returns a
-16-byte-aligned block (suitable for doubles and NEON), or 0 if the heap is full;
-`calloc` also zeroes it. The seed heap is separate from BASIC's own variable and
-array storage, is 2 MB by default (raise `SEED_HEAP_SIZE` in the interpreter if
-you need more), and is wiped clean at every `RUN`/`NEW` — so a seed that forgets
-to `free` leaks only within the current run, never permanently. Memory does
-persist between calls within a run, so a seed may allocate a table on its first
-call and reuse it on later ones.
+int was = getdoublebuffer();     // remember how you found it
+setdoublebuffer(1);              // every drawing call now goes off-screen
+
+for (;;) {
+    ...draw the frame...
+    flippage();                  // show it, complete, in one step
+}
+
+setdoublebuffer(was);            // put the setting back before returning
+```
+
+The off-screen buffer **keeps its contents between flips**, so a loop doesn't have to redraw everything: rub out what moved, repair what it damaged, and flip.
+
+> **It is the same buffer, and the same on/off setting, as BASIC's `BUFFER ON` / `FLIP`.** That is deliberate - a seed and a program can't each have their own idea of whether drawing is buffered. It also means a seed that turns buffering on and returns without turning it back off leaves the program drawing into a buffer nothing ever flips, and the screen will appear frozen. Save the setting, restore it on the way out - including on your error paths.
+
+`setdoublebuffer(1)` returns 0 on success and a negative value if no buffer could be allocated; drawing then simply goes to the screen, so a seed can ignore the result and accept the flicker rather than fail.
+
+Under the services this is `gfx_backbuffer` / `gfx_flip` / `gfx_buffered`, if you are not using `<graphics.h>`.
+
+Not every loop wants this. **Incremental** drawing - `paint.c` adding a line segment per frame - never shows a half-drawn screen and doesn't need buffering; turning it on would only add a full-screen copy per flip. Use it when you clear and redraw. `examples/seeds/inputlog/inputlog.c` is the worked example.
+
+### Keyboard and mouse from a seed
+
+A seed can read both, so an interactive loop - a paint tool, a game, a menu - can live entirely inside one.
+
+**Keyboard** is `getkey` and `inkey`, which read exactly the same key stream as BASIC's `GET` and `INKEY`:
+
+```c
+int k = svc->getkey();        // blocks until a key is pressed
+int k = svc->inkey(0);        // non-blocking: -1 right away if nothing is waiting
+int k = svc->inkey(100);      // wait up to 100 centiseconds, then -1
+```
+
+**Modifiers** are not keys - `Shift` on its own types nothing - so they come back through their own call, as a bitmask of the `SEED_KMOD_*` values in `seed.h`:
+
+```c
+int m = svc->keymods();
+if (m & SEED_KMOD_CTRL)  ...
+if (m & SEED_KMOD_CAPS)  ...      // CapsLock is on
+```
+
+Like the mouse, it is a snapshot refreshed when the keyboard is **read**, so call `inkey(0)` first in a polling loop or you get whatever the last read saw. Keys that type nothing (`F1`, `PgUp`, `Esc`, the arrows) arrive from `getkey`/`inkey` as the `SEED_KEY_*` codes, also in `seed.h`; `F1`...`F12` are consecutive from `SEED_KEY_F1`, and all of them sit above `0xFF` so they never collide with a real character.
+
+**Mouse** is one call:
+
+```c
+int x, y, b;
+svc->mouse(&x, &y, &b);       // any of the three may be 0 if you don't want it
+```
+
+`x`, `y` are **raw framebuffer pixels** (origin top-left) - the same space the `gfx_*` calls draw in, and the same numbers `MOUSEX`/`MOUSEY` report - so a pointer position can be used as a drawing coordinate directly. `b` is a bitmask: bit 0 left, bit 1 right, bit 2 middle. With no mouse plugged in, everything reads back 0.
+
+> **The mouse call *is* the poll, and this is the part that catches people out.** The interpreter services the pointer between BASIC statements - but while your seed is running, no BASIC statements are happening. Nothing else is moving the pointer or reading the mouse. A seed that wants a live mouse must call `svc->mouse()` itself, in its own loop; a seed that runs for a long time without calling it will leave the pointer frozen on screen.
+
+The same logic explains why an interactive seed uses **`inkey(0)`, not `getkey`**: `getkey` blocks, and while it blocks the seed isn't polling the mouse either. The shape that works is one loop that does both:
+
+```c
+for (;;) {
+    int k = svc->inkey(0);                 // -1 when nothing is waiting
+    if (k == 'q' || k == 27) break;        // ESC
+
+    int x, y, b;
+    svc->mouse(&x, &y, &b);                // this call polls the hardware
+    if (b & 1) svc->gfx_putpixel(x, y, 15);
+}
+```
+
+Two complete examples ship:
+
+- **`examples/seeds/inputlog/inputlog.c`** - `INPUTLOG` (optionally `INPUTLOG x, y`) draws a live panel showing the pointer position and how far it last moved, three lamps for the buttons, the last key as a character and a code, running totals of keys/clicks/moves, and a log of the last few events. `Q` or `ESC` returns to BASIC and prints the totals. It is the short answer to "what am I actually getting from the keyboard and mouse?".
+- **`examples/seeds/paint/paint.c`** - `PAINT`: drag with the left button to draw, right button clears, `1`-`7` pick a colour, `Q` or `ESC` quits.
+
+Both own the screen while they run, and both draw their own pointer: `inkey` hides the system arrow whenever it returns, so for the length of the loop there is nothing on screen following the mouse unless the seed draws it.
+
+### Passing a Buffer to a Seed
+
+Because the address of a memory buffer allocated with DIM is a real pointer, a seed can read or write the same memory. Build the buffer in BASIC and pass its address (and length):
+
+```basic
+10 DIM B% 9
+20 FOR I = 0 TO 9 : B%?I = I * I : NEXT
+30 SEED H%, "BUFSUM.SED"
+40 PRINT CALL(H%, B%, 10)        : REM the seed sums the 10 bytes -> 285
+```
+
+with the seed dereferencing the address it is given:
+
+```c
+SEED_EXPORT(bufsum) {
+    const unsigned char *p = (const unsigned char *)(uintptr_t)(long)argv[0].num;
+    int len = (int)argv[1].num, sum = 0;
+    for (int i = 0; i < len; i++) sum += p[i];
+    return sum;
+}
+```
+
+This is the fast path for bulk data: BASIC owns the buffer, the seed crunches it natively, and both see the same bytes.
+
+### Records from a seed
+
+A seed can read and write BASIC's user-defined types (see *User-Defined Types*). A record is reached **by name**, exactly like a numeric array - it is never passed in as an argument:
+
+```basic
+TYPE particle : x, y, vx, vy : ENDTYPE
+DIM p(999) AS particle
+PARTICLE "P", 0.1                  ' the seed names the record it works on
+```
+
+The numeric fields of one element are stored **contiguously**, so a record - or a whole array of records - is a strided block of doubles, and `rec_array` hands the seed a direct pointer to it, with no copying:
+
+```c
+int nelem, stride;
+double *p = svc->rec_array("P", &nelem, &stride);   // 0 if "P" isn't a record
+
+int fx = svc->rec_field("P", "X");                  // field -> index, or -1
+int fy = svc->rec_field("P", "Y");
+
+for (int e = 0; e < nelem; e++) {
+    double *r = &p[e * stride];                     // this element's numeric fields
+    r[fx] += r[fy];
+}
+```
+
+Element `e`, field `f` is `base[e * stride + f]`. Look each field up **once** with `rec_field` and then index with plain arithmetic - that is what makes ten thousand particles worth stepping in a seed rather than in the interpreter. A scalar `DIM p AS point` is simply the `nelem = 1` case.
+
+Text fields are **not** in that block, because the interpreter is free to move string bytes when it compacts its heap. They are copied in and out by name, one element at a time, exactly like `get_str` / `set_str`:
+
+```c
+char buf[64];
+int n = svc->rec_get_str("TEAM", e, "NAME$", buf, sizeof buf);  // full length, may truncate
+svc->rec_set_str("TEAM", e, "NAME$", buf, n);
+```
+
+Field names are passed as BASIC stores them: upper case, with the `$` or `%` suffix. `rec_field` returns -1 for a text field (use `rec_get_str`), and every one of these is a safe no-op if the record, element or field doesn't exist - so a seed handed the wrong shape of record does nothing rather than corrupting memory.
+
+> Because a seed names the record, a seed's own keyword can never get in the way of your type names: `PARTICLE.SED` may register `PARTICLE` and you can still write `TYPE particle`. Type and field names are matched only where nothing else is legal.
+
+The complete examples are `examples/seeds/particle/particle.c` (the zero-copy numeric case) and `examples/seeds/uprecs/uprecs.c` (text fields).
+
+### Working memory
+
+For tasks that need scratch space - a sorted copy, a lookup table, an image buffer - a seed allocates from its own heap with the *ordinary C functions* `malloc`, `calloc` and `free`:
+
+```c
+double *tmp = malloc(n * sizeof(double));
+if (!tmp) return 0;                 // heap exhausted
+... use tmp ...
+free(tmp);
+```
+
+These read like normal C, but they draw from the *seed heap* rather than any system allocator (under the hood they route to the services). `malloc` returns a 16-byte-aligned block (suitable for doubles and NEON), or 0 if the heap is full; `calloc` also zeroes it. The seed heap is separate from BASIC's own variable and array storage, is 2 MB by default (raise `SEED_HEAP_SIZE` in the interpreter if you need more), and is wiped clean at every `RUN`/`NEW` - so a seed that forgets to `free` leaks only within the current run, never permanently. Memory does persist between calls within a run, so a seed may allocate a table on its first call and reuse it on later ones.
 
 The full standard allocation set is provided, all backed by the same seed heap:
 
-| Function | Notes |
-| -------- | ----- |
-| `malloc(size)`                          | uninitialised block, 16-byte aligned |
-| `calloc(nmemb, size)`                   | zeroed; checks `nmemb*size` overflow |
-| `realloc(ptr, size)`                    | grow/shrink, preserving contents; `realloc(0,n)`=malloc, `realloc(p,0)`=free |
-| `reallocarray(ptr, nmemb, size)`        | `realloc` with an overflow-checked size |
-| `free(ptr)`                             | release a block (`free(0)` is a no-op) |
-| `aligned_alloc(align, size)`            | block aligned to a power-of-two `align` (C11) |
-| `memalign(align, size)`                 | legacy spelling of `aligned_alloc` |
-| `posix_memalign(&ptr, align, size)`     | POSIX form; returns 0 / `EINVAL` / `ENOMEM` |
-| `free_sized(ptr, size)`, `free_aligned_sized(ptr, align, size)` | C23 sized frees (the size hint is ignored) |
+| Function                                                        | Notes                                                                        |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `malloc(size)`                                                  | uninitialised block, 16-byte aligned                                         |
+| `calloc(nmemb, size)`                                           | zeroed; checks `nmemb*size` overflow                                         |
+| `realloc(ptr, size)`                                            | grow/shrink, preserving contents; `realloc(0,n)`=malloc, `realloc(p,0)`=free |
+| `reallocarray(ptr, nmemb, size)`                                | `realloc` with an overflow-checked size                                      |
+| `free(ptr)`                                                     | release a block (`free(0)` is a no-op)                                       |
+| `aligned_alloc(align, size)`                                    | block aligned to a power-of-two `align` (C11)                                |
+| `memalign(align, size)`                                         | legacy spelling of `aligned_alloc`                                           |
+| `posix_memalign(&ptr, align, size)`                             | POSIX form; returns 0 / `EINVAL` / `ENOMEM`                                  |
+| `free_sized(ptr, size)`, `free_aligned_sized(ptr, align, size)` | C23 sized frees (the size hint is ignored)                                   |
 
-Anything `aligned_alloc`/`posix_memalign` returns can be released with the
-ordinary `free`. The standard `memset`, `memcpy`, `memmove` and `memcmp` are
-available too (a small runtime is linked in for you), so ordinary buffer code
-just works. If you prefer, the raw `svc->alloc` / `svc->free` / `svc->realloc` /
-`svc->alloc_aligned` services are still there and do exactly the same thing.
+Anything `aligned_alloc`/`posix_memalign` returns can be released with the ordinary `free`. The standard `memset`, `memcpy`, `memmove` and `memcmp` are available too (a small runtime is linked in for you), so ordinary buffer code just works. If you prefer, the raw `svc->alloc` / `svc->free` / `svc->realloc` / `svc->alloc_aligned` services are still there and do exactly the same thing.
 
-## The seed C library
+### GPIO from a seed
 
-Because a seed is built freestanding (there is no C library to link against),
-any standard function it calls must be provided by the *seed runtime*. A useful,
-OS-independent subset is — just include the familiar headers:
+A seed can drive the Raspberry Pi 4's 40-pin header directly - useful when you need to toggle pins or bit-bang a protocol faster than the interpreter can, or in a tight timed loop. The services mirror the BASIC `PIN`/`PINMODE` words (BCM numbering, pins 0-27):
 
-    #include <stdlib.h>
-    #include <string.h>
-    #include <ctype.h>
+| Service                            | Purpose                                                                  |
+| ---------------------------------- | ------------------------------------------------------------------------ |
+| `gpio_avail()`                     | 1 on the Pi/QEMU, 0 on the host build - check before using the rest      |
+| `gpio_mode(pin, mode, alt)`        | `SEED_GPIO_IN` / `SEED_GPIO_OUT` / `SEED_GPIO_ALT` (with function `alt`) |
+| `gpio_pull(pin, pull)`             | `SEED_GPIO_PULL_NONE` / `_UP` / `_DOWN`                                  |
+| `gpio_write(pin, level)`           | drive an output 0/1                                                      |
+| `gpio_read(pin)`                   | read a pin to 0/1                                                        |
+| `gpio_set(mask)`, `gpio_clr(mask)` | set / clear many pins at once, atomically                                |
+| `gpio_level()`                     | read all pins at once (low 28 bits)                                      |
+| `gpio_wait(pin, edge, timeout_cs)` | wait for an edge (`SEED_GPIO_RISING`/`_FALLING`); returns the pin or -1  |
 
-| Header       | Provided |
-| ------------ | -------- |
-| `<stdlib.h>` | `malloc` `calloc` `realloc` `reallocarray` `free` `free_sized` `free_aligned_sized` `aligned_alloc` `memalign` `posix_memalign`, `qsort` `bsearch`, `atoi` `atol` `strtol` `strtoul`, `abs` `labs`, `rand` `srand` |
-| `<string.h>` | `memcpy` `memmove` `memset` `memcmp` `memchr`, `strlen` `strnlen` `strcmp` `strncmp` `strcpy` `strncpy` `strcat` `strncat` `strchr` `strrchr` `strstr` `strdup` `strndup` |
-| `<ctype.h>`  | `isdigit` `isalpha` `isalnum` `isspace` `isupper` `islower` `isxdigit` `ispunct` … and `toupper` / `tolower` |
+Because a seed runs to completion before BASIC continues, GPIO reset-on-`RUN` still protects you: a pin a seed left driving is returned to a safe input at the next `RUN`. A complete blink seed:
 
-These behave exactly as in standard C; `malloc` and friends draw from the seed
-heap, and `qsort`/`bsearch` take the usual comparator. For example, sorting a
-BASIC array in place:
+```c
+#include "seed.h"
 
-    #include "seed.h"
-    #include <stdlib.h>
+SEED_EXPORT(pinblink)
+{
+    if (argc < 2 || !svc->gpio_avail()) return 0;
+    int pin = (int)argv[0].num, cycles = (int)argv[1].num;
+    int half = argc >= 3 ? (int)argv[2].num : 25;   // centiseconds
 
-    static int cmp(const void *a, const void *b) {
-        double x = *(const double *)a, y = *(const double *)b;
-        return (x > y) - (x < y);
+    svc->gpio_mode(pin, SEED_GPIO_OUT, 0);
+    for (int i = 0; i < cycles; i++) {
+        svc->gpio_write(pin, 1);
+        uint32_t t = svc->time_cs(); while (svc->time_cs() - t < (uint32_t)half) { }
+        svc->gpio_write(pin, 0);
+        t = svc->time_cs(); while (svc->time_cs() - t < (uint32_t)half) { }
     }
+    return (double)cycles;
+}
+```
 
-    SEED_EXPORT(sortarr) {
-        int len = 0;
-        double *a = svc->num_array("E", &len);     // direct pointer to E()
-        if (a && len > 0) qsort(a, len, sizeof(double), cmp);
-        return len;
+```basic
+10 SEED h%, "PINBLINK.SED"
+20 PRINT CALL(h%, 17, 10)        : REM blink BCM 17 ten times
+```
+
+The full example ships as `examples/seeds/pinblink/pinblink.c` (built to `PINBLINK.SED`).
+
+### Graphics from a Seed
+
+A seed can draw straight onto the screen through `<graphics.h>`, the **B**erryBasiC**G**raphics**I**nterface library. The familiar names are all here - `line`, `rectangle`, `bar`, `circle`, `arc`, `pieslice`, `drawpoly`/`fillpoly`, `floodfill`, `setcolor`, `setfillstyle`, `outtextxy` - and they run at native speed, so a seed can animate or render far faster than the interpreter.
+
+Seed graphics address the framebuffer directly in device pixels: origin TOP-LEFT, x right, y down, matching how most modern graphics count. **This is exactly BASIC's `MODE 2`** - so in `MODE 2` a seed's coordinates and the BASIC program's coincide, and you can pass one to the other with no conversion at all. In `MODE 1` (BBC logical, bottom-left origin) they do not: the seed has to convert.
+
+**The rule.** Drawing through `gfx_*` / the BGI calls is **always** device pixels, whatever mode BASIC is in - the mode never changes how the seed *draws*. What the mode changes is how to read coordinates a BASIC program **passed to your seed as arguments**: they are in BASIC's *current* mode. A seed reads that mode with `gfx_mode()`, or - simpler - converts with `gfx_from_basic()`:
+
+```c
+int px, py;
+gfx_from_basic((int)argv[0].num, (int)argv[1].num, &px, &py);   // BASIC's coords -> device pixels
+line(px - 10, py, px + 10, py);                                 // then draw in device pixels
+```
+
+`gfx_from_basic` is an identity in `MODE 2` and applies the flip+scale in `MODE 1`; `gfx_to_basic` is the inverse, for handing coordinates back. `gfx_mode()` returns `1` or `2`. The BBC logical extent those helpers convert against is exposed as `GFX_BBC_W` / `GFX_BBC_H` (1280 × 1024) - the only place a seed should reference those numbers. The bundled `examples/seeds/nativexy/nativexy.c` (the `NATIVEXY` keyword) demonstrates the round-trip: a crosshair drawn from BASIC coordinates lands exactly where BASIC's own `PLOT 69, x, y` would, in either mode.
+
+While the term BGI might be familiar to some of our more seasoned readers, this implementation differs from the DOS original only in the modern direction: colours are **24-bit truecolour** (the classic sixteen colour *names* - `RED`, `LIGHTBLUE`, `YELLOW`, ... - still work as a palette via `setcolor`, and `setrgbcolor(r,g,b)` unlocks the rest), and text is drawn with scalable **TrueType** fonts instead of the old bitmap `.CHR` fonts. Coordinates are device pixels with the origin at the **top-left** (the BGI convention - note this is upside-down from BASIC's own bottom-left graphics).
+
+```c
+#include "seed.h"
+#include "graphics.h"
+
+SEED_EXPORT(chart)
+{
+    if (!initgraph()) return 0;              // 0 on the host build (no framebuffer)
+    int W = getmaxx(), H = getmaxy();
+
+    setrgbbkcolor(12, 12, 24); cleardevice();
+
+    setcolor(YELLOW);       circle(W / 2, H / 2, 120);
+    setfillstyle(SOLID_FILL, LIGHTRED); fillellipse(200, 200, 90, 55);
+    setfillstyle(SOLID_FILL, LIGHTBLUE); pieslice(W / 2, H / 2, 0, 120, 120);
+
+    if (loadfont("PHILO.TTF")) {             // a TrueType font on the card
+        setrgbcolor(255, 230, 120);
+        settextsize(48);
+        settextjustify(CENTER_TEXT, TOP_TEXT);
+        outtextxy(W / 2, 20, "Drawn by a seed");
     }
+    return 1;
+}
+```
 
-What is **not** provided is anything that needs an operating system — `printf`,
-file I/O, `getenv`, `exit`, threads, `time`, and so on. Calling one of those is a
-link error (`undefined reference to 'printf'`), which is the build telling you
-the seed reached outside its sandbox. Use the services (`svc`) for I/O instead:
-`svc->puts` to print, `svc->getkey`/`svc->inkey` for the keyboard, `svc->time_cs`
-for timing. The library lives in `seed/include/` and `seed/runtime/`; adding a
-missing pure function is just a declaration in the header and a definition in the
-runtime.
+```basic
+10 MODE 1
+20 SEED h%, "CHART.SED"
+30 n% = CALL(h%)                 : REM draws directly on the screen
+```
 
-## Starting a new seed
+Because drawing lands on whatever surface BASIC is currently targeting, a seed composes with BASIC graphics: a program can `BUFFER ON`, call a seed to render a frame, then `FLIP`, or point a `SPRITETARGET` at a sprite and let the seed draw into it.
+
+On the host build there is no framebuffer, so `initgraph()` returns 0 and every drawing call does nothing (the text-*measuring* calls still work); a portable seed checks `initgraph()` once and bails out if it is 0. The full tour ships as `examples/seeds/bgidemo/bgidemo.c` (built to `BGIDEMO.SED`), and the header is `podlib/include/graphics.h`.
+
+#### Setup and information
+
+| Function                 | What it does                                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `int initgraph(void)`    | prepare to draw and reset the graphics state; returns 1 if a framebuffer is present, 0 on the host build |
+| `void closegraph(void)`  | remove any viewport clip (call at the end)                                                               |
+| `int getmaxx(void)`      | x of the rightmost pixel (screen width - 1)                                                              |
+| `int getmaxy(void)`      | y of the bottom pixel (screen height - 1)                                                                |
+| `int getmaxcolor(void)`  | highest palette index (always 15)                                                                        |
+| `void cleardevice(void)` | clear the whole screen to the background colour                                                          |
+
+#### Colour
+
+Colours are the same 24-bit as supported by the BGI. Functions with a plain name take a **palette index** 0-15 (the classic set below); the `setrgb...` variants take a full `r,g,b` (each 0-255).
+
+| Function                                                               | What it does                                                                                       |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `unsigned int rgb(int r,int g,int b)`                                  | pack an `0xRRGGBB` value (e.g. for your own tables)                                                |
+| `void setcolor(int color)`                                             | set the drawing colour (lines, outlines, text) by palette index                                    |
+| `void setrgbcolor(int r,int g,int b)`                                  | set the drawing colour to a truecolour                                                             |
+| `int getcolor(void)`                                                   | current drawing colour as `0xRRGGBB`                                                               |
+| `void setbkcolor(int color)` / `void setrgbbkcolor(int r,int g,int b)` | set the background (used by `cleardevice`/`clearviewport`)                                         |
+| `int getbkcolor(void)`                                                 | current background colour as `0xRRGGBB`                                                            |
+| `void setfillstyle(int pattern,int color)`                             | set the fill colour by palette index; `pattern` is `SOLID_FILL` or `EMPTY_FILL` (others act solid) |
+| `void setrgbfillcolor(int r,int g,int b)`                              | set a solid fill colour to a truecolour                                                            |
+
+The sixteen colour names (indices for `setcolor`/`setfillstyle`/`putpixel`): `BLACK` `BLUE` `GREEN` `CYAN` `RED` `MAGENTA` `BROWN` `LIGHTGRAY` `DARKGRAY` `LIGHTBLUE` `LIGHTGREEN` `LIGHTCYAN` `LIGHTRED` `LIGHTMAGENTA` `YELLOW` `WHITE`.
+
+#### Pixels and the current position
+
+The library keeps a *current position* (CP) that `lineto`/`moveto` and `outtext` use, exactly like the original.
+
+| Function                                                   | What it does                                                                  |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `void putpixel(int x,int y,int color)`                     | plot one pixel in a palette colour                                            |
+| `int getpixel(int x,int y)`                                | read a pixel - returns an `0xRRGGBB` value (not a palette index)              |
+| `void moveto(int x,int y)` / `void moverel(int dx,int dy)` | move the CP absolutely / relatively                                           |
+| `void lineto(int x,int y)` / `void linerel(int dx,int dy)` | draw from the CP to a new point (in the drawing colour) and move the CP there |
+| `int getx(void)` / `int gety(void)`                        | read the CP                                                                   |
+
+#### Shapes
+
+Outlines use the drawing colour (`setcolor`); filled shapes use the fill colour (`setfillstyle`). Angles are in **degrees**, measured counter-clockwise from east (3 o'clock), as in the original BGI.
+
+| Function                                                                     | What it does                                                                                |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `void line(int x1,int y1,int x2,int y2)`                                     | a line between two points                                                                   |
+| `void rectangle(int left,int top,int right,int bottom)`                      | a rectangle outline                                                                         |
+| `void bar(int left,int top,int right,int bottom)`                            | a filled rectangle                                                                          |
+| `void bar3d(int left,int top,int right,int bottom,int depth,int topflag)`    | a filled 3-D bar; draw the top face when `topflag` is non-zero                              |
+| `void circle(int x,int y,int radius)`                                        | a circle outline                                                                            |
+| `void arc(int x,int y,int stangle,int endangle,int radius)`                  | a circular arc from `stangle` to `endangle`                                                 |
+| `void ellipse(int x,int y,int stangle,int endangle,int xradius,int yradius)` | an elliptical arc                                                                           |
+| `void fillellipse(int x,int y,int xradius,int yradius)`                      | a filled ellipse                                                                            |
+| `void pieslice(int x,int y,int stangle,int endangle,int radius)`             | a filled pie wedge                                                                          |
+| `void sector(int x,int y,int stangle,int endangle,int xradius,int yradius)`  | a filled elliptical sector                                                                  |
+| `void drawpoly(int numpoints,const int *polypoints)`                         | a polyline through `numpoints` `x,y` pairs (repeat the first point last to close)           |
+| `void fillpoly(int numpoints,const int *polypoints)`                         | a filled polygon (any convex or concave shape)                                              |
+| `void floodfill(int x,int y,int border)`                                     | flood the area around `(x,y)` with the fill colour (`border` is accepted for compatibility) |
+
+#### Line style - width, joins and caps
+
+A seed has its own pen, in **device pixels** (independent of BASIC's `LINEWIDTH`). `line` honours the width and cap; `rectangle` and `drawpoly` honour the width and join; `circle`/`ellipse` outlines honour the width.
+
+| Function                                                | What it does                                                                        |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `void setlinewidth(int width)`                          | pen width in pixels (1 = hairline)                                                   |
+| `void setlinejoin(int join)`                            | corner style: `JOIN_MITER` (default), `JOIN_BEVEL`, `JOIN_ROUND`                     |
+| `void setlinecap(int cap)`                              | line-end style: `CAP_BUTT` (default), `CAP_ROUND`, `CAP_SQUARE`                      |
+| `void setlinestyle(int linestyle,unsigned pat,int thickness)` | classic BGI form - sets the **width** (`NORM_WIDTH` 1 / `THICK_WIDTH` 3 or any value); `linestyle`/`pat` are accepted but drawing is always solid |
+
+```c
+setlinewidth(10);
+setlinejoin(JOIN_ROUND);
+int box[8] = { 100,100, 300,100, 300,300, 100,300 };
+drawpoly(4, box);            // (repeat the first point to close, or use rectangle())
+```
+
+The pen resets to its default (width 1, miter, butt) on `initgraph()`. Thick strokes compose in store mode; see the BASIC *Line width, joins and caps* note about `EOR`.
+
+#### Viewport
+
+| Function                                                 | What it does                                                                                                                 |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `void setviewport(int x1,int y1,int x2,int y2,int clip)` | when `clip` is non-zero, restrict all drawing to the rectangle; `clip` 0 removes the restriction (coordinates stay absolute) |
+| `void clearviewport(void)`                               | clear the current viewport to the background colour                                                                          |
+
+#### Text - TrueType fonts
+
+Text is drawn with the same TrueType engine as BASIC's `GTEXT` (§ *TrueType Fonts*). Load a `.ttf` from the card, pick a size and style, then draw. Metric calls work even on the host build.
+
+| Function                                                 | What it does                                                                                                                          |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `int loadfont(const char *filename)`                     | load a `.ttf` and make it current; returns a handle (>0), or 0 on failure                                                             |
+| `void settextfont(int handle)`                           | select an already-loaded font                                                                                                         |
+| `void settextsize(int pixels)`                           | glyph height in pixels                                                                                                                |
+| `void settextstyle(int font,int direction,int charsize)` | BGI-style: `font` = a font handle, `charsize` = pixel height, `direction` is ignored                                                  |
+| `void setfontstyle(int bold,int italic,int underline)`   | turn each attribute on (1) or off (0)                                                                                                 |
+| `void settextjustify(int horiz,int vert)`                | anchor for `outtext`/`outtextxy`: horizontal `LEFT_TEXT`/`CENTER_TEXT`/`RIGHT_TEXT`, vertical `TOP_TEXT`/`VCENTER_TEXT`/`BOTTOM_TEXT` |
+| `void outtextxy(int x,int y,const char *s)`              | draw `s` anchored at `(x,y)` per the justification                                                                                    |
+| `void outtext(const char *s)`                            | draw `s` at the CP, then advance the CP past it                                                                                       |
+| `int textwidth(const char *s)`                           | pixel width of `s` in the current font/size                                                                                           |
+| `int textheight(const char *s)`                          | line height in pixels of the current font                                                                                             |
+
+#### Double buffering
+
+| Function                      | What it does                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `int setdoublebuffer(int on)` | `1` = send drawing off-screen, `0` = straight to the screen. Returns 0, or <0 if no buffer could be allocated |
+| `void flippage(void)`         | show the off-screen frame (a no-op when buffering is off)                                                     |
+| `int getdoublebuffer(void)`   | 1 if drawing is currently going off-screen                                                                    |
+
+Use these when a loop clears and redraws; see *Double buffering from a seed* for the whole story, including why you must restore the setting you found.
+
+### Convenience
+
+| Function                        | What it does                                                           |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| `void gdelay(int centiseconds)` | busy-wait for a short time (using the seed clock), handy for animation |
+
+### The seed C library
+
+Because a seed is built freestanding (there is no C library to link against), any standard function it calls must be provided by the *seed runtime*. A useful, OS-independent subset is - just include the familiar headers:
+
+```c
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+```
+
+| Header       | Provided                                                                                                                                                                                                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<stdlib.h>` | `malloc` `calloc` `realloc` `reallocarray` `free` `free_sized` `free_aligned_sized` `aligned_alloc` `memalign` `posix_memalign`, `qsort` `bsearch`, `atoi` `atol` `strtol` `strtoul`, `abs` `labs`, `rand` `srand`                                                                       |
+| `<string.h>` | `memcpy` `memmove` `memset` `memcmp` `memchr`, `strlen` `strnlen` `strcmp` `strncmp` `strcpy` `strncpy` `strcat` `strncat` `strchr` `strrchr` `strstr` `strdup` `strndup`                                                                                                                |
+| `<ctype.h>`  | `isdigit` `isalpha` `isalnum` `isspace` `isupper` `islower` `isxdigit` `ispunct` ... and `toupper` / `tolower`                                                                                                                                                                           |
+| `<stdio.h>`  | `fopen` `fclose` `fflush`, `fread` `fwrite`, `fgetc` `getc` `getchar` `ungetc` `fgets`, `fputc` `putc` `putchar` `fputs` `puts`, `fseek` `ftell` `rewind`, `feof` `ferror` `clearerr`, `remove`, `printf` `fprintf` `snprintf` `vfprintf` `vsnprintf`, and `stdin` / `stdout` / `stderr` |
+
+#### Files on the SD card
+
+`<stdio.h>` gives a seed real read/write access to the card, using the same filesystem BASIC does - long file names included - so a seed can log data, load a table, or transform a file at native speed:
+
+```c
+#include "seed.h"
+#include <stdio.h>
+
+SEED_EXPORT(logrun)
+{
+    FILE *f = fopen("Run Log.txt", "a");     // long name, append mode
+    if (!f) return -1;
+    fprintf(f, "run finished, code %d\n", (int)argv[0].num);
+    fclose(f);
+    return 0;
+}
+```
+
+`fopen` accepts the usual `"r"`, `"w"`, `"a"`, `"r+"`, `"w+"`, `"a+"` modes (a trailing `b` is accepted and ignored - files are always binary-clean). `stdin`, `stdout` and `stderr` are wired to the keyboard and screen, so `printf` and `fgets(buf, n, stdin)` work as you'd expect.
+
+The `printf` family handles the integer and string conversions (`%d %i %u %o %x %X %c %s %p %%`, with width, the `-` `0` `+` and space flags, and `l`/`ll`/`z` length) and the floating-point ones (`%f %e %g`). As in standard C, `+` and space apply to `%d`/`%i` only: `+` always shows a sign, space puts a blank where a `-` would go. One thing to know about the floats: they are formatted in **BASIC's own number style** - the very same output `PRINT` and `STR$` produce (up to nine significant figures, switching to `E` notation for very large or small values) - so numbers look identical whether a seed or a BASIC line printed them. A consequence is that a precision or the exact `f`/`e`/`g` choice is advisory rather than exact (`%.2f` does not truncate to two places); field width is still honoured. There is no `scanf` - read a line with `fgets` and parse it with `strtol` / `strtod`. File writes are unbuffered (the storage layer caches a sector for you), so `fflush` is a no-op and data is on the card as soon as it is written.
+
+There are only a few file channels in total, shared with BASIC's `OPEN*`, so a seed should `fclose` what it opens.
+
+These behave exactly as in standard C; `malloc` and friends draw from the seed heap, and `qsort`/`bsearch` take the usual comparator. For example, sorting a BASIC array in place:
+
+```c
+#include "seed.h"
+#include <stdlib.h>
+
+static int cmp(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+SEED_EXPORT(sortarr) {
+    int len = 0;
+    double *a = svc->num_array("E", &len);     // direct pointer to E()
+    if (a && len > 0) qsort(a, len, sizeof(double), cmp);
+    return len;
+}
+```
+
+A seed links the **berry-libc** - the *same* C library a POD uses (its sources are in `podlib/`) - so `printf`, `malloc`/`free`, the string functions, `<stdio.h>` file access and `<graphics.h>` all work; the cross build (`make seeds`) links it, and on the machine `grow` links it from `SEEDCORE.PKT`, pulling only the members a seed actually references. The one real limit is not "no OS": it is **position independence**. A seed is copied into a fixed slot and run with no per-load fixups, so it may contain no absolute relocation - no pointer initialiser, no `static const char *tbl[]`, no function table (`undefined reference` from a missing symbol, or a reloc the build rejects, is how you find out). Reaching the interpreter itself - the console, BASIC's variables and arrays, returning a string - is always through the services (`svc`): `svc->puts`, `svc->getkey`/`svc->inkey`, `svc->num_array`, `svc->set_return_str`, `svc->time_cs`.
+
+### Starting a new seed
 
 The quickest way to begin is to let the project scaffold one for you:
 
-    make newseed NAME=blur          (or just: tools/newseed.sh)
+```text
+make newseed NAME=blur          (or just: tools/newseed.sh)
+```
 
-This creates `seed/garden/blur/` containing a starter `blur.c` (an empty seed you
-fill in) and a self-contained `Makefile`. From there:
+This creates `seed/garden/blur/` containing a starter `blur.c` (an empty seed you fill in) and a self-contained `Makefile`. From there:
 
-    cd seed/garden/blur
-    make                            builds blur.sed
-    make install                    copies it where 'make sdimage' bundles it
+```text
+cd seed/garden/blur
+make                            builds blur.sed
+make install                    copies it where 'make sdimage' bundles it
+```
 
-A seed name is 1–8 characters (a letter first, then letters/digits/`_`) — short
-enough for the card's 8.3 file names, and a valid C identifier because it is also
-the seed's entry function. The rest of this section explains what goes inside.
+A seed name is 1-8 characters (a letter first, then letters/digits/`_`). The rest of this section explains what goes inside.
 
-## Writing a seed
+#### Splitting a seed across several files
+
+A seed is not limited to one function or one file. Helpers that live in the same file work exactly as you would expect:
+
+```c
+static double my_sqrt(double x) { ... }        // private to this file
+
+SEED_KEYWORD("HYPOT", SEED_KW_NUMFN, 2, 2) {
+    return my_sqrt(argv[0].num * argv[0].num + argv[1].num * argv[1].num);
+}
+```
+
+And so do helpers in **their own source files**. Every `.c` in the seed's directory is compiled and linked into the one blob, so you can just add files beside it:
+
+```text
+seed/garden/vecmath/
+    Makefile          (generated - globs *.c, no editing needed)
+    vecmath.c         the entry: SEED_EXPORT / SEED_KEYWORD
+    vec.c             helpers
+    vec.h             their declarations, #included by vecmath.c
+```
+
+```c
+// vec.h
+double vec_len(double x, double y);
+
+// vecmath.c
+#include "seed.h"
+#include "vec.h"
+
+SEED_KEYWORD("VECLEN", SEED_KW_NUMFN, 2, 2) {
+    (void)svc; (void)argc;
+    return vec_len(argv[0].num, argv[1].num);      // -> vec.c
+}
+```
+
+`make` picks up the new file with no edits. This works because every call between your files compiles to an ordinary **PC-relative branch**, resolved at link time - the finished blob holds no absolute addresses, so it still runs at whatever address it is loaded to. It is the same mechanism the seed C library already uses: `<stdio.h>`, `<stdlib.h>` and `<string.h>` are separate translation units linked into every seed.
+
+Three rules:
+
+- **Exactly one file defines the entry** (`SEED_EXPORT` or `SEED_KEYWORD`). The others are plain C.
+
+- **Anything unreached is dropped.** The link uses `--gc-sections`, so helpers nothing calls cost nothing in the blob.
+
+- **The self-containment rule still applies, across files as much as within one.** Calling a function in another file is fine; so is reading and writing a global, and so is a plain array of data. What fails is a **stored pointer** - one that has to sit in the blob's data holding the address of something else:
+  
+  ```c
+  static const char *names[3] = { "zero", "one", "two" };   // build FAILS
+  ```
+  
+    A seed is copied to whatever address its slot happens to be at, but that table would have the *link-time* addresses (near 0) baked into it, and would read rubbish once loaded. Build it at run time instead, inside a function, where the compiler computes each address relative to the program counter:
+  
+  ```c
+  const char *names[3];
+  names[0] = "zero"; names[1] = "one"; names[2] = "two";    // fine
+  ```
+  
+    The build gates on this and prints the offending addresses rather than shipping a blob that would misbehave. (A pointer the optimiser can see through is simply folded away and never becomes a problem - it is the ones that must really exist in memory that bite.)
+
+> The curated demos in `examples/seeds/` are one file each by design - the main `make seeds` rule turns every `examples/seeds/*/*.c` into its own `.SED`. Multi-file seeds live in their own directory under `seed/garden/`, which is exactly what `make newseed` creates.
+
+### Writing a seed
 
 A seed is a single C function marked with `SEED_EXPORT`, in a file that includes `seed.h`. It receives the services pointer, the argument list, and the argument count, and returns a number:
 
-    #include "seed.h"
-    
-    SEED_EXPORT(seed)
-    {
-        double a = (argc > 0) ? argv[0].num : 0;
-        double b = (argc > 1) ? argv[1].num : 0;
-        return a + b;
-    }
+```c
+#include "seed.h"
+
+SEED_EXPORT(seed)
+{
+    double a = (argc > 0) ? argv[0].num : 0;
+    double b = (argc > 1) ? argv[1].num : 0;
+    return a + b;
+}
+```
 
 Each argument is tagged as a number (`argv[i].num`) or a string (`argv[i].is_str`, with `argv[i].str` / `argv[i].len`). To return a string, call `svc->set_return_str(buf, len)` and read it back with `CALL$`.
 
+To turn the seed into a **language keyword** instead of a `SEED`/`CALL` extension, swap `SEED_EXPORT(name)` for `SEED_KEYWORD("NAME", kind, minargs, maxargs)` - everything else about writing the body is the same. See *Keyword seeds* above.
+
 A string-uppercasing seed, for example:
 
-    #include "seed.h"
-    
-    SEED_EXPORT(seed)
-    {
-        if (argc < 1 || !argv[0].is_str) return 0;
-        char buf[256];
-        int n = argv[0].len;
-        if (n > (int)sizeof(buf)) n = sizeof(buf);
-        for (int i = 0; i < n; i++) {
-            char c = argv[0].str[i];
-            if (c >= 'a' && c <= 'z') c -= 32;
-            buf[i] = c;
-        }
-        svc->set_return_str(buf, n);
-        return n;
+```c
+#include "seed.h"
+
+SEED_EXPORT(seed)
+{
+    if (argc < 1 || !argv[0].is_str) return 0;
+    char buf[256];
+    int n = argv[0].len;
+    if (n > (int)sizeof(buf)) n = sizeof(buf);
+    for (int i = 0; i < n; i++) {
+        char c = argv[0].str[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        buf[i] = c;
     }
+    svc->set_return_str(buf, n);
+    return n;
+}
+```
 
 And one that sums a numeric array passed by name:
 
-    #include "seed.h"
-    
-    SEED_EXPORT(seed)
-    {
-        if (argc < 1 || !argv[0].is_str) return 0;
-        char name[16]; int n = argv[0].len;
-        if (n > 15) n = 15;
-        for (int i = 0; i < n; i++) name[i] = argv[0].str[i];
-        name[n] = 0;
-    
-        int len = 0;
-        double *a = svc->num_array(name, &len);
-        if (!a) return 0;
-        double sum = 0;
-        for (int i = 0; i < len; i++) sum += a[i];
-        return sum;
+```c
+#include "seed.h"
+
+SEED_EXPORT(seed)
+{
+    if (argc < 1 || !argv[0].is_str) return 0;
+    char name[16]; int n = argv[0].len;
+    if (n > 15) n = 15;
+    for (int i = 0; i < n; i++) name[i] = argv[0].str[i];
+    name[n] = 0;
+
+    int len = 0;
+    double *a = svc->num_array(name, &len);
+    if (!a) return 0;
+    double sum = 0;
+    for (int i = 0; i < len; i++) sum += a[i];
+    return sum;
+}
+```
+
+And one that needs working memory - the median of an array, computed from an allocated sorted copy so the original is left untouched:
+
+```c
+#include "seed.h"
+
+SEED_EXPORT(seed)
+{
+    if (argc < 1 || !argv[0].is_str) return 0;
+    char name[16]; int n = argv[0].len;
+    if (n > 15) n = 15;
+    for (int i = 0; i < n; i++) name[i] = argv[0].str[i];
+    name[n] = 0;
+
+    int len = 0;
+    double *a = svc->num_array(name, &len);
+    if (!a || len <= 0) return 0;
+
+    double *tmp = malloc(len * sizeof(double));
+    if (!tmp) return 0;                 // out of heap
+    for (int i = 0; i < len; i++) tmp[i] = a[i];
+
+    for (int i = 1; i < len; i++) {     // insertion sort the copy
+        double v = tmp[i]; int j = i - 1;
+        while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
+        tmp[j + 1] = v;
     }
 
-And one that needs working memory — the median of an array, computed from an
-allocated sorted copy so the original is left untouched:
+    double med = tmp[len / 2];
+    free(tmp);
+    return med;
+}
+```
 
-    #include "seed.h"
+### Building a seed
 
-    SEED_EXPORT(seed)
-    {
-        if (argc < 1 || !argv[0].is_str) return 0;
-        char name[16]; int n = argv[0].len;
-        if (n > 15) n = 15;
-        for (int i = 0; i < n; i++) name[i] = argv[0].str[i];
-        name[n] = 0;
+Put the source in `examples/seeds/` and run:
 
-        int len = 0;
-        double *a = svc->num_array(name, &len);
-        if (!a || len <= 0) return 0;
+```text
+make seeds
+```
 
-        double *tmp = malloc(len * sizeof(double));
-        if (!tmp) return 0;                 // out of heap
-        for (int i = 0; i < len; i++) tmp[i] = a[i];
+This cross-compiles each seed for the Pi and links it into a flat `.SED` blob in `build/seeds/`. The build **requires the seed to be self-contained**: work through the arguments, your own local helper functions, the seed C library (above), and the services - but do not reach for OS-dependent functions or for global/static data outside the seed. If a seed pulls in something it cannot carry, the build stops with an error rather than producing a blob that would crash on the Pi.
 
-        for (int i = 1; i < len; i++) {     // insertion sort the copy
-            double v = tmp[i]; int j = i - 1;
-            while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
-            tmp[j + 1] = v;
-        }
+The example `.SED` files are copied into the `/seed` directory of the card image by `make sdimage`, so the seed programs run on real hardware as well as in the emulator.
 
-        double med = tmp[len / 2];
-        free(tmp);
-        return med;
-    }
+### A complete example
 
-## Building a seed
-
-Put the source in `seed/examples/` and run:
-
-    make seeds
-
-This cross-compiles each seed for the Pi and links it into a flat `.SED` blob in `build/seeds/`. The build **requires the seed to be self-contained**: work through the arguments, your own local helper functions, the seed C library (above), and the services — but do not reach for OS-dependent functions or for global/static data outside the seed. If a seed pulls in something it cannot carry, the build stops with an error rather than producing a blob that would crash on the Pi.
-
-The example `.SED` files are copied onto the card image by `make sdimage`, so the seed programs run on real hardware as well as in the emulator.
-
-## A complete example
-
-    10 REM Load and use several seeds
-    20 SEED A%, "ADD.SED"
-    30 PRINT "40 + 2 = "; CALL(A%, 40, 2)
-    40 SEED U%, "UPPER.SED"
-    50 PRINT "upper: "; CALL$(U%, "berry pi")
-    60 DIM D(5)
-    70 FOR I = 0 TO 5: D(I) = I * I: NEXT
-    80 SEED S%, "SUMARR.SED"
-    90 PRINT "sum of squares 0..5 = "; CALL(S%, "D")
-    95 SEED M%, "MEDIAN.SED"
-    96 PRINT "median of D() = "; CALL(M%, "D")
-    97 SEED Y%, "DYNARR.SED"
-    98 PRINT "dynarr sum 1..100 = "; CALL(Y%, 100)
-    102 DIM E(4)
-    104 E(0)=5 : E(1)=2 : E(2)=8 : E(3)=1 : E(4)=9
-    106 SEED Z%, "SORTARR.SED"
-    108 CALL Z%, "E"
-    110 PRINT "sorted E: "; E(0); " "; E(1); " "; E(2); " "; E(3); " "; E(4)
-    120 END
+```basic
+10 REM Load and use several seeds
+20 SEED A%, "ADD.SED"
+30 PRINT "40 + 2 = "; CALL(A%, 40, 2)
+40 SEED U%, "UPPER.SED"
+50 PRINT "upper: "; CALL$(U%, "berry pi")
+60 DIM D(5)
+70 FOR I = 0 TO 5: D(I) = I * I: NEXT
+80 SEED S%, "SUMARR.SED"
+90 PRINT "sum of squares 0..5 = "; CALL(S%, "D")
+95 SEED M%, "MEDIAN.SED"
+96 PRINT "median of D() = "; CALL(M%, "D")
+97 SEED Y%, "DYNARR.SED"
+98 PRINT "dynarr sum 1..100 = "; CALL(Y%, 100)
+102 DIM E(4)
+104 E(0)=5 : E(1)=2 : E(2)=8 : E(3)=1 : E(4)=9
+106 SEED Z%, "SORTARR.SED"
+108 CALL Z%, "E"
+110 PRINT "sorted E: "; E(0); " "; E(1); " "; E(2); " "; E(3); " "; E(4)
+120 END
+```
 
 Output:
 
-    40 + 2 = 42
-    upper: BERRY PI
-    sum of squares 0..5 = 55
-    median of D() = 9
-    dynarr sum 1..100 = 5050
-    sorted E: 1 2 5 8 9
+```text
+40 + 2 = 42
+upper: BERRY PI
+sum of squares 0..5 = 55
+median of D() = 9
+dynarr sum 1..100 = 5050
+sorted E: 1 2 5 8 9
+```
 
+## Beyond seeds: whole native programs
+
+A seed is a *fragment* of native code you call from BASIC. A whole native *program* is a **POD**, and around it sits a small toolchain that runs on the machine itself: the **tcc** C compiler, static-library **packets** (`.PKT`), and the **grow** build system. Those, the `RUN`/`PODLOAD`/`PODINFO` commands that drive them, the POD and PKT file formats, and how to build BerryBasiC itself from source, are all covered in the book **BerryBasiC Manual**, found at https://leanpub.com/berrybasicmanual. This reference stays with the BASIC language.
+
+# Under the Hood - Kernel, Drivers and Boot
+
+BerryBasiC is not a program that runs *on* an operating system - on the Raspberry Pi 4 it **is** the operating system. There is no Linux, no bootloader of ours, no libc: when the Pi powers on, the CPU ends up executing our code with nothing underneath it, and that code has to bring the machine to life itself - set up the CPU, the memory system, a screen, a keyboard and a disk - before the familiar `>` prompt can appear. This chapter is a guided tour of that low-level machinery: how the Pi boots, what each driver does, and the exact point at which the BASIC interpreter takes over.
+
+It is written for the curious and for anyone who wants to modify the kernel. You do not need any of it to *use* BerryBasiC.
+
+## The shape of the system
+
+The whole thing compiles to one flat binary, `kernel8.img` - a few hundred kilobytes of ARM64 machine code and data with no headers, no dynamic linking, and a fixed load address. The source is organised by role:
+
+| Directory  | Role                                                                                                                                                                                                                                                                       |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kernel/`  | boot assembly, CPU/exception setup, the MMU, the mailbox, the UART, and the top-level `kernel_main` that wires everything together                                                                                                                                         |
+| `drivers/` | the hardware: SD card (`sd.c`), FAT filesystem (`fat.c`), PCIe (`pcie.c`) and xHCI (`xhci.c`) USB, HID keyboard/mouse (`usb_kbd.c`, `usb_hid.c`), the graphics engine (`graphics.c`), fonts (`font*.c`, `ttf.c`), PWM sound (`sound.c`), GPIO (`gpio.c`) and I2C (`i2c.c`) |
+| `basic/`   | `basic.c` - the interpreter itself, **identical** on the Pi and on the Linux host build                                                                                                                                                                                    |
+| `include/` | the *platform contracts* (`console.h`, `storage.h`, `gpio.h`, ...) - the thin interfaces the interpreter talks to, so it never touches hardware directly                                                                                                                   |
+| `host/`    | Linux implementations of those same contracts, for the `make host` / `make test` builds                                                                                                                                                                                    |
+
+The trick that keeps the interpreter portable is in the last two rows: `basic.c` only ever calls functions like `con_putc`, `stg_read` or `gpio_write`, declared in `include/`. On the Pi those are implemented by the kernel and drivers; on Linux they are implemented by `host/`. The same interpreter source therefore becomes either a bare-metal kernel or an ordinary Linux program - which is why the language can be unit-tested on a PC.
+
+## How a Raspberry Pi 4 boots (before our code runs)
+
+Powering on a Pi 4 sets off a chain of firmware that has nothing to do with us:
+
+1. A tiny **boot ROM** baked into the BCM2711 SoC runs on the VideoCore GPU (not the ARM cores). It reads the boot configuration from the on-board SPI **EEPROM**.
+2. The EEPROM code mounts the first FAT partition of the SD card and loads the **GPU firmware**, `start4.elf` (with its companion `fixup4.dat`). No `bootcode.bin` is needed on the Pi 4 - that stage lives in the SoC.
+3. `start4.elf` reads **`config.txt`**, applies it (this is where `arm_64bit=1`, `kernel=kernel8.img` and `enable_uart=1` take effect), and loads our kernel plus the device tree `bcm2711-rpi-4-b.dtb` into RAM.
+4. The firmware copies `kernel8.img` to physical address **`0x80000`**, wakes the four Cortex-A72 ARM cores, and jumps them to `0x80000` - with a pointer to the device tree in register `x0`. Our code takes over here.
+
+Everything from step 4 onward is in this repository. (When you run `make sdimage`, `tools/mksdimage.sh` fetches `start4.elf`, `fixup4.dat` and the `.dtb` from the Raspberry Pi firmware repository and lays them, with `config.txt` and `kernel8.img`, on the bootable partition. Under `make run`, QEMU skips all of this and loads `kernel8.img` straight to `0x80000`.)
+
+## First instructions - `kernel/boot.S`
+
+The linker script `kernel/linker.ld` sets the image's origin to `0x80000` and forces the special section `.text.boot` to the very front, so the first byte the CPU executes is the `_start` label in `boot.S`. It is deliberately tiny - just enough assembly to reach C:
+
+- **Park the spare cores.** All four cores enter at `_start`. Each reads `MPIDR_EL1`; the three secondary cores (core id ≠ 0) drop into a `wfe` loop and sleep. Only the primary core continues - BerryBasiC is single-core.
+- **Drop to EL1.** ARM64 has privilege levels EL3 (most privileged) to EL2 to EL1 to EL0. The firmware may hand off at EL3 or EL2; the kernel wants to run at **EL1** (the classic "kernel" level). `boot.S` reads `CurrentEL` and steps down: from EL3 it sets `SCR_EL3` (mark the lower level non-secure and AArch64) and `eret`s into EL2; from EL2 it sets `HCR_EL2.RW` (EL1 is 64-bit) and `eret`s into EL1. Each step also sets `SPSR` to keep interrupts masked.
+- **Set the stack** just below the load address (`sp = _start`, so the stack grows down from `0x80000` into the space beneath the image).
+- **Install the exception vectors**: `VBAR_EL1 = vector_table`.
+- **Enable floating point.** `CPACR_EL1.FPEN = 0b11` so FP/NEON instructions don't trap - BASIC's numbers are doubles, and seeds use hardware FP.
+- **Zero the BSS.** The `.bss` region (uninitialised globals) is cleared to zero between the `__bss_start`/`__bss_end` symbols the linker provides. C code relies on this.
+- **Call `kernel_main`.** If it ever returns, the core halts in a `wfe` loop.
+
+## Catching faults - `kernel/vectors.S`
+
+Before the vector table existed, any fault (say, an unaligned access with the MMU off) jumped to address 0 and hung silently. Now `VBAR_EL1` points at a 2 KB-aligned table of 16 entries (128 bytes each) covering the synchronous/IRQ/FIQ/SError exceptions for each source. Every entry records a type number and branches to a common tail that gathers the syndrome registers - `ESR_EL1` (what happened), `ELR_EL1` (the faulting instruction) and `FAR_EL1` (the faulting address) - and calls `exception_handler()` in C. That handler prints the cause over the UART **and writes the boot log (including the fault details) to `BOOTLOG.TXT`**, then halts. A crash on real hardware therefore leaves a readable post-mortem on the SD card.
+
+## The kernel in `kernel_main`
+
+`kernel_main` (in `kernel/kernel.c`) brings the machine up in a very deliberate order; each step's placement has a reason:
+
+1. **`uart_init()`** - the serial console first, so *every* later step can log its progress. If the machine wedges, the last line printed says where.
+2. **`setup_fb()`** - allocate the framebuffer **before** enabling the MMU. With caches off the framebuffer is naturally coherent with the GPU, and bringing up a screen this early means we have somewhere to show progress even if the MMU bring-up itself is what fails on real silicon.
+3. **`mmu_init()`** then re-mark the framebuffer non-cacheable - turn on virtual memory and the caches (a big speed-up, and it lets unaligned accesses work).
+4. **`board_real_hw()`** - ask the firmware for the board serial; a nonzero serial means real hardware, zero means QEMU. This flag (`g_real_hw`) gates everything QEMU can't emulate (PWM audio, PCIe, I2C).
+5. **`stg_init()`** - mount the SD card's FAT filesystem so BASIC has a disk.
+6. **USB keyboard** - probe the DWC2 (USB-C) controller, then, on real hardware only, bring up PCIe and the VL805 xHCI (USB-A).
+7. **`hid_set_layout(CFG_KBD_LAYOUT)`** - apply the configured keyboard layout.
+8. **`flush_boot_log()`** - dump the whole in-RAM log to `BOOTLOG.TXT`, so USB bring-up can be diagnosed on a headless board.
+9. **`basic_init()` then `basic_repl()`** - hand control to the interpreter. On the Pi, `basic_repl()` never returns.
+
+Throughout, `boot_msg()` mirrors each stage to **both** the UART and the on-screen text, so on a cableless board the last line on the HDMI display is exactly where the kernel stopped.
+
+## The serial console - `kernel/uart.c`
+
+The first thing alive is the **PL011 UART** at `0xFE201000`. `uart_init()` routes GPIO 14/15 (pins 8/10) to their `ALT0` UART function, disables the pull resistors (via the Pi 4's `GPPUPPDN` registers), and programs 115200 baud, 8-N-1 with FIFOs. Output is polled (`uart_putc` waits for space in the TX FIFO). Two details matter beyond plain serial:
+
+- Every byte written is also **teed into a 32 KB in-RAM ring** (`log_buf`). That is what `flush_boot_log()` later writes to `BOOTLOG.TXT`, giving you the full boot log with no serial cable.
+- Helper printers (`uart_hex`, `uart_dec`, `uart_hex64`) format numbers without any libc.
+
+The `0xFE000000` base, incidentally, is the BCM2711's "low peripheral" view of its I/O - every peripheral register in this chapter is an offset from it.
+
+## Talking to the GPU - the mailbox (`kernel/mailbox.c`)
+
+The ARM cores ask the VideoCore GPU for services (allocate a framebuffer, read the board serial, query a clock) through the **property mailbox**, channel 8, at `0xFE00B880`. The protocol is a buffer of 32-bit words - a header, then a series of *tags* (a tag id, buffer sizes, and request/response slots), then an end marker - whose 16-byte-aligned address is written to the mailbox with the channel number in the low bits. `mbox_call()` writes the request, spins until the GPU replies, and checks the response code.
+
+The subtlety is **cache coherence**: the GPU is a separate cache domain, so before writing the request `mbox_call()` cleans the buffer out of the data cache (`dcache_clean_inval`), and after the reply it invalidates it again to read the GPU's answer from actual RAM rather than a stale cached copy. Under QEMU (no cache model) this is a no-op; on real silicon, omitting it means reading garbage.
+
+## The framebuffer (`fb_configure`)
+
+`fb_configure(w, h)` builds one mailbox request with several tags at once: set the physical and virtual size, set depth to **32 bits**, force pixel order to **RGB** (the Pi 4 firmware defaults to BGR, which would swap red and blue - the reason the raspberry logo would otherwise turn purple), allocate the buffer, and read back the *pitch* (bytes per row, which may exceed `width × 4`). The GPU returns a **bus address**, which we mask with `0x3FFFFFFF` to strip the VideoCore alias and get the plain physical address. The result is handed to `init_graphics()` in the graphics driver, and the text grid (`g_term_cols`/`g_term_rows`) is recomputed from the size and the glyph cell. The very same function backs the BASIC `SCREEN` statement, which re-runs it to switch resolution mid-program (re-marking the new buffer non-cacheable afterwards).
+
+## Virtual memory and caches - `kernel/mmu.c`
+
+The kernel runs with a simple **identity map** (virtual address = physical address), built once in `mmu_init()`:
+
+- A **level-1** table splits the 4 GiB space into four 1 GiB entries. The first gigabyte (where the GPU puts the framebuffer) points at a **level-2** table of 512 × 2 MiB blocks, so individual 2 MiB regions can be re-typed at runtime; the other three gigabytes are 1 GiB block entries. RAM is **Normal, write-back cacheable**; the ranges above RAM and the peripheral space are **Device** memory (no caching, no reordering).
+- `MAIR_EL1` defines three memory attributes (Device, Normal-WB, Normal-non-cacheable); `TCR_EL1` selects a **39-bit** virtual address space (`T0SZ = 25`) - wide enough to reach the PCIe outbound window at CPU address `0x6_00000000` - with 4 KB granules; `SCTLR_EL1` finally sets the `M`, `C` and `I` bits to switch on the MMU, data cache and instruction cache together.
+- **The single most important line for real hardware** is `dcache_clean_inval_all()`, run *before* the caches are enabled. Coming out of the firmware, the caches may hold stale lines shadowing our load region and page tables; enable caching without flushing them and the CPU reads phantom data and hangs. QEMU doesn't model caches, so it boots either way - which is exactly why a bug here shows up only on silicon. The routine walks every cache level by set/way and cleans+invalidates each line.
+
+Two helpers keep DMA-shared memory correct: `mmu_set_noncached()` re-types the framebuffer's 2 MiB blocks as non-cacheable (so CPU writes reach the GPU scan-out immediately), and `mmu_map_device_block()` opens a 1 GiB Device window for the PCIe controller. `dcache_clean_inval()` does line-by-line maintenance for mailbox buffers.
+
+## Storage - SD card and FAT (`drivers/sd.c`, `drivers/fat.c`)
+
+`sd.c` is a polled (PIO), 512-byte-block **SDHCI** driver. There are two SD host controllers on a Pi 4: the microSD slot hangs off the **EMMC2** controller at `0xFE340000` on real hardware, but QEMU wires the card to the **legacy** controller at `0xFE300000`. `sd_init()` therefore probes both and uses whichever actually reports a card, then runs the standard SD initialisation command sequence (GO_IDLE, SEND_IF_COND, the ACMD41 negotiation, identify, select) before reads and writes go one block at a time through the data FIFO.
+
+`fat.c` is a compact **FAT16/FAT32** driver on top. `stg_init()` reads sector 0: if it isn't a BPB it is treated as an **MBR**, and the driver mounts the **second** partition - the BerryBasiC card keeps the firmware/kernel on partition 1 and the user's `.BAS` files on partition 2, so `CAT`/`LOAD`/`SAVE` only ever see user files (it falls back to partition 1 for old single-partition cards). It parses the BIOS Parameter Block to locate the FATs, the root directory and the data region, and supports subdirectories, 8.3 names and full VFAT **long file names**. All of this sits behind the `storage.h` contract (`stg_read`, `stg_open`, `stg_dirnext`, ...) that the interpreter's `LOAD`/`SAVE`/`OPENIN`/`DIROPEN` words call.
+
+## Input - USB HID keyboard and mouse
+
+Getting a keypress is the hardest part of the bring-up, because the Pi 4 has two completely different USB paths and BerryBasiC supports both:
+
+- **USB-C, via the DWC2 OTG controller** (`usb_kbd.c`). This is also the controller QEMU emulates, so it is tried first and is what you use under the emulator.
+- **USB-A, via the VL805 xHCI controller on PCIe** (`pcie.c` + `xhci.c`), tried on real hardware if no USB-C keyboard is found. `pcie.c` brings up the BCM2711 PCIe root complex (registers at `0xFD500000`), programs an **outbound MMIO window** mapping CPU address `0x6_00000000` to the VL805's BAR, and enumerates the bridge; `xhci.c` is a minimal xHCI driver that starts the controller and enumerates one HID boot-protocol device. QEMU's `raspi4b` has **no** PCIe, so this whole path is gated behind the real-hardware flag (touching the controller under QEMU would fault) - which is why it is validated by the boot log rather than in CI.
+
+Both paths feed raw 8-byte HID reports into `usb_hid.c`, the shared decoder that turns scan codes into characters through the selected **keyboard layout** (US/UK/NO/DK/SE/DE, with AltGr) and tracks mouse movement and buttons. If neither keyboard is found, the **UART** is the fallback terminal, so a serial cable always gets you a prompt.
+
+## Output and Peripherals
+
+- **`drivers/graphics.c`** is the drawing engine: `putpixel`/`getpixel`, lines, rectangles, circles, ellipses, triangles, flood fill and fast scrolls, all in physical pixels, honouring a **clip rectangle** and the current **plot operation** (store/OR/AND/EOR/invert). Every primitive writes through one set of pointers (`fb_buf`/`fb_pitch_words`/...) that name the *active surface*; swapping those pointers is how double buffering (`BUFFER`) and render-to-sprite (`SPRITETARGET`) redirect all drawing with no change to the primitives.
+- **`drivers/font.c` + `font_data.c`** hold the bitmap console font; `font_data.c` is *generated* by `tools/genfont.sh` from the file you pick in `make config`. **`drivers/ttf.c`** adds anti-aliased TrueType text via the vendored `stb_truetype` (see *TrueType Fonts*).
+- **`drivers/sound.c`** drives a square-wave voice on the 3.5 mm jack through the **PWM** hardware - real-hardware only, since QEMU doesn't model PWM.
+- **`drivers/gpio.c`** and **`drivers/i2c.c`** expose the 40-pin header: direct pin control (BCM numbering) and an I2C master on BSC1. These back the `PIN`/`PINMODE` and `I2C...` words, and the seed GPIO/graphics services.
+
+## The Platform Starts: how BASIC Stays Hardware-agnostic
+
+Everything above is reached through the headers in `include/`. `console.h` is the largest: `con_putc`, `con_getline_ed`, `con_cls`, the whole graphics family (`con_line`, `con_circle`, `con_gtext`, ...), `con_mouse`, and so on. `storage.h`, `gpio.h`, `i2c.h`, `ttf.h`, `gfx.h`, `sound.h` and `image.h` cover the rest. `basic.c` includes only these - never a register address, never a driver header. On the Pi, `kernel.c` and the drivers implement them (converting BASIC's logical 1280×1024 bottom-left coordinates into physical pixels, for instance); on Linux, `host/*.c` implement them against stdio and stubs. This is the seam that lets one interpreter be both a Pi kernel and a testable Linux binary - and it is the same seam the native **seeds** reach back through, via the services table in `seed.h`.
+
+## Where BerryBasiC steps in - the REPL
+
+The hand-off is the last two lines of `kernel_main`:
+
+```c
+basic_init();     // reset the program, variables and interpreter state
+basic_repl();     // the read-eval-print loop - never returns on the Pi
+```
+
+`basic_repl()` (in `basic.c`) is the classic loop. It draws the boot logo and banner (`con_splash`), prints the `>` prompt, and calls `con_getline_ed()` to read a line. That console function pulls characters from whichever keyboard enumerated (or the UART), handles in-line editing and the up/down command history, and - because it runs between statements - also services the software mouse pointer and any pending BASIC event handlers. Each completed line is then either **stored** (if it begins with a line number) or **run immediately** (direct mode); running it walks the tokeniser and evaluator in `basic.c`, which reach the screen, the disk and the pins only through the contract above. When a program `PRINT`s, the character travels `con_putc` to the framebuffer text renderer to `graphics.c` to the non-cacheable framebuffer to the GPU scan-out to your HDMI display - the full height of the stack this chapter has climbed, exercised by a single keystroke.
+
+That is the whole journey: SoC boot ROM to GPU firmware to `boot.S` at `0x80000` to drop to EL1 to `kernel_main` brings up UART, framebuffer, MMU, SD and USB to `basic_repl()` to your program. From the first instruction to the `>` prompt, every layer is in this repository, and every layer is something you can read, change and rebuild.
+
+# Hardware Support and Limitations
+
+The previous sections climbed the stack from the boot ROM to the `>` prompt. This one is the honest counterpart: **what that stack cannot do, and why.**
+
+BerryBasiC's drivers are written to be *read*. The entire USB stack here is smaller than the part of Linux that handles a single keyboard's power management. That is a deliberate bargain, and it has a price. A production OS driver spends most of its code on **generality** - every device class, every topology, hot-plug, error recovery, retries, power states. BerryBasiC's drivers implement the **happy path** for exactly what a BASIC computer needs: one keyboard, one mouse, one card, one screen. Everything in this chapter follows from that single decision.
+
+None of these limits are laws of physics. Each one is a well-scoped afternoon (or weekend) of work, and this chapter names the file you would open to lift it.
+
+## USB
+
+The USB stack (`usb_kbd.c` for the DWC2/USB-C controller, `pcie.c` + `xhci.c` for the VL805/USB-A controller, `usb_hid.c` for the shared decoder) knows how to do one thing: find a keyboard and a mouse, and read them.
+
+**What works:** one simple keyboard and one simple mouse, plugged directly into a port. Period. Both need to be basic, wired, not those fancy devices with USB-hubs built in them, or the driver will cry, also do not try any of the wireless wonders. They won't work.
+
+Enumerating HUB devices by matching all the available combinations is simply out of scope for this tiny driver. USB-A is tried on real hardware.
+
+**What doesn't:**
+
+| Limitation                         | Why                                                                                                                                   | What you actually see                                                                                                                                                                                                                                                                                  |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **No nested hubs**                 | `enumerate_hub()` scans the ports of the *first* hub and configures each connected device as HID. It never recurses.                  | A keyboard plugged into a hub that is plugged into another hub is invisible. (The xHCI path carries route strings for **one** extra tier - enough for a monitor's built-in hub - but no deeper.)                                                                                                       |
+| **At most two HID devices**        | There is one keyboard slot and one mouse slot, and that is the whole device table.                                                    | A third device, or a second keyboard, is enumerated and then ignored.                                                                                                                                                                                                                                  |
+| **Boot protocol only**             | The driver never parses a HID **report descriptor**; it assumes the fixed 8-byte boot report layout.                                  | Six-key rollover at best. No media keys, no extra buttons, no gamepads, joysticks, tablets or touchscreens. Keyboards that only speak report protocol (some programmable and "gaming" boards) will not type. Mice give you three buttons and a wheel - no extra buttons, no high-resolution scrolling. |
+| **No hot-plug**                    | Enumeration runs **once**, from `kernel_main`, before the REPL starts. There is no port-change interrupt and nothing watches for one. | Plug everything in **before** you power on. Unplugging is not noticed, and re-plugging will not bring the device back - only a reboot will.                                                                                                                                                            |
+| **Polled, never interrupt-driven** | Reports are fetched by polling the interrupt endpoint between BASIC statements. A NAK simply means "no key".                          | There is no hardware queue behind you. Typing during a long, tight computation can drop keystrokes.                                                                                                                                                                                                    |
+| **No other USB class, at all**     | Only class 3 (HID) and class 9 (hub) are recognised.                                                                                  | No USB mass storage (a memory stick does nothing), no USB audio, no USB serial adapters, no webcams, no printers. The SD card is the only storage the machine has.                                                                                                                                     |
+| **No error recovery**              | Only the happy path is implemented. Beyond a few retries during enumeration, a stalled or wedged endpoint is not reset or recovered.  | A flaky device usually means a reboot.                                                                                                                                                                                                                                                                 |
+
+Two further notes. Hub ports are capped at **8** (and default to 4 if the hub descriptor read fails). And on real hardware the VL805 path needs a reasonably **recent Pi bootloader** - an old (2022-era) EEPROM leaves the controller stuck and the USB-A ports dead; update the firmware first. If no USB keyboard is found on either controller, the **UART falls back** to being your terminal, so a serial cable always gets you a prompt.
+
+## Storage
+
+`sd.c` is a polled SDHCI driver; `fat.c` is a compact FAT implementation on top.
+
+- **SD card only.** No USB sticks, no network shares. One card, one filesystem.
+- **PIO, one block at a time, no DMA.** Every 512-byte block is shovelled through the data FIFO by the CPU. There is no multi-block transfer and no high-speed/UHS clock tuning - the card runs at a conservative clock. This is why loading a large PNG or TrueType font takes a visible moment: it is the honest cost of a driver you can read in one sitting.
+- **FAT16 and FAT32 only.** No FAT12, and **no exFAT** - which matters in practice, because cards larger than 32 GB ship formatted as exFAT. Reformat them as FAT32. No ext4, no NTFS.
+- **The second partition only.** `stg_init()` mounts partition 2 (falling back to partition 1 on old single-partition cards). Any other partition is invisible to `CAT`, `LOAD` and `SAVE`.
+- **No RTC, so every timestamp is a fiction.** The Pi 4 has no battery-backed clock and BerryBasiC does not set the time from anywhere, so `fat.c` stamps every file it writes **2026-01-01**. The dates in a rich `CAT` listing are decoration, not history. Likewise `TIME` counts centiseconds since *boot*, not wall-clock time since 1970.
+- **No journalling, no caching, no wear levelling.** Writes go straight at the card. A power cut in the middle of a `SAVE` can leave a truncated file or a cross-linked FAT; if a card starts behaving oddly, run `fsck` on it from a PC.
+- No permissions, no file locking, no symlinks.
+
+## Display
+
+- **One framebuffer on one HDMI output.** The mode is requested from the GPU firmware through the mailbox at boot (and again on `SCREEN`). There is no second display, no EDID renegotiation, no display hot-plug - connect the monitor before powering on.
+- **No GPU acceleration whatsoever.** Every pixel in `graphics.c` is written by the CPU. The VideoCore is used to *give us the framebuffer* and nothing else: no OpenGL, no 3D, no hardware blitter, no hardware sprites, no hardware scrolling.
+- **No vsync.** There is no vertical-blank interrupt to wait on. `FLIP` copies the back buffer and `WAIT` paces the loop off the system timer, which is close enough to 60 Hz to look right - but tearing is possible, because nothing is actually synchronised to the scan-out.
+- 32-bit truecolour only; no palette modes, no overscan control, no rotation.
+
+## Sound
+
+- **One square-wave voice**, generated by the PWM peripheral in mark/space mode on the 3.5 mm analogue jack.
+- No PCM playback - **no WAV, no MP3, no samples of any kind**. There is no DMA sample stream, so there is nothing to feed a sample engine. No mixing, no chords, no waveform choice, no envelopes, no true stereo, no audio input.
+- **No HDMI audio** and no USB audio: the jack is the only way out.
+- **Real hardware only.** QEMU does not model the PWM peripheral, so `SOUND` and `TONE` are silently gated off under the emulator.
+
+## The 40-pin header
+
+- **GPIO 0-27 only** - the pins actually on the header. The higher BCM numbers (used internally by the board) are not exposed.
+- **Edges are polled, not interrupt-driven.** `PINWAIT` and `ON PIN` sample the pin in a loop; a pulse shorter than the polling interval simply never happened as far as BASIC is concerned. This is fine for buttons and sensors, and quite unsuitable for high-speed protocols, rotary encoders spun fast, or anything needing precise timing.
+- **I2C is BSC1 only** (SDA on BCM 2, SCL on BCM 3), **master only**, polled, through a 16-byte FIFO. No multi-master, no 10-bit addressing, no slave mode, and devices that stretch the clock aggressively may time out (there is a deliberate 100 ms timeout so a stuck bus can never hang the machine). Real hardware only - QEMU does not model the BSC.
+- **No SPI, no 1-Wire, no hardware serial on the header, no PWM output on pins, no ADC.** (The Pi has no analogue input in any case; that one needs an external chip - and, today, an I2C one.)
+
+## Not present at all
+
+These are not partial implementations. They are absences.
+
+- **Networking.** No Ethernet, no WiFi, no Bluetooth, and no IP stack. The machine cannot talk to anything, with the current release of the system. Look at the bright side of it: it can't be remotely hacked.
+- **Multi-core.** Cores 1-3 are parked in a `wfe` loop in `boot.S`, on the third instruction of the system's life. Three quarters of the CPU is asleep; everything runs on core 0. When we will need it we will use it.
+- **Interrupts.** Nothing in the BASIC-visible machine is interrupt-driven. There is no preemption, no scheduler, no processes and no threads. `ON TIMER`/`ON PIN`/`ON MOUSE` handlers are **cooperative** - dispatched between statements - which is why a handler can never fire in the middle of one.
+- **Memory protection.** The MMU is used for caching and device mappings, not to protect anything from you. `POKE`, `!` and a stray pointer in a seed can scribble on the kernel, the framebuffer, or the interpreter's own state. This is the bargain of direct hardware access, stated plainly.
+- No camera (CSI), no DSI display, no RTC, no watchdog, no thermal or power management, no clock scaling, no USB gadget mode, no suspend or resume. Did it freeze? Pull the power cable.
+
+## QEMU versus real hardware
+
+The two targets are not the same machine, and a few drivers exist for only one of them.
+
+| Subsystem                         | QEMU `raspi4b`                                           | Real Pi 4                                      |
+| --------------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
+| Framebuffer, SD card, FAT         | Yes (SD on the *legacy* controller at `0xFE300000`)      | Yes (SD on **EMMC2** at `0xFE340000`)          |
+| USB-C keyboard/mouse (DWC2)       | Yes - this is the emulated path                          | Yes, but never tested with real USB-C keyboard |
+| USB-A keyboard/mouse (VL805 xHCI) | **No** - `raspi4b` has no PCIe at all                    | Yes, with a recent bootloader                  |
+| GPIO                              | Yes                                                      | Yes                                            |
+| I2C (BSC1)                        | **No** - not modelled; the words refuse rather than hang | Yes                                            |
+| Sound (PWM)                       | **No** - not modelled                                    | Yes                                            |
+
+This is why the real-hardware paths are validated by reading the **boot log over UART** rather than in CI: there is no emulator to run them in.
+
+## Lifting a limit
+
+Every entry above is an invitation, and most are smaller than they look. Nested hub support is recursion in `enumerate_hub()` (`usb_kbd.c`). Hot-plug is a port-status poll in the same file. Real report-descriptor parsing - and with it gamepads - is a parser in `usb_hid.c`. Faster loading is multi-block reads in `sd.c`. Sample playback is a DMA ring feeding the PWM FIFO in `sound.c`. SPI is a sibling of `i2c.c`. A wall clock is an I2C RTC breakout and a few lines in `fat.c`. The three sleeping cores need a spin-table release in `boot.S`.
+
+That is the other half of the bargain: the drivers are simple enough to be incomplete, and simple enough that *you* can complete them.
+
+# Join the Development
+
+Do you consider yourself a coder with some free time and a curiosity for low-level programming, embedded systems, or simply creating something fun? Then why not jump in and become part of the ***BerryBasiC*** journey?
+
+BerryBasiC is an open project, and contributions of all kinds are welcome. Whether you want to improve the interpreter, add new commands, write libraries, create examples, improve documentation, create a driver for something you miss, or simply experiment and share your ideas, there is always something to do.
+
+You don't need to wait for an invitation, just download the source code, explore how things work, and start coding. Every improvement, every bug report, and every new idea helps make ***BerryBasiC*** better.
+
+Have a feature you would like to see? A clever optimization? A completely unexpected use case? We would love to hear from you.
+
+So grab your editor, fire up your compiler, install the dependencies, and join the fun. The ***BerryBasiC*** community will be happy to welcome your contributions.
+
+# Appendix A: Error Messages
+
+When something goes wrong, BerryBasiC stops the current operation and prints a message; inside a running program the offending line number is appended in brackets, e.g. `Division by zero (line 30)`. Only the first error of a statement is reported. The messages you may meet:
+
+## Syntax and expressions
+
+| Message                                    | Usually means                                                   |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| `Syntax error in expression`               | the expression is malformed                                     |
+| `Expected a value or expression`           | a value was needed here but something else appeared             |
+| `Expected a command`                       | the line does not begin with something runnable                 |
+| `That keyword can't be used as a command`  | a function-only keyword was used where a statement was expected |
+| `Expected a variable name`                 | a variable name was required (e.g. after `INPUT`, `LET`)        |
+| `Expected '='`                             | an assignment or `PTR#`/`TIME` set is missing its `=`           |
+| `Expected ')' to close the parameter list` | unbalanced parentheses in a `DEF`                               |
+| `Expected a parameter name`                | a `DEF`'s parameter list is malformed                           |
+| `Unexpected text after the statement`      | leftover characters after a complete statement                  |
+| `I don't recognise that character`         | an illegal character in the source                              |
+| `Expression too complex`                   | the expression nests deeper than the evaluator allows           |
+
+## Types and values
+
+| Message                                          | Usually means                                                         |
+| ------------------------------------------------ | --------------------------------------------------------------------- |
+| `Type mismatch: numbers and text can't be mixed` | a number and a string were combined or compared                       |
+| `Type mismatch: file record is a number`         | `INPUT#` read a number into a `$` variable                            |
+| `Type mismatch: file record is a string`         | `INPUT#` read a string into a numeric variable                        |
+| `Division by zero`                               | `/`, `DIV` or `MOD` by 0                                              |
+| `Invalid argument`                               | e.g. `ASC("")`, or a value out of a function's allowed range          |
+| `Bad format template`                            | a `FORMAT$`/`PRINT USING` template has no digit position (`#` or `0`) |
+| `Text string is too long`                        | a result would exceed 255 characters                                  |
+
+## Control flow
+
+| Message                                                      | Usually means                                |
+| ------------------------------------------------------------ | -------------------------------------------- |
+| `NEXT without a matching FOR`                                | a stray `NEXT`, or mismatched loop nesting   |
+| `RETURN without a matching GOSUB`                            | a `RETURN` reached with no active `GOSUB`    |
+| `UNTIL without a matching REPEAT`                            | a stray `UNTIL`                              |
+| `ENDWHILE without a matching WHILE`                          | a stray `ENDWHILE`                           |
+| `WHEN/OTHERWISE without a matching CASE`                     | a `CASE` clause outside any `CASE`           |
+| `CASE without a matching ENDCASE`                            | a `CASE` block was never closed              |
+| `IF without a matching ENDIF`                                | a block `IF` was never closed                |
+| `ELSE without a matching IF`                                 | a stray block `ELSE`                         |
+| `No such line number`                                        | a jump target that does not exist            |
+| `No such label`                                              | a jump to a label that is not defined        |
+| `Expected a line number` / `Expected a line number or label` | a jump target was expected                   |
+| `Expected GOTO or GOSUB after ON`                            | malformed `ON ...`                           |
+| `Expected OF after CASE`                                     | malformed `CASE ...`                         |
+| `Expected TO in a FOR statement`                             | malformed `FOR ...`                          |
+| `Block IF can only be used inside a program`                 | block `IF` typed in direct mode              |
+| `CASE can only be used inside a program`                     | `CASE` typed in direct mode                  |
+| `WHILE can only be used inside a program`                    | `WHILE` typed in direct mode                 |
+| `This can only be used inside a program`                     | a program-only statement used in direct mode |
+
+## Capacity ("Out of memory" and the "Too many..." family)
+
+| Message                                                                      | Usually means                                                         |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `Out of memory`                                                              | out of variable space, string heap, program lines, or a stack is full |
+| `Too many nested PROC calls`                                                 | recursion or nesting beyond 32 `PROC`/`FN` calls                      |
+| `Too many nested function calls`                                             | function-return stack full                                            |
+| `Too many nested REPEAT loops`                                               | more than 16 nested `REPEAT`s                                         |
+| `Too many nested WHILE loops`                                                | more than 16 nested `WHILE`s                                          |
+| `Too many nested CASE statements`                                            | more than 16 nested `CASE`s                                           |
+| `Too many arguments` / `Too many imported modules` / `Too many seeds loaded` | the matching limit was reached                                        |
+| `Wrong number of arguments`                                                  | a `PROC`/`FN` call's argument count doesn't match its `DEF`           |
+
+## Arrays and data
+
+| Message                                            | Usually means                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| `Array index out of range`                         | a subscript outside the declared bounds (or a negative `DIM` size) |
+| `That array is already defined` / `Already exists` | re-`DIM`ing an existing array                                      |
+| `Reserve memory into a numeric variable`           | `DIM name size` used with a `$` variable                           |
+| `READ ran out of DATA`                             | more `READ`s than `DATA` items                                     |
+
+## User-defined types (records)
+
+| Message                                        | Usually means                                                                          |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `Expected a type name`                         | `TYPE`, `AS` or a parameter's `AS` with no name after it                               |
+| `Expected a field name`                        | something that isn't a name in a `TYPE` field list                                     |
+| `Expected a field name like p.x`               | a record used without selecting a field                                                |
+| `That type is already defined`                 | two `TYPE`s with the same name (remember `RUN` clears types, so this is about one run) |
+| `That field is already defined`                | a field name repeated within one `TYPE`                                                |
+| `A type needs at least one field`              | an empty `TYPE ... ENDTYPE`                                                            |
+| `TYPE without a matching ENDTYPE`              | the field list ran to the end of the program                                           |
+| `ENDTYPE without a matching TYPE`              | a stray `ENDTYPE`                                                                      |
+| `Too many types` / `Too many fields`           | past the limits in *Appendix B*                                                        |
+| `No such type`                                 | `DIM p AS <name>` before that `TYPE` ran, or a misspelling                             |
+| `No such field`                                | a field the type doesn't have                                                          |
+| `That record is already defined`               | re-`DIM`ing an existing record                                                         |
+| `A record variable can't have a $ or % suffix` | the *fields* carry the types, not the record                                           |
+| `An array of records has one dimension`        | `DIM e(2,2) AS point`                                                                  |
+| `Expected an index like e(3)`                  | an array of records used without an element                                            |
+| `Those records are different types`            | copying or passing a record where another type is wanted                               |
+| `Expected a record to copy from`               | the right of `q = ...` isn't a record                                                  |
+| `That argument must be a record`               | a plain value passed to an `AS` parameter                                              |
+| `A record argument needs an AS parameter`      | a record passed to a plain parameter                                                   |
+
+## Collections
+
+| Message                                          | Usually means                                                             |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| `Not a collection`                               | a value passed where a dictionary/list/tree handle was expected isn't one |
+| `Not a dictionary` / `Not a list` / `Not a tree` | a collection word used on the wrong kind of collection                    |
+| `Too many collections`                           | more than 64 collections exist at once                                    |
+| `Index out of range`                             | a list index, `DICTKEY$`/`TREEKEY` index outside `0 ... SIZE-1`           |
+| `List is empty`                                  | `POP` / `POP$` on a list with no items                                    |
+| `Tree is empty`                                  | `TREEMIN` / `TREEMAX` on a tree with no keys                              |
+
+(Reading a value with the wrong number/text form raises the usual `Type mismatch`.)
+
+## Graphics
+
+| Message                              | Usually means                                               |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `No such graphics mode`              | `MODE n` with `n` other than 1 or 2                         |
+| `Expected MITER, BEVEL or ROUND`     | a `LINEJOIN` with an unknown join style                     |
+| `Expected BUTT, ROUND or SQUARE`     | a `LINECAP` with an unknown cap style                       |
+| `Could not allocate the back buffer` | `BUFFER ON` when there isn't room for a full-screen buffer  |
+| `Expected ON or OFF`                 | a `BUFFER` statement without `ON` or `OFF`                  |
+| `Bad sprite size`                    | `NEWSPRITE` with a zero or negative width/height            |
+| `Bad sprite`                         | `SPRITETARGET` given a null or invalid sprite address       |
+| `No such font`                       | `FONT` given a handle that was never returned by `LOADFONT` |
+
+## Hardware buses (GPIO, I2C)
+
+| Message                                 | Usually means                                                  |
+| --------------------------------------- | -------------------------------------------------------------- |
+| `No such pin`                           | a pin number outside BCM 0-27                                  |
+| `Bad pin mode`                          | an unknown `PINMODE` mode, or an `ALT` function outside 0-5    |
+| `GPIO needs the Pi, not the host build` | a GPIO command on the host test build                          |
+| `I2C needs real Pi hardware`            | an I2C word on the host or under QEMU (the bus isn't emulated) |
+| `I2C write failed` / `I2C read failed`  | no device acknowledged, or the transfer timed out              |
+| `Too many bytes`                        | an `I2CWRITE` with more than 64 bytes                          |
+
+## Files and storage
+
+| Message                                                                                 | Usually means                              |
+| --------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `No storage card found` / `No such file` / `File not found`                             | the card or file is unavailable            |
+| `Expected a file name`                                                                  | a name was required by a file command      |
+| `File is too big to load`                                                               | the program file exceeds the program store |
+| `Storage card is full` / `Storage read/write error` / `Disk error` / `File write error` | a filesystem failure                       |
+| `Directory not empty`                                                                   | `RMDIR` on a non-empty directory           |
+| `End of file`                                                                           | read past the end of a channel             |
+| `Expected '#' before a file channel`                                                    | a channel operand is missing its `#`       |
+| `File is not a PRINT# record`                                                           | `INPUT#` on data not written by `PRINT#`   |
+
+## Seeds
+
+| Message                                                                        | Usually means                                 |
+| ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `Native seeds run on the Pi, not the host build`                               | seeds were used on a host test build          |
+| `No such seed`                                                                 | a `CALL` handle that isn't loaded             |
+| `Not a valid seed file` / `Seed needs a newer interpreter` / `Seed is too big` | the `.SED` file can't be loaded               |
+| `Seed handle must be a numeric variable`                                       | `SEED` given a `$` variable for its handle    |
+| `Imported module not found`                                                    | `IMPORT` could not find the named `.BAS` file |
+
+---
+
+# Appendix B: Limits
+
+The interpreter's capacity limits. For **hardware** limits - what the drivers do and do not support, and why - see *Hardware Support and Limitations*.
+
+| Thing                                      | Limit                                        |
+| ------------------------------------------ | -------------------------------------------- |
+| Line length                                | 128 characters                               |
+| Program size                               | 8192 lines                                   |
+| Variable name                              | 8 characters, including the `%` / `$` suffix |
+| String length                              | 255 characters                               |
+| Variables                                  | 512                                          |
+| Arrays                                     | 16, up to 3 dimensions each                  |
+| `TYPE` definitions                         | 8                                            |
+| Fields per type                            | 16                                           |
+| Record numeric field slots (pool)          | 1024                                         |
+| Record text field slots (pool)             | 256                                          |
+| Array of records                           | 1 dimension                                  |
+| Collections (dictionaries + lists + trees) | 64 total                                     |
+| String-array elements (pool)               | 512                                          |
+| `GOSUB` nesting                            | 32                                           |
+| `FOR` nesting                              | 16                                           |
+| `REPEAT` nesting                           | 16                                           |
+| `WHILE` nesting                            | 16                                           |
+| `CASE` nesting                             | 16                                           |
+| `PROC` / `FN` call depth                   | 32                                           |
+| `LOCAL` saves (across all active calls)    | 96                                           |
+| `PROC` / `FN` definitions                  | 64                                           |
+| `PROC` / `FN` parameters (arguments)       | 16                                           |
+| Imported modules                           | 16                                           |
+| Open files                                 | 4                                            |
+| Loaded seeds                               | 8                                            |
+| Seed arguments                             | 16                                           |
+| Seed heap                                  | 2 MB (default)                               |
+| GPIO pins (BCM numbering)                  | 0-27                                         |
+| `PINMODE` alt functions                    | 0-5                                          |
+| Back buffer (`BUFFER ON`)                  | one, full-screen                             |
+| Active sprite target (`SPRITETARGET`)      | one at a time                                |
+| Loaded TrueType fonts (`LOADFONT`)         | 8 at once                                    |
+| Graphics coordinate modes (`MODE`)         | 2 (1 = BBC logical 1280×1024, 2 = native pixels) |
+
+Graphics coordinates come in two spaces, chosen with `MODE`: `MODE 1` is a fixed 1280 × 1024 logical grid (origin bottom-left, scaled to the panel), `MODE 2` is the physical resolution in pixels (origin top-left). See *MODE*.
+
+---
+
+# Appendix C: Keyword Quick Reference
+
+Grouped by purpose. Functions are marked *(fn)* and used inside expressions; everything else is a statement or command. String-valued words end in `$`.
+
+**Program control:** `RUN` · `LIST` (pretty; `LIST SIMPLE` for plain; `LIST "file"` lists a file) · `NEW` · `AUTO` · `RENUMBER` · `EDIT` · `END` · `STOP`
+
+**Output & input:** `PRINT` · `PRINT USING` · `INPUT` · `TAB` · `SPC` · `CLS` · `COLOUR` / `COLOR`
+
+**Assignment & data:** `LET` · `DIM` · `DATA` · `READ` · `RESTORE`
+
+**User-defined types:** `TYPE` · `ENDTYPE` · `AS` (in `DIM p AS point` and `DEF PROCf(r AS point)`)
+
+**Collections:** `NEWDICT` *(fn)* · `NEWLIST` *(fn)* · `NEWTREE` *(fn)* · `SIZE` *(fn)* · `DICTSET` · `DICTGET` *(fn)* · `DICTGET$` *(fn)* · `DICTHAS` *(fn)* · `DICTDEL` · `DICTKEY$` *(fn)* · `PUSH` · `POP` *(fn)* · `POP$` *(fn)* · `LISTGET` *(fn)* · `LISTGET$` *(fn)* · `LISTSET` · `LISTINS` · `LISTDEL` · `TREESET` · `TREEGET` *(fn)* · `TREEGET$` *(fn)* · `TREEHAS` *(fn)* · `TREEDEL` · `TREEMIN` *(fn)* · `TREEMAX` *(fn)* · `TREEKEY` *(fn)*
+
+**Control flow:** `IF` · `THEN` · `ELSE` · `ENDIF` · `FOR` · `TO` · `STEP` · `NEXT` · `REPEAT` · `UNTIL` · `WHILE` · `ENDWHILE` · `CASE` · `OF` · `WHEN` · `OTHERWISE` · `ENDCASE` · `GOTO` · `GOSUB` · `RETURN` · `ON` · `EXIT` · `CONTINUE`
+
+**Events & timing:** `ON TIMER` · `ON KEY` · `ON PIN` · `ON MOUSE` (each with `OFF` to cancel; handler is a `PROC`) · `WAIT` · `DELAY`
+
+**Error handling:** `TRY` · `CATCH` · `ENDTRY` · `RAISE` · `ERR` *(fn)* · `ERR$` *(fn)*
+
+**Procedures & functions:** `DEF` · `PROC` · `FN` · `ENDPROC` · `LOCAL` · `IMPORT`
+
+**Dynamic evaluation:** `EVAL` *(fn)* · `EXEC`
+
+**Operators (keywords):** `DIV` · `MOD` · `AND` · `OR` · `EOR` · `NOT`
+
+**Numeric functions *(fn)*:** `ABS` · `INT` · `SGN` · `SQR` · `SIN` · `COS` · `TAN` · `ATN` · `ASN` · `ACS` · `LOG` · `EXP` · `DEG` · `RAD` · `RND` · `PI`
+
+**Bit functions *(fn)*:** `SHL` · `SHR` · `ASR` · `ROL` · `ROR`
+
+**String functions *(fn)*:** `LEN` · `ASC` · `VAL` · `INSTR` · `CHR$` · `STR$` · `HEX$` · `BIN$` · `FORMAT$` · `LEFT$` · `RIGHT$` · `MID$` · `STRING$` · `UPPER$` · `LOWER$` · `TRIM$` · `REPLACE$` · `CONTAINS` · `STARTSWITH` · `ENDSWITH` · `SPLIT` · `JOIN$`
+
+**Constants *(fn)*:** `PI` · `TRUE` · `FALSE`
+
+**Keyboard & cursor *(fn)*:** `GET` · `GET$` · `INKEY` · `INKEY$` · `KEYMOD` · `POS` · `VPOS`
+
+**Keyboard layout:** `KEYBOARD` · `KEYBOARD$` *(fn)*
+
+**Mouse:** `MOUSE` (statement) · `MOUSEX` · `MOUSEY` · `MOUSEB` *(fn)*
+
+**Time:** `TIME` (read or set)
+
+**Screen & VDU:** `VDU` · `MODE` (1 = BBC logical, 2 = native pixels) · `GMODE` *(fn)* · `SCREEN` · `SCREENW` *(fn)* · `SCREENH` *(fn)*
+
+**Sound:** `SOUND` · `SOUND OFF` · `TONE`
+
+**Hardware (GPIO):** `PINMODE` · `PIN` (statement `PIN n,v`; function `PIN(n)` *(fn)*) · `PINS` *(fn)* · `PINSET` · `PINCLR` · `PINWAIT` *(fn)* · mode words `OUTPUT` · `INPUT` · `PULLUP` · `PULLDOWN` · `ALT`
+
+**Hardware (I2C):** `I2CWRITE` · `I2CREAD` · `I2CPROBE` *(fn)*
+
+**Graphics:** `GCOL` · `PLOT` · `MOVE` · `DRAW` · `CLG` · `POINT` *(fn)* · `LINE` · `RECTANGLE` · `CIRCLE` · `ELLIPSE` · `FILL` · `RGB` *(fn)* · `LINEWIDTH` · `LINEJOIN` (`MITER`/`BEVEL`/`ROUND`) · `LINECAP` (`BUTT`/`ROUND`/`SQUARE`)
+
+**Sprites:** `GGET` · `GPUT` (plain, or `GPUT addr,x,y,scale,angle`) · `LOADSPRITE` *(fn)* · `SAVESPRITE` · `SPRW` *(fn)* · `SPRH` *(fn)*
+
+**Sprites/graphics depth:** `BUFFER ON` / `BUFFER OFF` · `FLIP` · `GTINT` (`... OFF` to clear) · `NEWSPRITE` · `SPRITETARGET` (`... OFF` to restore) · `TILEMAP`
+
+**TrueType fonts:** `LOADFONT` *(fn)* · `FONT` · `FONTSIZE` · `FONTSTYLE` · `GTEXT` · `TEXTWIDTH` *(fn)* · `FONTHEIGHT` *(fn)*
+
+**Storage & directories:** `SAVE` · `LOAD` · `CAT` / `DIR` (rich; `CAT SIMPLE` for plain; optional `CAT "path"`) · `DELETE` · `MKDIR` · `CD` · `RMDIR` · `PWD` · `DIROPEN` *(fn)* · `DIRNEXT` *(fn)* · `DIRNAME$` *(fn)* · `DIRTYPE` *(fn)* · `DIRSIZE` *(fn)* · `DIRDATE$` *(fn)* · `DIRTIME$` *(fn)*
+
+**Files (channels):** `OPENIN` *(fn)* · `OPENOUT` *(fn)* · `OPENUP` *(fn)* · `BGET` *(fn)* · `BPUT` · `EOF` *(fn)* · `EXT` *(fn)* · `PTR` (read or set) · `CLOSE` · `PRINT#` · `INPUT#`
+
+**Native seeds:** `SEED` · `CALL` · `CALL$` · keyword seeds (`SEED_KEYWORD` - new keywords used directly, no `SEED`/`CALL`)
+
+**Memory & indirection:** `DIM name size` (reserve) · `?` (byte) · `!` (word) · `$` (string) · `PEEK` *(fn)* · `POKE` · `REM` (comment)
+
+---
+
+*End of the BerryBasiC Language Reference.*
+
+(c) 2026 - fritzone

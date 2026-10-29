@@ -1,0 +1,15 @@
+FILEDEMO - write a small report to the card, then read it back.
+
+Language features
+  - <stdio.h> file access from a seed: fopen / fprintf / fgets / fclose
+  - the SD card as ordinary C FILEs
+
+Try it
+  SEED h%, "FILEDEMO.SED"
+    PRINT CALL(h%, 5)   REM write 5 rows to SEEDLOG.TXT, return rows read back
+
+Build it on the machine
+  grow filedemo          # -> build/FILEDEMO.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as FILEDEMO.SED, ready to use.
+

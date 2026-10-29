@@ -1,0 +1,19 @@
+<title>INPUT</title>
+<h1>INPUT</h1>
+<p>Reads a line typed by the user into one or more variables.</p>
+<h2>Syntax</h2>
+<pre>INPUT [ "prompt" , ] var [ , var ]...</pre>
+<h2>Description</h2>
+<p>INPUT prints an optional prompt string, waits for the user to type a value
+and press Enter, and stores it in the variable. A string variable (name ending
+in <b>$</b>) takes the whole line; a numeric variable takes a number. Several
+variables may be filled from one comma-separated reply.</p>
+<h2>Examples</h2>
+<code>
+10 INPUT "What is your name? ", name$
+20 PRINT "Hello, "; name$
+30 INPUT "Enter two numbers: ", a, b
+40 PRINT "Their sum is "; a + b
+</code>
+<h2>See also</h2>
+<p><a href="PRINT">PRINT</a>, <a href="INDEX">Index</a></p>

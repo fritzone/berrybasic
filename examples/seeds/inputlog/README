@@ -1,0 +1,16 @@
+INPUTLOG - a live keyboard + mouse monitor drawn on the screen.
+
+Language features
+  - SEED_KEYWORD statement (INPUTLOG or INPUTLOG x, y)
+  - polling the keyboard and mouse from a seed (keys, modifiers, buttons)
+  - <graphics.h> with double buffering for a flicker-free panel
+
+Try it
+  INPUTLOG                     REM panel at top-left
+    INPUTLOG 300, 200            REM at your own position
+
+Build it on the machine
+  grow inputlog          # -> build/INPUTLOG.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as INPUTLOG.SED, ready to use.
+

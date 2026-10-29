@@ -1,0 +1,15 @@
+MEDIAN - the median of a numeric array, passed by name.
+
+Language features
+  - SEED_EXPORT; reading a BASIC array by its name
+  - malloc / free for a sorted scratch copy (the seed heap)
+
+Try it
+  DIM A(5) : A(0)=3:A(1)=1:A(2)=4:A(3)=1:A(4)=5:A(5)=9
+    SEED h%, "MEDIAN.SED" : PRINT CALL(h%, "A")
+
+Build it on the machine
+  grow median          # -> build/MEDIAN.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as MEDIAN.SED, ready to use.
+

@@ -3,16 +3,81 @@
 // the bare-metal target.
 #include <stdio.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 #include "console.h"
+#include "usb_hid.h"
+#include "cp437.h"
 
-void con_putc(char c) { putchar(c); }
+#define SEMANTIC 0
+#define GRAPHIC 1
 
-void con_puts(const char *s) { fputs(s, stdout); }
+void con_xlate_char(int c, int mode) {
+    // xterm can display Unicode characters, as long as they're encoded with UTF-8
+
+    if ((c < 32) && (mode == SEMANTIC)) { putchar(c); return; }
+
+    int code_point = codepage437_to_unicode(c);
+
+    if (code_point <= 0x7F) {
+        // 1-byte sequence: 0xxxxxxx
+        putchar(code_point);
+    }
+    else if (code_point <= 0x7FF) {
+        // 2-byte sequence: 110xxxxx 10xxxxxx
+        putchar(0xC0 | (code_point >> 6));
+        putchar(0x80 | (code_point & 0x3F));
+    }
+    else if (code_point <= 0xFFFF) {
+        // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+        putchar(0xE0 | (code_point >> 12));
+        putchar(0x80 | ((code_point >> 6) & 0x3F));
+        putchar(0x80 | (code_point & 0x3F));
+    }
+}
+
+void con_putc(char c) {
+    unsigned char uc = (unsigned char)c;
+    if (uc < 127) putchar(uc); else con_xlate_char(uc, SEMANTIC);
+}
+
+void con_puts(const char *s) {
+    while (*s) con_putc(*s++);
+}
+
+int con_canonical_mode(int enable) {
+    struct termios t;
+    int was_enabled;
+
+    tcgetattr(STDIN_FILENO, &t);
+
+    was_enabled = (t.c_lflag & ICANON) != 0;
+
+    if (enable) {
+        t.c_lflag |= ICANON | ECHO;
+        printf("\033[?25h"); // show cursor
+    } else {
+        t.c_lflag &= ~(ICANON | ECHO);
+        printf("\033[?25l"); // hide cursor
+    }
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &t);
+
+    return was_enabled;
+}
 
 int con_getline(char *buf, int maxlen) {
-    if (!fgets(buf, maxlen, stdin)) return -1;
-    int n = (int)strlen(buf);
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    int saved = con_canonical_mode(1);
+
+    int n = -1;
+
+    if (fgets(buf, maxlen, stdin)) {
+        n = (int)strlen(buf);
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    }
+
+    con_canonical_mode(saved);
+
     return n;
 }
 
@@ -25,16 +90,43 @@ int con_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
     if (prefill_len > 0) { buf[prefill_len] = 0; fputs(buf, stdout); }
     fflush(stdout);
     char tmp[1024];
-    if (!fgets(tmp, sizeof tmp, stdin)) return -1;
-    int t = (int)strlen(tmp);
-    while (t > 0 && (tmp[t - 1] == '\n' || tmp[t - 1] == '\r')) tmp[--t] = 0;
-    int n = prefill_len;
-    for (int i = 0; i < t && n < maxlen - 1; i++) buf[n++] = tmp[i];
-    buf[n] = 0;
+
+    int saved = con_canonical_mode(1);
+
+    int n = -1;
+
+    if (fgets(tmp, sizeof tmp, stdin)) {
+        int t = (int)strlen(tmp);
+        while (t > 0 && (tmp[t - 1] == '\n' || tmp[t - 1] == '\r')) tmp[--t] = 0;
+        n = prefill_len;
+        for (int i = 0; i < t && n < maxlen - 1; i++) buf[n++] = tmp[i];
+        buf[n] = 0;
+    }
+
+    con_canonical_mode(saved);
+
     return n;
 }
 
 void con_cls(void) { fputs("\033[2J\033[H", stdout); }   // ANSI clear on a terminal
+
+int con_fg = 7;
+int con_bg = 0;
+
+void con_colour(int c) {
+    static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
+    static const int high[8] = {  0,  0,  0,  1,  0,  0,  0,  0 };
+
+    if ((c & 128) == 0) con_fg = c & 7; else con_bg = c & 7;
+    int ansi_fg = ansi[con_fg];
+    int ansi_bg = ansi[con_bg] + 10;
+    int bright = high[con_fg];
+    printf("\033[%d;%d;%dm", bright, ansi_fg, ansi_bg);
+}
+
+void con_move_to(int x, int y) {
+    printf("\033[%d;%dH", y + 1, x + 1);
+}
 
 // VDU driver for the host: keeps the same parameter-counting state machine as
 // the target so multi-byte commands stay in sync, prints text codes to stdout,
@@ -45,20 +137,36 @@ void con_vdu(int b) {
         0,1,2,5,0,0,1,9, 8,5,0,1,4,4,0,2
     };
     static int need = 0, cmd = -1, got = 0;
+    static int params[10];
     b &= 0xff;
-    if (cmd >= 0) { if (++got >= need) cmd = -1; return; }   // skip parameter bytes
-    if (b < 32) {
+    if (cmd >= 0) {
+        params[got++] = b;
+    } else if (b == 127) {
+        if (b == 127) { fputs("\b \b", stdout); return; }
+    } else if (b < 32) {
         if (b == 10 || b == 13) putchar(b);                  // LF/CR are visible
         if (nparams[b]) { cmd = b; need = nparams[b]; got = 0; }
-        return;
     }
-    if (b == 127) { fputs("\b \b", stdout); return; }
-    putchar(b);                                              // printable
-}
 
-void con_colour(int c) {
-    static const int ansi[8] = { 30, 31, 32, 33, 34, 35, 36, 37 };
-    printf("\033[%dm", ansi[c & 7]);
+    if (cmd < 0) {
+        putchar(b);                                              // printable
+    }
+    else if (got == need) {
+        switch (cmd) {
+            case 17: // Set colour (+128 for background)
+                con_colour(params[0]);
+                break;
+            case 27: // Literal character output
+                con_xlate_char(params[0], GRAPHIC);
+                break;
+            case 31: // Move cursor
+                con_move_to(params[0], params[1]);
+                break;
+        }
+
+        cmd = -1;
+        need = 0;
+    }
 }
 
 int con_getkey(void) {
@@ -73,15 +181,175 @@ unsigned long long con_micros(void) {
     return (unsigned long long)tv.tv_sec * 1000000ULL + tv.tv_usec;
 }
 
-int con_inkey(int centiseconds) { (void)centiseconds; return -1; }   // no raw stdin on host
+int inkey_pushback = -1;
+
+int poll_byte_ms(int ms) {
+    int ret = -1;
+
+    if (inkey_pushback > 0) {
+        ret = inkey_pushback;
+        inkey_pushback = -1;
+    } else {
+        int microseconds = ms * 10000;
+        struct timeval timeout = { 0, microseconds };
+        struct timeval *timeout_ptr = ms >= 0 ? &timeout : NULL;
+
+        fd_set fds;
+
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+
+        int matched = select(STDIN_FILENO + 1, &fds, NULL, NULL, timeout_ptr);
+
+        if (matched > 0) {
+            char ch;
+
+            if (read(STDIN_FILENO, &ch, 1) >= 1) ret = ch;
+        }
+    }
+
+    return ret;
+}
+
+int con_inkey(int centiseconds) {
+    int milliseconds = centiseconds * 10;
+
+    int ch = poll_byte_ms(milliseconds);
+
+    if (ch == 27) {
+        // Translate CSI escape sequence if present in the buffer.
+        ch = poll_byte_ms(20);
+
+        // No additional characters have arrived to form an escape sequence; return ESC itself.
+        if (ch < 0) return 27;
+
+        // Check if additional characters have arrived but they don't form an escape sequence.
+        if ((ch != '[') && (ch != 'O')) {
+            inkey_pushback = ch;
+            return 27;
+        }
+
+        // We are definitely in an escape sequence now.
+        ch = poll_byte_ms(20);
+
+        switch (ch) {                                       // single-char CSI / SS3
+            case 'A': ch = KEY_UP; break;
+            case 'B': ch = KEY_DOWN; break;
+            case 'C': ch = KEY_RIGHT; break;
+            case 'D': ch = KEY_LEFT; break;
+            case 'H': ch = KEY_HOME; break;
+            case 'F': ch = KEY_END; break;
+            case 'P': ch = KEY_F(1); break;              // SS3: ESC O P..S = F1..F4
+            case 'Q': ch = KEY_F(2); break;
+            case 'R': ch = KEY_F(3); break;
+            case 'S': ch = KEY_F(4); break;
+
+            default:
+                if (ch >= '0' && ch <= '9') {                        // numeric CSI: ESC [ <n> ~
+                    int n = 0;
+                    while (ch >= '0' && ch <= '9') { n = n * 10 + (ch - '0'); ch = poll_byte_ms(20); }
+                    switch (n) {                                   // (terminator '~' already consumed)
+                        case 2:  ch = KEY_INS; break;
+                        case 3:  ch = KEY_DEL; break;
+                        case 5:  ch = KEY_PGUP; break;
+                        case 6:  ch = KEY_PGDN; break;
+                        case 11: ch = KEY_F(1); break;   case 12: ch = KEY_F(2); break;
+                        case 13: ch = KEY_F(3); break;   case 14: ch = KEY_F(4); break;
+                        case 15: ch = KEY_F(5); break;   case 17: ch = KEY_F(6); break;
+                        case 18: ch = KEY_F(7); break;   case 19: ch = KEY_F(8); break;
+                        case 20: ch = KEY_F(9); break;   case 21: ch = KEY_F(10); break;
+                        case 23: ch = KEY_F(11); break;  case 24: ch = KEY_F(12); break;
+                    }
+                }
+        }
+    }
+
+    return ch;
+}
+
 int con_pos(void)  { return 0; }
 int con_vpos(void) { return 0; }
+int con_rows(void) { return 0; }        // no paging on the host CLI
+int con_cols(void) { return 0; }        // unknown on the host CLI
+
+static char host_clip[65536]; static int host_clip_len = 0;
+void con_clip_set(const char *d, int n) { if (n < 0) n = 0; if (n > (int)sizeof host_clip) n = sizeof host_clip; for (int i = 0; i < n; i++) host_clip[i] = d[i]; host_clip_len = n; }
+int  con_clip_len(void) { return host_clip_len; }
+int  con_clip_get(char *b, int max) { int n = host_clip_len; if (n > max) n = max; for (int i = 0; i < n; i++) b[i] = host_clip[i]; return host_clip_len; }
 int con_splash(const char *banner) { (void)banner; return 0; }   // no logo on host; caller prints banner
 
 // Graphics are framebuffer-only; the host backend has no display, so these are
-// no-ops (POINT always reports "off-screen").
-void con_mode(int n) { (void)n; }
+// no-ops (POINT always reports "off-screen"). The graphics mode is still tracked
+// so GMODE and the reset semantics are testable off the Pi.
+static int host_gfx_mode = 1;
+void con_mode(int n) { host_gfx_mode = (n == 2) ? 2 : 1; }
+void con_set_gfx_mode(int n) { host_gfx_mode = (n == 2) ? 2 : 1; }
+int  con_gfx_mode(void) { return host_gfx_mode; }
+
+// No real framebuffer on the host, but keep a plausible current resolution so
+// SCREEN / SCREENW / SCREENH behave (and are testable). Mirrors the kernel clamp.
+static int host_scr_w = 1280, host_scr_h = 1024;
+int con_screen(int w, int h) {
+    if (w <= 0 || h <= 0) { w = 1280; h = 1024; }        // restore "startup"
+    if (w < 64)   w = 64;
+    if (h < 64)   h = 64;
+    if (w > 1920) w = 1920;
+    if (h > 1080) h = 1080;
+    host_scr_w = w; host_scr_h = h;
+    return 1;
+}
+int con_screen_w(void) { return host_scr_w; }
+int con_screen_h(void) { return host_scr_h; }
+
+// Keyboard layout: forward to the shared HID decoder (compiled into the host
+// build too), so KEYBOARD / KEYBOARD$ behave identically to the target.
+int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
+const char *con_get_keyboard(void)             { return hid_layout_code(); }
+
 void con_gcol(int action, int colour) { (void)action; (void)colour; }
+void con_line_width(int w) { (void)w; }
+void con_line_join(int j) { (void)j; }
+void con_line_cap(int c) { (void)c; }
 void con_plot(int code, int x, int y) { (void)code; (void)x; (void)y; }
 void con_clg(void) {}
 int  con_point(int x, int y) { (void)x; (void)y; return -1; }
+
+// Double buffering: no framebuffer on the host, so drawing is a no-op regardless,
+// but track the on/off state so BUFFER ON/OFF and con_buffered() behave/are testable.
+static int host_buffered = 0;
+int  con_backbuffer(int on) { host_buffered = on ? 1 : 0; return 0; }
+void con_flip(void) {}
+int  con_buffered(void) { return host_buffered; }
+void con_screen_save(void) {}
+void con_screen_restore(void) {}
+void con_newsprite(long a, int w, int h) { (void)a; (void)w; (void)h; }
+int  con_target_sprite(long a) { (void)a; return 0; }
+void con_target_screen(void) {}
+void con_tilemap(long sh, long m, int c, int r, int tw, int th, int sx, int sy) {
+    (void)sh; (void)m; (void)c; (void)r; (void)tw; (void)th; (void)sx; (void)sy;
+}
+
+// Graphics library: no framebuffer on the host, so these are no-ops.
+void con_gcol_rgb(int r, int g, int b) { (void)r; (void)g; (void)b; }
+void con_palette(int l, int r, int g, int b) { (void)l; (void)r; (void)g; (void)b; }
+void con_line(int x1, int y1, int x2, int y2) { (void)x1; (void)y1; (void)x2; (void)y2; }
+void con_rectangle(int x, int y, int w, int h, int f) { (void)x; (void)y; (void)w; (void)h; (void)f; }
+void con_circle(int x, int y, int r, int f) { (void)x; (void)y; (void)r; (void)f; }
+void con_ellipse(int x, int y, int rx, int ry, int f) { (void)x; (void)y; (void)rx; (void)ry; (void)f; }
+void con_fill(int x, int y) { (void)x; (void)y; }
+void con_sprite_get(long a, int x1, int y1, int x2, int y2) { (void)a; (void)x1; (void)y1; (void)x2; (void)y2; }
+void con_sprite_put(long a, int x, int y) { (void)a; (void)x; (void)y; }
+void con_sprite_put_ex(long a, int x, int y, double sc, double an) { (void)a; (void)x; (void)y; (void)sc; (void)an; }
+void con_sprite_tint(int on, int r, int g, int b, int a) { (void)on; (void)r; (void)g; (void)b; (void)a; }
+void con_gtext(int x, int y, const char *s, int len) { (void)x; (void)y; (void)s; (void)len; }
+
+// No mouse on the host backend; report a parked pointer with no buttons.
+void con_mouse(int *x, int *y, int *buttons) {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (buttons) *buttons = 0;
+}
+
+// No USB keyboard on the host: stdin gives characters, never key state.
+int con_keymods(void) { return 0; }
+int con_keys_down(int *out, int max) { (void)out; (void)max; return -1; }

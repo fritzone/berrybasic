@@ -1,0 +1,20 @@
+<title>GOSUB</title>
+<h1>GOSUB ... RETURN</h1>
+<p>Calls a subroutine at a line number and returns.</p>
+<h2>Syntax</h2>
+<pre>GOSUB line
+...
+RETURN</pre>
+<h2>Description</h2>
+<p>GOSUB remembers where it was, jumps to the line, and runs until a RETURN sends
+control back to just after the GOSUB. Named <a href="PROC">PROC</a>s with
+parameters are the modern alternative.</p>
+<h2>Examples</h2>
+<code>
+10 GOSUB 100 : PRINT "back"
+20 END
+100 PRINT "in the subroutine"
+110 RETURN
+</code>
+<h2>See also</h2>
+<p><a href="GOTO">GOTO</a>, <a href="PROC">PROC</a>, <a href="INDEX">Index</a></p>

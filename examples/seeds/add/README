@@ -1,0 +1,15 @@
+ADD - the simplest seed: a number in, a number out.
+
+Language features
+  - SEED_EXPORT - a plain seed you load with SEED and call with CALL
+  - numeric arguments and a numeric return value
+  - proves the whole position-independent load / cache / call pipeline
+
+Try it
+  SEED h%, "ADD.SED"
+    PRINT CALL(h%, 40, 2)        -> 42
+
+Build it on the machine
+  grow add          # -> build/ADD.SED
+It is also prebuilt in /SEED as ADD.SED, ready to use.
+

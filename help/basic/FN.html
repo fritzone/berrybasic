@@ -1,0 +1,22 @@
+<title>FN</title>
+<h1>FN / DEF FN</h1>
+<p>Defines and calls a function that returns a value.</p>
+<h2>Syntax</h2>
+<pre>DEF FNname[(param [, param]...)] = expression
+
+DEF FNname[(param [, param]...)]
+  statements
+  = expression
+</pre>
+<h2>Description</h2>
+<p>A function is like a <a href="PROC">PROC</a> but yields a value, so it can be
+used inside an expression. The single-line form returns the expression directly;
+the multi-line form runs statements then returns via <b>= expression</b>.</p>
+<h2>Examples</h2>
+<code>
+10 PRINT FNcube(3)
+20 END
+30 DEF FNcube(x) = x * x * x
+</code>
+<h2>See also</h2>
+<p><a href="PROC">PROC</a>, <a href="INDEX">Index</a></p>

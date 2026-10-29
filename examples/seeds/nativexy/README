@@ -1,0 +1,15 @@
+NATIVEXY - draw a crosshair at BASIC's (x, y) in the current graphics mode.
+
+Language features
+  - SEED_KEYWORD statement (NATIVEXY x, y)
+  - the graphics coordinate modes (GMODE) matched between BASIC and native code
+  - drawing through <graphics.h>
+
+Try it
+  NATIVEXY 100, 100 : PRINT GMODE
+
+Build it on the machine
+  grow nativexy          # -> build/NATIVEXY.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as NATIVEXY.SED, ready to use.
+

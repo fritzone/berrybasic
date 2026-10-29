@@ -1,0 +1,21 @@
+<title>FOR</title>
+<h1>FOR ... NEXT</h1>
+<p>Repeats a block of statements a counted number of times.</p>
+<h2>Syntax</h2>
+<pre>FOR var = start TO limit [ STEP increment ]
+  statements
+NEXT [ var ]</pre>
+<h2>Description</h2>
+<p>The loop variable <b>var</b> starts at <b>start</b> and, after each pass,
+changes by <b>increment</b> (1 if no <b>STEP</b> is given). The loop ends once
+<b>var</b> passes <b>limit</b>. A negative STEP counts down. Loops may be nested;
+naming the variable on <a href="FOR">NEXT</a> makes the pairing explicit.</p>
+<h2>Examples</h2>
+<code>
+10 FOR I = 1 TO 5
+20   PRINT I; " squared is "; I*I
+30 NEXT I
+40 FOR C = 10 TO 0 STEP -2 : PRINT C; : NEXT
+</code>
+<h2>See also</h2>
+<p><a href="REPEAT">REPEAT</a>, <a href="WHILE">WHILE</a>, <a href="IF">IF</a>, <a href="INDEX">Index</a></p>

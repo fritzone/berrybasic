@@ -1,0 +1,16 @@
+DYNARR - grow a buffer with realloc and return the sum of 1..n.
+
+Language features
+  - the C dynamic-memory API in a seed: realloc (grow one element at a time)
+  - aligned_alloc for a cache-aligned scratch copy
+  - malloc/free draw from the seed heap
+
+Try it
+  SEED h%, "DYNARR.SED"
+    PRINT CALL(h%, 100)          -> 5050
+
+Build it on the machine
+  grow dynarr          # -> build/DYNARR.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as DYNARR.SED, ready to use.
+

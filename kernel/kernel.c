@@ -6,12 +6,18 @@
 #include "usb_kbd.h"
 #include "usb_hid.h"
 #include "console.h"
+#include "ttf.h"
+#include "gfx.h"
 #include "basic.h"
 #include "mmu.h"
 #include "sd.h"
 #include "storage.h"
 #include "pcie.h"
 #include "xhci.h"
+#include "msc.h"
+#include "blockdev.h"
+#include "partition.h"
+#include "fs.h"
 
 // ---------------------------------------------------------------------------
 // Display configuration. The native resolution comes from kernel/buildconfig.h
@@ -27,8 +33,9 @@
 #endif
 
 // CHAR_W / CHAR_H come from font.h (BBC 8x8 glyph scaled by FONT_SCALE).
-#define TERM_COLS (FB_WIDTH  / CHAR_W)
-#define TERM_ROWS (FB_HEIGHT / CHAR_H)
+// FB_WIDTH/FB_HEIGHT are only the *startup* resolution now; the live resolution
+// is g_fb_w/g_fb_h and the text grid g_term_cols/g_term_rows (see below), which a
+// program can change with SCREEN and which reset to startup when it finishes.
 
 // Free-running 1 MHz system timer (low 32 bits); used to pace the cursor blink.
 #define TIMER_CLO       (*(volatile uint32_t *)(0xFE003004UL))
@@ -39,7 +46,31 @@ static int cursor_row     = 0;
 static int fb_ready       = 0;
 static uint32_t g_fb_phys = 0;   // framebuffer physical base (for non-cacheable remap)
 static uint32_t g_fb_size = 0;   // framebuffer size in bytes
+
+// Live display resolution (physical pixels) and the derived text grid. These
+// start at the compile-time defaults and are updated whenever the framebuffer is
+// reconfigured (SCREEN). g_start_* remembers the boot resolution to restore to.
+static uint32_t g_fb_w    = FB_WIDTH;
+static uint32_t g_fb_h    = FB_HEIGHT;
+static uint32_t g_start_w = FB_WIDTH;
+static uint32_t g_start_h = FB_HEIGHT;
+// Graphics render target (SPRITETARGET). g_tgt_* are the target's pixel size
+// (0 = the screen framebuffer); g_gl_* are the logical coordinate extent - the
+// BBC 1280x1024 space for the screen, but the sprite's own pixels (1:1, origin
+// bottom-left) when drawing into a sprite.
+#define GFX_LW 1280            // MODE 1 logical coordinate extent (BBC-style)
+#define GFX_LH 1024
+static int g_tgt_w = 0, g_tgt_h = 0;
+static int g_gl_w  = GFX_LW, g_gl_h = GFX_LH;
+// Graphics coordinate regime (MODE). 1 = BBC logical (1280x1024 scaled to the
+// panel, origin bottom-left); 2 = native (physical pixels at the current
+// resolution, origin top-left, 1:1). g_gfx_flip is derived (mode 1 flips y).
+static int g_gfx_mode = 1;
+static int g_gfx_flip = 1;
+static int g_term_cols    = FB_WIDTH  / CHAR_W;
+static int g_term_rows    = FB_HEIGHT / CHAR_H;
 static int cursor_visible = 0;   // whether the cursor glyph is currently drawn
+static int cursor_insert  = 1;   // line editor: 1 = insert (bar caret), 0 = overwrite (block)
 static uint32_t text_color = COLOR_WHITE;   // current foreground (BBC COLOUR)
 static uint32_t text_bg    = COLOR_BLACK;   // current text background (VDU 17,128+c)
 
@@ -48,7 +79,7 @@ static int vdu_enabled    = 1;   // VDU 6 / VDU 21: is screen output enabled?
 static int vdu5_mode      = 0;   // VDU 5: write text at the graphics cursor
 static int cursor_enabled = 1;   // VDU 23,1: is the text cursor (caret) shown?
 // Text viewport, in character cells (inclusive). Default = whole screen.
-static int tv_l = 0, tv_t = 0, tv_r = TERM_COLS - 1, tv_b = TERM_ROWS - 1;
+static int tv_l = 0, tv_t = 0, tv_r = FB_WIDTH / CHAR_W - 1, tv_b = FB_HEIGHT / CHAR_H - 1;
 
 // VDU 5 (text at the graphics cursor) helpers, defined with the graphics code
 // further down but used by term_putchar above it.
@@ -84,16 +115,41 @@ static uint32_t rgb_pixel(int r, int g, int b) {
 // Terminal
 // ---------------------------------------------------------------------------
 
-// BBC-style flashing block cursor at the current cell. show=1 draws it, show=0
-// erases it. The cursor always sits on the (empty) next-write cell, so erasing
-// to black never clobbers a real glyph.
+// Flashing text caret at the current cell. Its shape follows the line editor's
+// mode (see cursor_insert): overwrite mode shows a 50% checkerboard block, while
+// insert mode shows a thin vertical bar down the left edge of the cell. Either
+// way the caret never hides the character — the checkerboard leaves half the
+// cell's pixels untouched so the glyph shows through the "holes", and the bar
+// only touches the leftmost columns. The cell is saved before the pattern is
+// laid down, so lifting the caret restores exactly what was there — glyph or
+// background — with no redraw.
+//   show=1 overlays the pattern, show=0 restores. The visible==show guard is
+// essential: the save buffer holds one cell only, so we must never overlay
+// twice, and term_advance() clears cursor_visible by hand after a scroll has
+// already carried the drawn caret away (its save buffer is then simply stale
+// and correctly ignored, because the next show re-saves first).
+#define CARET_BAR_W 2                           // insert-mode bar width, in pixels
+static uint32_t caret_under[CHAR_W * CHAR_H];   // pixels hidden by the caret
+
 static void cursor_set(int show) {
     if (!fb_ready) return;
     if (show && !cursor_enabled) return;   // VDU 23,1,0 disables the caret
+    show = show ? 1 : 0;
+    if (show == cursor_visible) return;    // already in that state
     int px = cursor_col * CHAR_W;
     int py = cursor_row * CHAR_H;
-    bar(px, py, px + CHAR_W - 1, py + CHAR_H - 1,
-        show ? COLOR_WHITE : COLOR_BLACK);
+    for (int y = 0; y < CHAR_H; y++)
+        for (int x = 0; x < CHAR_W; x++) {
+            int i = y * CHAR_W + x;
+            if (show) {
+                caret_under[i] = getpixel(px + x, py + y);
+                int lit = cursor_insert ? (x < CARET_BAR_W)   // insert: left-edge bar
+                                        : (((x ^ y) & 1) == 0); // overwrite: checkerboard
+                if (lit) putpixel(px + x, py + y, COLOR_WHITE);
+            } else {
+                putpixel(px + x, py + y, caret_under[i]);
+            }
+        }
     cursor_visible = show;
 }
 
@@ -164,6 +220,27 @@ static int g_kbd_ok  = 0;   // DWC2 (USB-C) keyboard present
 static int g_xhci_ok = 0;   // xHCI/VL805 (USB-A) keyboard present
 static int g_sd_ready = 0;  // SD filesystem mounted (boot log can be written)
 
+// Real Pi hardware vs QEMU (nonzero board serial). Read once at boot. The PWM
+// audio driver (drivers/sound.c) gates its register access on this, because
+// QEMU's raspi4b does not model the PWM peripheral and faults on access.
+int g_real_hw = 0;
+
+// Mouse pointer state, in raw framebuffer pixels (origin top-left). Deltas from
+// the HID mouse accumulate here; con_mouse() polls and reports it. g_mouse_dwc2
+// / g_mouse_xhci record which backend enumerated a mouse.
+static int g_mouse_dwc2 = 0;
+static int g_mouse_xhci = 0;
+static int g_mouse_x = FB_WIDTH / 2;
+static int g_mouse_y = FB_HEIGHT / 2;
+static int g_mouse_b = 0;
+
+// Software mouse pointer (an arrow sprite drawn on the framebuffer). Defined
+// after the mouse poll helpers; forward-declared here because the input-wait
+// loops (which run earlier in the file) drive it.
+static int  mouse_enabled(void);
+static void pointer_tick(void);   // service mouse + repaint the pointer sprite
+static void pointer_hide(void);   // remove the sprite (call before any FB write)
+
 // Dump the in-RAM UART log to BOOTLOG.TXT on the SD card. Called at the end of
 // boot (to diagnose USB enumeration) and from the exception handler (to surface
 // a crash) on a board with no serial cable. Best-effort: needs the filesystem
@@ -174,8 +251,8 @@ static void flush_boot_log(void) {
     busy = 1;
     const char *buf; int len;
     uart_log_get(&buf, &len);
-    stg_write("BOOTLOG.TXT", buf, len);
-    busy = 0;
+    stg_write("/BOOTLOG.TXT", buf, len);   // ABSOLUTE: always the SD root, never the
+    busy = 0;                              // current volume (e.g. a USB stick under /USB)
 }
 
 // Emit a boot-progress line to *both* the UART/RAM log and, once it exists, the
@@ -187,13 +264,41 @@ static void boot_msg(const char *s) {
     if (fb_ready) term_puts(s);
 }
 
-// Return the next input character from any keyboard (DWC2 USB-C or xHCI USB-A),
-// falling back to the UART, or 0 if nothing is pending.
-static char term_pollchar(void) {
-    char c = 0;
-    if (g_kbd_ok)  c = usb_kbd_getchar();
+static int read_esc_seq(void);   // serial escape-sequence decode (defined below)
+
+// --- F12 system-monitor overlay: shared hooks -------------------------------
+// A few symbols live up here so the input path can see them: term_pollchar
+// toggles the overlay on F12, and the input-wait loops refresh it and feed the
+// CPU-load accounting. The drawing itself is defined lower down, next to the
+// mouse pointer (it needs pointer_hide()).
+static int      g_sysmon_on = 0;        // overlay visible? (toggled by F12)
+static uint64_t g_idle_us   = 0;        // cumulative microseconds spent idle-waiting
+static void sysmon_toggle(void)  { g_sysmon_on = !g_sysmon_on; }
+static void sysmon_tick(void);          // refresh + paint the overlay if due
+static void sysmon_after_flip(void);    // re-composite the overlay after a buffer flip
+
+// Return the next key from any keyboard (DWC2 USB-C or xHCI USB-A), falling back
+// to the UART, or 0 if nothing is pending. A key is an int: printable keys are
+// their Latin-1 character, the rest are the KEY_* codes in usb_hid.h.
+//
+// The USB decode already yields KEY_* codes. A serial terminal instead sends the
+// arrows and friends as escape sequences (ESC [ A ...), so those are decoded
+// here rather than in one caller - that way a serial arrow key and a USB arrow
+// key are the same key to everything above, GET and the line editor alike.
+//
+// F12 is intercepted here as a system key: it toggles the overlay and is swallowed
+// (returns 0), so it never reaches the REPL, GET/INKEY or a running program.
+static int term_pollchar(void) {
+    int c = 0;
+    if (g_kbd_ok)        c = usb_kbd_getchar();
     if (!c && g_xhci_ok) c = xhci_kbd_getchar();
-    if (!c)        c = uart_getc();
+    if (c) {
+        if (c == KEY_F12) { sysmon_toggle(); return 0; }   // system key: toggle + swallow
+        return c;                                          // already a decoded key
+    }
+
+    c = (unsigned char)uart_getc();
+    if (c == 0x1B) c = read_esc_seq();            // serial: ESC [ A -> KEY_UP, ...
     return c;
 }
 
@@ -228,7 +333,7 @@ static const char *hist_get(int age) {           // age 1 = most recent
 static char poll_byte_ms(int ms) {
     uint32_t t0 = TIMER_CLO;
     for (;;) {
-        char c = term_pollchar();
+        int c = term_pollchar();
         if (c) return c;
         if (TIMER_CLO - t0 >= (uint32_t)ms * 1000) return 0;
     }
@@ -236,27 +341,47 @@ static char poll_byte_ms(int ms) {
 
 // Map a terminal CSI escape sequence (after ESC) to an editing key, for serial
 // use. The HID keyboard delivers KEY_* codes directly.
-static char read_esc_seq(void) {
-    if (poll_byte_ms(20) != '[') return 0;
+static int read_esc_seq(void) {
     char b = poll_byte_ms(20);
-    switch (b) {
+    if (b != '[' && b != 'O') return KEY_ESC;         // nothing (or not CSI/SS3): a bare Esc
+    b = poll_byte_ms(20);
+    switch (b) {                                       // single-char CSI / SS3
         case 'A': return KEY_UP;
         case 'B': return KEY_DOWN;
         case 'C': return KEY_RIGHT;
         case 'D': return KEY_LEFT;
         case 'H': return KEY_HOME;
         case 'F': return KEY_END;
-        case '3': poll_byte_ms(20); return KEY_DEL;   // ESC [ 3 ~
-        default:  return 0;
+        case 'P': return KEY_F(1);                     // SS3: ESC O P..S = F1..F4
+        case 'Q': return KEY_F(2);
+        case 'R': return KEY_F(3);
+        case 'S': return KEY_F(4);
     }
+    if (b >= '0' && b <= '9') {                        // numeric CSI: ESC [ <n> ~
+        int n = 0;
+        while (b >= '0' && b <= '9') { n = n * 10 + (b - '0'); b = poll_byte_ms(20); }
+        switch (n) {                                   // (terminator '~' already consumed)
+            case 2:  return KEY_INS;
+            case 3:  return KEY_DEL;
+            case 5:  return KEY_PGUP;
+            case 6:  return KEY_PGDN;
+            case 11: return KEY_F(1);   case 12: return KEY_F(2);
+            case 13: return KEY_F(3);   case 14: return KEY_F(4);
+            case 15: return KEY_F(5);   case 17: return KEY_F(6);
+            case 18: return KEY_F(7);   case 19: return KEY_F(8);
+            case 20: return KEY_F(9);   case 21: return KEY_F(10);
+            case 23: return KEY_F(11);  case 24: return KEY_F(12);
+        }
+    }
+    return 0;
 }
 
 // Position the framebuffer cursor at editable offset `off` from start (sc,sr).
 static void edit_cursor_at(int sc, int sr, int off) {
     int t = sc + off;
-    cursor_col = t % TERM_COLS;
-    cursor_row = sr + t / TERM_COLS;
-    if (cursor_row >= TERM_ROWS) cursor_row = TERM_ROWS - 1;
+    cursor_col = t % g_term_cols;
+    cursor_row = sr + t / g_term_cols;
+    if (cursor_row >= g_term_rows) cursor_row = g_term_rows - 1;
 }
 
 // Redraw the editable region (screen + serial) and place the cursor at `pos`.
@@ -276,8 +401,10 @@ static void edit_render(int sc, int sr, const char *prompt,
 }
 
 // Full line editor: prints `prompt`, starts with `prefill_len` editable chars in
-// buf, supports cursor movement (Left/Right/Home/End), insert/backspace/delete,
-// and Up/Down command history. Returns the final length.
+// buf, supports cursor movement (Left/Right/Home/End), backspace/delete, Up/Down
+// command history, and an Insert key that toggles insert vs. overwrite editing
+// (the caret shows a bar in insert mode, a block in overwrite). Returns the
+// final length.
 int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) {
     int len = prefill_len;
     if (len > maxlen - 1) len = maxlen - 1;
@@ -295,16 +422,65 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
     uint32_t last_blink = TIMER_CLO;
 
     for (;;) {
-        char c = term_pollchar();
-        if (c == 0x1B) c = read_esc_seq();       // serial arrow keys (ESC [ ...)
+        uint64_t it0 = con_micros();             // each polling iteration is idle time
+        int c = term_pollchar();
         if (!c) {
             uint32_t now = TIMER_CLO;
             if (now - last_blink >= CURSOR_BLINK_US) {
                 last_blink = now;
+                pointer_hide();                  // hide before drawing the blink cursor
                 edit_cursor_at(sc, sr, pos);
                 cursor_set(!cursor_visible);
             }
+            sysmon_tick();                       // refresh the F12 overlay while waiting
+            pointer_tick();                      // move/repaint the pointer on top
+            sound_pump();                        // keep queued notes playing while idle
+            g_idle_us += con_micros() - it0;     // credit the whole idle spin (incl. the poll)
             continue;
+        }
+        g_idle_us += con_micros() - it0;         // the poll that returned a key was still a wait
+        pointer_hide();                          // a key arrived; hide before redrawing
+
+        // --- system clipboard: paste, copy line, cut line -------------------
+        // USB delivers the plain key + a modifier bit (hid_modifiers); a serial
+        // terminal sends the raw control code. Support both spellings.
+        {
+            int mods = hid_modifiers();
+            int is_paste = (c == 0x16) ||                                  // Ctrl+V
+                           ((mods & KMOD_CTRL)  && (c == 'v' || c == 'V')) ||
+                           ((mods & KMOD_SHIFT) && c == KEY_INS);          // Shift+Insert
+            int is_copy  = (c == 0x03) ||                                  // Ctrl+C
+                           ((mods & KMOD_CTRL)  && (c == 'c' || c == 'C')) ||
+                           ((mods & KMOD_CTRL)  && c == KEY_INS);          // Ctrl+Insert
+            int is_cut   = (c == 0x18) ||                                  // Ctrl+X
+                           ((mods & KMOD_CTRL)  && (c == 'x' || c == 'X')) ||
+                           ((mods & KMOD_SHIFT) && c == KEY_DEL);          // Shift+Delete
+            if (is_paste) {
+                char cb[512];
+                int cl = con_clip_get(cb, (int)sizeof cb);
+                int room = (maxlen - 1) - len, take = cl;
+                if (take > (int)sizeof cb) take = (int)sizeof cb;
+                if (take > room) take = room;
+                if (take > 0) {
+                    for (int i = len; i >= pos; i--) buf[i + take] = buf[i];
+                    for (int i = 0; i < take; i++) {
+                        char ch = cb[i];
+                        if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';  // one line
+                        buf[pos + i] = ch;
+                    }
+                    len += take; pos += take; buf[len] = 0;
+                }
+                edit_render(sc, sr, prompt, buf, len, pos, prev_len); prev_len = len;
+                last_blink = TIMER_CLO; continue;
+            }
+            if (is_copy) { con_clip_set(buf, len); continue; }
+            if (is_cut) {
+                con_clip_set(buf, len); len = 0; pos = 0; buf[0] = 0;
+                edit_render(sc, sr, prompt, buf, len, pos, prev_len); prev_len = len;
+                last_blink = TIMER_CLO; continue;
+            }
+            if ((mods & KMOD_CTRL) &&                                      // swallow other
+                ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) continue;   // Ctrl+letters
         }
 
         if (c == '\r' || c == '\n') {
@@ -340,10 +516,22 @@ int term_getline_ed(char *buf, int maxlen, int prefill_len, const char *prompt) 
                 kstrcpy(buf, hist_age == 0 ? saved : hist_get(hist_age), maxlen);
                 len = kstrlen(buf); pos = len;
             }
-        } else if (c >= 32 && c <= 126) {         // insert a printable char at cursor
-            if (len < maxlen - 1) {
+        } else if (c == KEY_INS) {               // toggle insert / overwrite
+            cursor_insert = !cursor_insert;
+            if (fb_ready) {                       // redraw the caret in its new shape now
+                if (cursor_visible) cursor_set(0);
+                edit_cursor_at(sc, sr, pos);
+                cursor_set(1);
+            }
+            last_blink = TIMER_CLO;
+            continue;                             // buffer unchanged; skip the redraw
+        } else if ((c >= 32 && c <= 126) ||
+                   (c >= 0xA0 && c <= 0xFF)) {    // printable ASCII or Latin-1 (æ ø å …)
+            if (!cursor_insert && pos < len) {
+                buf[pos++] = (char)c;             // overwrite the character under the caret
+            } else if (len < maxlen - 1) {        // insert (or append at end of line)
                 for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
-                buf[pos++] = c; len++; buf[len] = 0;
+                buf[pos++] = (char)c; len++; buf[len] = 0;
             }
         } else {
             continue;                              // ignore other control codes
@@ -400,17 +588,27 @@ void con_colour(int c) {
     else          text_color = bbc_palette[c & 7];           // COLOUR c: foreground
 }
 
+// Keyboard layout: forward to the shared HID decoder (see drivers/usb_hid.c).
+int         con_set_keyboard(const char *code) { return hid_set_layout(code); }
+const char *con_get_keyboard(void)             { return hid_layout_code(); }
+
 // Block until a key is pressed; return its ASCII code (BBC GET).
 int con_getkey(void) {
     uint32_t last_blink = TIMER_CLO;
     for (;;) {
-        char c = term_pollchar();
-        if (c) { if (cursor_visible) cursor_set(0); return (unsigned char)c; }
+        uint64_t it0 = con_micros();        // each polling iteration is idle time
+        int c = term_pollchar();
+        if (c) { g_idle_us += con_micros() - it0; pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
+            pointer_hide();                 // hide before drawing the blink cursor
             cursor_set(!cursor_visible);
         }
+        sysmon_tick();                      // refresh the F12 overlay while waiting
+        pointer_tick();                     // move/repaint the pointer on top
+        sound_pump();                       // keep queued notes playing while idle
+        g_idle_us += con_micros() - it0;    // credit this whole idle spin (incl. the poll)
     }
 }
 
@@ -427,20 +625,528 @@ int con_inkey(int centiseconds) {
     uint32_t t0 = TIMER_CLO;
     uint32_t limit = (centiseconds > 0) ? (uint32_t)centiseconds * 10000u : 0;
     uint32_t last_blink = TIMER_CLO;
+    // A 0-centisecond INKEY (limit==0) is a *non-blocking probe* - the interpreter
+    // fires one every statement to check for Ctrl+C etc. That is the overhead of a
+    // RUNNING program, not idle waiting, so only a genuine blocking wait (limit>0)
+    // credits idle time towards the CPU meter.
     for (;;) {
-        char c = term_pollchar();
-        if (c) { if (cursor_visible) cursor_set(0); return (unsigned char)c; }
-        if (TIMER_CLO - t0 >= limit) return -1;
+        uint64_t it0 = con_micros();
+        int c = term_pollchar();
+        if (c) { if (limit) g_idle_us += con_micros() - it0; pointer_hide(); if (cursor_visible) cursor_set(0); return c; }
+        sysmon_tick();                      // refresh the overlay even on a 0-timeout poll
+        if (TIMER_CLO - t0 >= limit) { if (limit) g_idle_us += con_micros() - it0; pointer_hide(); return -1; }
         uint32_t now = TIMER_CLO;
         if (now - last_blink >= CURSOR_BLINK_US) {
             last_blink = now;
+            pointer_hide();                 // hide before drawing the blink cursor
             cursor_set(!cursor_visible);
         }
+        pointer_tick();                     // move/repaint the pointer on top
+        sound_pump();                       // keep queued notes playing while idle
+        g_idle_us += con_micros() - it0;    // credit this idle spin of a blocking wait
     }
 }
 
 int con_pos(void)  { return cursor_col; }
 int con_vpos(void) { return cursor_row; }
+int con_rows(void) { return g_term_rows; }
+int con_cols(void) { return g_term_cols; }
+
+int con_canonical_mode(int) { return 0; } // no-op outside of the desktop host
+
+// --- system clipboard -------------------------------------------------------
+// One buffer, in the kernel, so it outlives any POD (copy in the editor, paste
+// at the BASIC prompt or in the next program). con_clip_get returns the FULL
+// stored length so the caller can tell when its buffer was too small.
+#define CLIP_MAX (64 * 1024)
+static char g_clip[CLIP_MAX];
+static int  g_clip_len = 0;
+void con_clip_set(const char *data, int len) {
+    if (len < 0) len = 0;
+    if (len > CLIP_MAX) len = CLIP_MAX;
+    for (int i = 0; i < len; i++) g_clip[i] = data[i];
+    g_clip_len = len;
+}
+int con_clip_len(void) { return g_clip_len; }
+int con_clip_get(char *buf, int max) {
+    int n = g_clip_len;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) buf[i] = g_clip[i];
+    return g_clip_len;
+}
+
+// Poll whichever USB backend enumerated a mouse and fold the relative movement
+// into the absolute pointer position. Raw framebuffer pixels, origin top-left:
+// +dX moves right, +dY moves down. Buttons are latched from the last report.
+static void mouse_service(void) {
+    int btn = 0, dx = 0, dy = 0, wheel = 0, got = 0;
+    if (g_mouse_dwc2) got = usb_mouse_poll(&btn, &dx, &dy, &wheel);
+    if (!got && g_mouse_xhci) got = xhci_mouse_poll(&btn, &dx, &dy, &wheel);
+    if (!got) return;
+
+    g_mouse_b = btn;
+    g_mouse_x += dx;
+    g_mouse_y += dy;
+    if (g_mouse_x < 0) g_mouse_x = 0;
+    if (g_mouse_y < 0) g_mouse_y = 0;
+    if (g_mouse_x > (int)g_fb_w - 1) g_mouse_x = (int)g_fb_w - 1;
+    if (g_mouse_y > (int)g_fb_h - 1) g_mouse_y = (int)g_fb_h - 1;
+}
+
+// The modifier/lock snapshot from the shared HID decoder. Both USB backends feed
+// the same decoder, so this is right whichever one enumerated; with no USB
+// keyboard at all there are no modifiers to report (a serial terminal sends
+// characters, not key state).
+int con_keymods(void) {
+    if (!g_kbd_ok && !g_xhci_ok) return 0;
+    return hid_modifiers();
+}
+
+// Keys currently held down (for games that need hold-to-move, not just presses).
+// Returns the count and fills out[], or -1 when there is no USB keyboard (a
+// serial terminal reports presses, not held state). Poll a key first (inkey(0))
+// so the underlying HID report is fresh.
+int con_keys_down(int *out, int max) {
+    if (!g_kbd_ok && !g_xhci_ok) return -1;
+    return hid_keys_down(out, max);
+}
+
+void con_mouse(int *x, int *y, int *buttons) {
+    mouse_service();
+    if (x)       *x = g_mouse_x;
+    if (y)       *y = g_mouse_y;
+    if (buttons) *buttons = g_mouse_b;
+}
+
+// --- software mouse pointer -------------------------------------------------
+// A small arrow sprite drawn directly on the framebuffer. It is shown only while
+// the console is waiting for input (REPL editor, GET/INKEY), and hidden before
+// any character is echoed, so it never corrupts text: the pixels underneath are
+// saved on show and restored on hide (save-under). The arrow's tip is the hot
+// spot at the top-left, so the sprite's origin is the mouse coordinate.
+#define PTR_W 12
+#define PTR_H 17
+// 'K' = black outline, 'W' = white fill, '.' = transparent (see-through).
+static const char ptr_sprite[PTR_H][PTR_W + 1] = {
+    "K...........",
+    "KK..........",
+    "KWK.........",
+    "KWWK........",
+    "KWWWK.......",
+    "KWWWWK......",
+    "KWWWWWK.....",
+    "KWWWWWWK....",
+    "KWWWWWWWK...",
+    "KWWWWWWWWK..",
+    "KWWWWWKKKKK.",
+    "KWWKWWK.....",
+    "KWK.KWWK....",
+    "KK..KWWK....",
+    "K....KWWK...",
+    ".....KWWK...",
+    "......KK....",
+};
+
+static int      g_ptr_shown = 0;
+static int      g_ptr_x = 0, g_ptr_y = 0;
+static uint32_t g_ptr_save[PTR_W * PTR_H];   // framebuffer pixels under the sprite
+
+static int mouse_enabled(void) { return (g_mouse_dwc2 || g_mouse_xhci) && fb_ready; }
+
+// Restore the pixels the sprite is covering. Must be called before ANY other
+// write to the region the pointer occupies (blink cursor, character echo, etc.).
+static void pointer_hide(void) {
+    if (!g_ptr_shown) return;
+    for (int r = 0; r < PTR_H; r++)
+        for (int c = 0; c < PTR_W; c++)
+            putpixel(g_ptr_x + c, g_ptr_y + r, g_ptr_save[r * PTR_W + c]);
+    g_ptr_shown = 0;
+}
+
+// Save the background at the current mouse position, then draw the arrow on top.
+static void pointer_show(void) {
+    if (g_ptr_shown) return;
+    g_ptr_x = g_mouse_x;
+    g_ptr_y = g_mouse_y;
+    for (int r = 0; r < PTR_H; r++)                       // save first (whole box)
+        for (int c = 0; c < PTR_W; c++)
+            g_ptr_save[r * PTR_W + c] = getpixel(g_ptr_x + c, g_ptr_y + r);
+    for (int r = 0; r < PTR_H; r++)                       // then draw opaque cells
+        for (int c = 0; c < PTR_W; c++) {
+            char p = ptr_sprite[r][c];
+            if (p == 'K')      putpixel(g_ptr_x + c, g_ptr_y + r, COLOR_BLACK);
+            else if (p == 'W') putpixel(g_ptr_x + c, g_ptr_y + r, COLOR_WHITE);
+        }
+    g_ptr_shown = 1;
+}
+
+// Called from input-wait loops: poll the mouse and, if the pointer moved (or is
+// not currently drawn), repaint it. A no-op when the pointer is already up to
+// date, so it is cheap to call at the polling rate.
+static void pointer_tick(void) {
+    if (!mouse_enabled()) return;
+    if (gfx_buffered() || g_tgt_w > 0) return;   // never draw the arrow off-screen
+    mouse_service();
+    if (g_ptr_shown && g_ptr_x == g_mouse_x && g_ptr_y == g_mouse_y) return;
+    pointer_hide();
+    pointer_show();
+}
+
+// ---------------------------------------------------------------------------
+// System-monitor overlay (toggled by F12)
+// ---------------------------------------------------------------------------
+// A small always-on-top panel in the top-right corner showing CPU load, heap
+// used/free and uptime. It draws straight onto the VISIBLE front buffer
+// (gfx_front_*), so it shows through BUFFER ON / SPRITETARGET and survives a
+// program's own drawing; the pixels it covers are saved so it lifts cleanly when
+// toggled off. Painting is fully opaque (no read-back of its own pixels), so
+// repaints are stable; the only save-under is the true background captured when
+// it first appears and again right after each buffer flip. Refresh is throttled
+// and driven from the input-wait loops (and con_flip), so it is idle-cheap and
+// stays visible while a program runs (the interpreter polls keys between lines).
+
+#define OV_TXTPAD 5                         // left/right inset for the body
+#define OV_COLS   13                        // body width, in characters
+#define OV_ROWSB  6                         // body rows (CPU, MEM, VARS, USE, FRE, UP)
+#define OV_W      (OV_COLS * CHAR_W + 2 * OV_TXTPAD)
+#define OV_H      (CHAR_H + OV_ROWSB * CHAR_H + 8)   // title row + body + bottom pad
+#define OV_MARGIN 8                         // gap from the screen edges
+#define OV_CAP    (128 * 128)               // save-under capacity (>= OV_W*OV_H)
+
+static int      g_sysmon_drawn = 0;         // panel currently painted on-screen
+static int      g_ov_x = 0, g_ov_y = 0;     // panel top-left (front-buffer pixels)
+static uint32_t g_ov_save[OV_CAP];          // true background under the panel
+static uint64_t g_sysmon_last = 0;          // last repaint time (throttle)
+
+// CPU-load window and cached, formatted stat lines (recomputed ~2x/second).
+// The MEM/VARS gauges keep tenths of a percent (per-mille, 0..1000) so the small
+// figures typical of a BASIC session still read meaningfully (e.g. "0.5%").
+static uint64_t g_cpu_last_t = 0, g_cpu_last_idle = 0;
+static int      g_ov_cpu = 0;               // 0..100
+static int      g_ov_mem_pm = 0, g_ov_var_pm = 0;   // per-mille (0..1000)
+static char     g_ov_use[16], g_ov_fre[16], g_ov_up[16];
+static uint64_t g_ov_stat_t = 0;
+
+// --- little front-buffer draw helpers (opaque; ignore clip/target/buffering) --
+static void ov_fill(int x, int y, int w, int h, uint32_t c) {
+    for (int r = 0; r < h; r++)
+        for (int k = 0; k < w; k++) gfx_front_putpixel(x + k, y + r, c);
+}
+static void ov_hline(int x, int y, int w, uint32_t c) {
+    for (int k = 0; k < w; k++) gfx_front_putpixel(x + k, y, c);
+}
+static void ov_vline(int x, int y, int h, uint32_t c) {
+    for (int r = 0; r < h; r++) gfx_front_putpixel(x, y + r, c);
+}
+static void ov_char(char ch, int x, int y, uint32_t col) {
+    const unsigned char *g = &bbc_font[(unsigned char)ch * GLYPH_BYTES];
+    for (int row = 0; row < GLYPH_H; row++) {
+        unsigned char bits = g[row];
+        for (int c2 = 0; c2 < GLYPH_W; c2++)
+            if (bits & (0x80 >> c2)) {
+                if (FONT_SCALE == 1) gfx_front_putpixel(x + c2, y + row, col);
+                else for (int sy = 0; sy < FONT_SCALE; sy++)
+                    for (int sx = 0; sx < FONT_SCALE; sx++)
+                        gfx_front_putpixel(x + c2 * FONT_SCALE + sx,
+                                           y + row * FONT_SCALE + sy, col);
+            }
+    }
+}
+static int ov_slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static void ov_text(const char *s, int x, int y, uint32_t col) {
+    while (*s) { ov_char(*s++, x, y, col); x += CHAR_W; }
+}
+static void ov_text_right(const char *s, int rx, int y, uint32_t col) {
+    ov_text(s, rx - ov_slen(s) * CHAR_W, y, col);
+}
+static void ov_cat(char *d, const char *s) {
+    int i = 0; while (d[i]) i++; while (*s) d[i++] = *s++; d[i] = 0;
+}
+static void ov_cat_u(char *d, unsigned long v) {
+    char t[24]; int n = 0;
+    if (!v) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    char b[24]; int i = 0; while (n) b[i++] = t[--n]; b[i] = 0;
+    ov_cat(d, b);
+}
+
+static void sysmon_capture(void) {
+    for (int r = 0; r < OV_H; r++)
+        for (int c = 0; c < OV_W; c++)
+            g_ov_save[r * OV_W + c] = gfx_front_getpixel(g_ov_x + c, g_ov_y + r);
+}
+static void sysmon_erase(void) {
+    if (!g_sysmon_drawn) return;
+    for (int r = 0; r < OV_H; r++)
+        for (int c = 0; c < OV_W; c++)
+            gfx_front_putpixel(g_ov_x + c, g_ov_y + r, g_ov_save[r * OV_W + c]);
+    g_sysmon_drawn = 0;
+}
+
+// --- corner toast notification ----------------------------------------------
+// A small self-erasing panel in the lower-right (USB icon + a line of text) shown
+// for a few seconds, e.g. when a stick is plugged/unplugged - so hot-plug events
+// no longer scribble into the REPL line. Front-buffer draw with a save-under, like
+// the F12 overlay.
+#define TOAST_ICON 18
+#define TOAST_H    (TOAST_ICON + 12)
+#define TOAST_MAXW 340
+#define TOAST_MARG 10
+#define TOAST_CAP  (TOAST_MAXW * (TOAST_H + 4))
+
+static uint32_t g_toast_save[TOAST_CAP];
+static int      g_toast_on, g_toast_x, g_toast_y, g_toast_w;
+static uint64_t g_toast_until;
+
+static void ov_line(int x0, int y0, int x1, int y1, uint32_t col) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    int steps = adx > ady ? adx : ady;
+    if (steps <= 0) { gfx_front_putpixel(x0, y0, col); return; }
+    for (int i = 0; i <= steps; i++)
+        gfx_front_putpixel(x0 + dx * i / steps, y0 + dy * i / steps, col);
+}
+static void ov_disc(int cx, int cy, int r, uint32_t col) {
+    for (int yy = -r; yy <= r; yy++)
+        for (int xx = -r; xx <= r; xx++)
+            if (xx * xx + yy * yy <= r * r + 1) gfx_front_putpixel(cx + xx, cy + yy, col);
+}
+// The USB "trident": arrow at the top of a shaft, a base disc, and two branches
+// ending in a filled circle (left) and a filled square (right).
+static void draw_usb_icon(int x, int y, uint32_t col) {
+    int cx = x + TOAST_ICON / 2, top = y + 1, bot = y + TOAST_ICON - 3;
+    ov_line(cx, top + 3, cx, bot, col); ov_line(cx - 1, top + 3, cx - 1, bot, col);  // shaft
+    for (int r = 0; r <= 3; r++)                                        // arrow head (up)
+        for (int c = -r; c <= r; c++) gfx_front_putpixel(cx + c, top + r, col);
+    ov_disc(cx, bot, 2, col);                                          // base disc
+    ov_line(cx, y + 9, cx - 5, y + 5, col); ov_disc(cx - 5, y + 5, 2, col);          // left -> circle
+    ov_line(cx, y + 7, cx + 5, y + 4, col); ov_fill(cx + 4, y + 2, 3, 3, col);       // right -> square
+}
+
+static void toast_erase(void) {
+    if (!g_toast_on) return;
+    for (int r = 0; r < TOAST_H; r++)
+        for (int c = 0; c < g_toast_w; c++)
+            gfx_front_putpixel(g_toast_x + c, g_toast_y + r, g_toast_save[r * g_toast_w + c]);
+    g_toast_on = 0;
+}
+
+// Show `msg` (with a USB icon) in the lower-right for ~3.5 s. `good`: green accent
+// for a connect, red-ish for a removal.
+static void toast_show(const char *msg, int good) {
+    if (!fb_ready) return;
+    toast_erase();                                        // replace any current toast
+    int textw = (int)ov_slen(msg) * CHAR_W;
+    int w = 8 + TOAST_ICON + 8 + textw + 10;
+    if (w > TOAST_MAXW) w = TOAST_MAXW;
+    int h = TOAST_H;
+    g_toast_w = w;
+    g_toast_x = (int)g_fb_w - w - TOAST_MARG;
+    g_toast_y = (int)g_fb_h - h - TOAST_MARG;
+    if (g_toast_x < 0 || g_toast_y < 0) return;
+
+    for (int r = 0; r < h; r++)                            // save-under
+        for (int c = 0; c < w; c++)
+            g_toast_save[r * w + c] = gfx_front_getpixel(g_toast_x + c, g_toast_y + r);
+
+    uint32_t panel  = rgb_pixel(28, 32, 44);
+    uint32_t accent = good ? rgb_pixel(70, 200, 120) : rgb_pixel(225, 110, 90);
+    uint32_t textc  = rgb_pixel(232, 238, 248);
+    ov_fill(g_toast_x, g_toast_y, w, h, panel);
+    ov_hline(g_toast_x, g_toast_y, w, accent);
+    ov_hline(g_toast_x, g_toast_y + h - 1, w, accent);
+    ov_vline(g_toast_x, g_toast_y, h, accent);
+    ov_vline(g_toast_x + w - 1, g_toast_y, h, accent);
+    ov_fill(g_toast_x, g_toast_y, 3, h, accent);          // accent bar down the left edge
+    draw_usb_icon(g_toast_x + 8, g_toast_y + (h - TOAST_ICON) / 2, accent);
+    ov_text(msg, g_toast_x + 8 + TOAST_ICON + 8, g_toast_y + (h - CHAR_H) / 2, textc);
+
+    g_toast_on = 1;
+    g_toast_until = con_micros() + 3500000ull;            // ~3.5 s
+}
+
+static void toast_tick(void) {
+    if (g_toast_on && con_micros() >= g_toast_until) toast_erase();
+}
+
+static void sysmon_recompute(uint64_t now) {
+    if (g_cpu_last_t == 0) { g_cpu_last_t = now; g_cpu_last_idle = g_idle_us; }
+    uint64_t win = now - g_cpu_last_t;
+    uint64_t idl = g_idle_us - g_cpu_last_idle;
+    int pct = 0;
+    if (win > 1000) { if (idl > win) idl = win; pct = (int)(((win - idl) * 100) / win); }
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    g_ov_cpu = pct;
+    g_cpu_last_t = now; g_cpu_last_idle = g_idle_us;
+
+    sysmem_t m; sys_meminfo(&m);
+    // MEM = the big 48 MB seed/POD/collections heap (in per-mille for one decimal).
+    g_ov_mem_pm = m.heap_total ? (int)((unsigned long long)m.heap_used * 1000 / m.heap_total) : 0;
+    // VARS = BASIC's own dynamic pools: the GC'd string heap + the DIM byte arena.
+    unsigned long long vt = (unsigned long long)m.vars_total + m.dim_total;
+    unsigned long long vu = (unsigned long long)m.vars_used  + m.dim_used;
+    g_ov_var_pm = vt ? (int)(vu * 1000 / vt) : 0;
+    unsigned long useK = (m.heap_used + 1023) / 1024;
+    unsigned long freK = (m.heap_total - m.heap_used + 1023) / 1024;
+    g_ov_use[0] = 0; ov_cat(g_ov_use, "USE "); ov_cat_u(g_ov_use, useK); ov_cat(g_ov_use, "K");
+    g_ov_fre[0] = 0; ov_cat(g_ov_fre, "FRE "); ov_cat_u(g_ov_fre, freK); ov_cat(g_ov_fre, "K");
+
+    unsigned long sec = (unsigned long)(now / 1000000ull);
+    unsigned long mm = sec / 60, ss = sec % 60;
+    g_ov_up[0] = 0; ov_cat(g_ov_up, "UP "); ov_cat_u(g_ov_up, mm);
+    ov_cat(g_ov_up, ss < 10 ? ":0" : ":"); ov_cat_u(g_ov_up, ss);
+    g_ov_stat_t = now;
+}
+
+static uint32_t ov_gauge_col(int pct) {
+    if (pct >= 80) return rgb_pixel(220,  80,  70);   // red
+    if (pct >= 55) return rgb_pixel(220, 185,  60);   // amber
+    return                rgb_pixel( 70, 200, 110);   // green
+}
+static void ov_gauge(int gx, int gy, int gw, const char *label, int pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    int gh = CHAR_H - 2;
+    ov_fill(gx, gy + 1, gw, gh, rgb_pixel(38, 42, 58));          // track
+    int fw = gw * pct / 100;
+    if (fw > 0) ov_fill(gx, gy + 1, fw, gh, ov_gauge_col(pct));  // fill
+    ov_text(label, gx + 3, gy, rgb_pixel(255, 255, 255));        // label
+    char b[8]; b[0] = 0; ov_cat_u(b, (unsigned long)pct); ov_cat(b, "%");
+    ov_text_right(b, gx + gw - 3, gy, rgb_pixel(255, 255, 255)); // percentage
+}
+// Like ov_gauge, but `pm` is per-mille (0..1000) shown to one decimal ("N.N%").
+static void ov_gauge_d(int gx, int gy, int gw, const char *label, int pm) {
+    if (pm < 0) pm = 0;
+    if (pm > 1000) pm = 1000;
+    int gh = CHAR_H - 2;
+    ov_fill(gx, gy + 1, gw, gh, rgb_pixel(38, 42, 58));          // track
+    int fw = gw * pm / 1000;
+    if (fw > 0) ov_fill(gx, gy + 1, fw, gh, ov_gauge_col(pm / 10));  // fill
+    ov_text(label, gx + 3, gy, rgb_pixel(255, 255, 255));        // label
+    char b[12]; b[0] = 0;
+    ov_cat_u(b, (unsigned long)(pm / 10)); ov_cat(b, ".");
+    ov_cat_u(b, (unsigned long)(pm % 10)); ov_cat(b, "%");
+    ov_text_right(b, gx + gw - 3, gy, rgb_pixel(255, 255, 255)); // percentage
+}
+
+static void sysmon_render(uint64_t now) {
+    if (g_ov_stat_t == 0 || now - g_ov_stat_t >= 500000ull) sysmon_recompute(now);
+    uint32_t panel  = rgb_pixel(22, 24, 34);
+    uint32_t title  = rgb_pixel(46, 102, 180);
+    uint32_t border = rgb_pixel(90, 120, 170);
+    uint32_t dim    = rgb_pixel(178, 188, 208);
+
+    ov_fill(g_ov_x, g_ov_y, OV_W, OV_H, panel);              // body
+    ov_fill(g_ov_x, g_ov_y, OV_W, CHAR_H, title);           // title bar
+    { const char *t = "SYSTEM";
+      ov_text(t, g_ov_x + (OV_W - ov_slen(t) * CHAR_W) / 2, g_ov_y, rgb_pixel(255,255,255)); }
+    ov_hline(g_ov_x, g_ov_y, OV_W, border);                 // frame
+    ov_hline(g_ov_x, g_ov_y + OV_H - 1, OV_W, border);
+    ov_vline(g_ov_x, g_ov_y, OV_H, border);
+    ov_vline(g_ov_x + OV_W - 1, g_ov_y, OV_H, border);
+
+    int bx = g_ov_x + OV_TXTPAD;
+    int gw = OV_COLS * CHAR_W;
+    int by = g_ov_y + CHAR_H + 3;
+    ov_gauge  (bx, by + 0 * CHAR_H, gw, "CPU",  g_ov_cpu);
+    ov_gauge_d(bx, by + 1 * CHAR_H, gw, "MEM",  g_ov_mem_pm);   // 48 MB seed/POD heap
+    ov_gauge_d(bx, by + 2 * CHAR_H, gw, "VARS", g_ov_var_pm);   // BASIC string + DIM pools
+    ov_text(g_ov_use, bx, by + 3 * CHAR_H, dim);
+    ov_text(g_ov_fre, bx, by + 4 * CHAR_H, dim);
+    ov_text(g_ov_up,  bx, by + 5 * CHAR_H, dim);
+}
+
+static void sysmon_paint(uint64_t now) {
+    if (!fb_ready) return;
+    if (!g_sysmon_drawn) {
+        int fw = gfx_front_width();
+        g_ov_x = fw - OV_W - OV_MARGIN; if (g_ov_x < 0) g_ov_x = 0;
+        g_ov_y = OV_MARGIN;
+        pointer_hide();                     // don't fold the mouse arrow into the save
+        sysmon_capture();
+        g_sysmon_drawn = 1;
+    } else {
+        pointer_hide();
+    }
+    sysmon_render(now);
+}
+
+// Lowest free mount point for a stick: /USB, then /USB1, /USB2, ... Fills mp (>=8
+// bytes); mp[0]=0 if all are taken. This lets several sticks coexist, and a freed
+// slot (after removal) is reused by the next insertion.
+static void free_usb_mount(char *mp) {
+    for (int n = 0; n <= 9; n++) {
+        mp[0] = '/'; mp[1] = 'U'; mp[2] = 'S'; mp[3] = 'B';
+        if (n == 0) mp[4] = 0; else { mp[4] = (char)('0' + n); mp[5] = 0; }
+        if (!fs_mount_in_use(mp)) return;
+    }
+    mp[0] = 0;
+}
+
+// Mount every present-but-unmounted USB blockdev at its own free /USBn. `notify`:
+// show a corner toast (hot-plug); otherwise mirror to the boot screen (boot).
+static void mount_new_usb(int notify) {
+    for (int bi = 1; bi < blk_count(); bi++) {
+        blockdev *b = blk_get(bi);
+        if (!b || !b->present || fs_blkdev_mounted(bi)) continue;
+        char mp[8]; free_usb_mount(mp);
+        if (!mp[0] || fs_automount(bi, "usb", mp) < 0) continue;
+        uart_puts("[USB] mounted "); uart_puts(mp); uart_puts("\n");
+        if (notify) {
+            char t[24]; t[0] = 0; ov_cat(t, "USB stick "); ov_cat(t, mp);
+            toast_show(t, 1);
+        } else if (fb_ready) {
+            term_puts("[USB] mounted "); term_puts(mp); term_puts("\n");
+        }
+    }
+}
+
+// USB hot-plug: periodically re-poll the onboard hub. On removal, unmount the
+// stick's /USBn volume and free its blockdev; on insertion, bring the stick up and
+// mount it. Cheap when nothing changed (a few hub control transfers ~ms), heavier
+// (~a few hundred ms) only on an actual plug event - never the seconds-long SD
+// write that made typing stutter, so it is safe to run from the input loop.
+static void usb_hotplug_tick(void) {
+    if (!g_real_hw) return;
+    static uint64_t last = 0;
+    uint64_t now = con_micros();
+    if (last && now - last < 1000000ull) return;         // ~1 s between polls
+    last = now;
+
+    int ch = xhci_rescan();
+    if (!ch) return;
+
+    if (ch & 2)                                          // sticks removed
+        for (int bd; (bd = msc_dead_blkdev()) >= 0; ) {
+            fs_unmount_blkdev(bd);
+            blk_unregister(bd);
+            uart_puts("[USB] stick removed - /USB unmounted\n");   // log only (no REPL scribble)
+            toast_show("USB storage removed", 0);                 // notify in the corner
+        }
+    if ((ch & 1) && msc_init() > 0) mount_new_usb(1);    // sticks inserted -> mount + toast
+    flush_boot_log();     // a plug event is rare - persist the rescan trace to /BOOTLOG.TXT
+}
+
+static void sysmon_tick(void) {
+    if (!fb_ready) return;
+    usb_hotplug_tick();                 // detect USB stick insert/removal
+    toast_tick();                       // expire the corner notification
+    if (!g_sysmon_on) { if (g_sysmon_drawn) sysmon_erase(); return; }
+    uint64_t now = con_micros();
+    if (g_sysmon_drawn && (now - g_sysmon_last) < 300000ull) return;   // throttle repaint
+    g_sysmon_last = now;
+    sysmon_paint(now);
+}
+static void sysmon_after_flip(void) {
+    if (!fb_ready || !g_sysmon_on || !g_sysmon_drawn) return;
+    // The flip overwrote our region with the back buffer's pixels - that IS the
+    // fresh true background, so recapture it and repaint the overlay on top.
+    pointer_hide();
+    sysmon_capture();
+    sysmon_render(con_micros());
+    g_sysmon_last = con_micros();
+}
 
 // ---------------------------------------------------------------------------
 // Boot logo (embedded RGB image from logo_data.c)
@@ -482,11 +1188,27 @@ int con_splash(const char *banner) {
     int oy = CHAR_H;                                  // small top margin
     draw_logo(ox, oy, div);                           // left side, half size
 
-    // Banner beside the logo, vertically centred on it.
-    cursor_col = (ox + lw) / CHAR_W + 1;
-    cursor_row = (oy + lh / 2) / CHAR_H;
+    // Banner beside the logo, vertically centred on it. The banner may hold
+    // several '\n'-separated lines (copyright + build info); print them by hand
+    // so every line keeps the logo's left indent instead of wrapping back to
+    // column 0 (which would overlap the icon).
+    int indent = (ox + lw) / CHAR_W + 1;
+    int nlines = 1;
+    for (const char *q = banner; *q; q++) if (*q == '\n') nlines++;
+    int first_row = (oy + lh / 2) / CHAR_H - (nlines - 1) / 2;
+    if (first_row < 0) first_row = 0;
     cursor_visible = 0;
-    con_puts(banner);
+    cursor_col = indent;
+    cursor_row = first_row;
+    for (const char *q = banner; *q; q++) {
+        if (*q == '\n') {                            // next line, same indent
+            cursor_col = indent;
+            cursor_row++;
+            uart_puts("\r\n");
+        } else {
+            con_putc(*q);
+        }
+    }
     uart_puts("\r\n");                                // tidy the serial line
 
     // Park the cursor below the logo for the REPL prompt.
@@ -506,22 +1228,61 @@ int con_splash(const char *banner) {
 // two as centre + a point on the circumference).
 // ---------------------------------------------------------------------------
 
-#define GFX_LW 1280
-#define GFX_LH 1024
+// Current graphics target dimensions. gl_* is the logical coordinate extent and
+// gt_* the destination pixel size; they differ only while SPRITETARGET is active
+// (both become the sprite's size, so drawing addresses sprite pixels directly).
+static int gl_w(void) { return g_gl_w; }
+static int gl_h(void) { return g_gl_h; }
+static int gt_w(void) { return g_tgt_w > 0 ? g_tgt_w : (int)g_fb_w; }
+static int gt_h(void) { return g_tgt_h > 0 ? g_tgt_h : (int)g_fb_h; }
 
 static int gfx_fg  = 7;     // graphics foreground (logical colour)
 static int gfx_bg  = 0;     // graphics background
 static int gfx_act = 0;     // GCOL plot action (0=store 1=OR 2=AND 3=EOR 4=invert)
+// RGB truecolour override: when *_true is set, drawing uses the 24-bit *_col
+// instead of the 8-entry logical palette.
+static int      gfx_fg_true = 0;
+static uint32_t gfx_fg_col  = 0;
+static int      gfx_bg_true = 0;
+static uint32_t gfx_bg_col  = 0;
+static uint32_t gcol_fg(void) { return gfx_fg_true ? gfx_fg_col : bbc_palette[gfx_fg & 7]; }
+static uint32_t gcol_bg(void) { return gfx_bg_true ? gfx_bg_col : bbc_palette[gfx_bg & 7]; }
 static int gpx0, gpy0;      // most recent point (logical, origin-relative)
 static int gpx1, gpy1;      // previous point
 static int gpx2, gpy2;      // the one before that
 static int gfx_ox = 0, gfx_oy = 0;   // graphics origin (VDU 29 / ORIGIN)
 
-static int lx2px(int x) { return (x + gfx_ox) * FB_WIDTH  / GFX_LW; }
-static int ly2py(int y) { return (FB_HEIGHT - 1) - ((y + gfx_oy) * FB_HEIGHT / GFX_LH); }
+// Line pen: width in *coordinate units* (scaled to pixels like a radius), the
+// join style for corners (GJOIN_*) and the cap style for open ends (GCAP_*).
+// Width 1 uses the fast single-pixel primitives; >1 uses the thick stroker.
+static int gfx_line_w = 1, gfx_join = GJOIN_MITER, gfx_cap = GCAP_BUTT;
+// The seed graphics pen (device pixels, unscaled) - separate from the BASIC pen
+// above; set via sgfx_line_style, used by the sgfx_* seed primitives further down.
+static int sgfx_w = 1, sgfx_join = GJOIN_MITER, sgfx_cap = GCAP_BUTT;
+
+// The one place the coordinate convention lives. In MODE 2 the mapping is 1:1
+// with a top-left origin (no scale, no y-flip); in MODE 1 it scales the logical
+// extent onto the target and flips y so the origin is bottom-left. A SPRITETARGET
+// makes gl_* == gt_* so the scale is already identity there in both modes; only
+// the flip differs (suppressed in MODE 2), which is why these key off g_gfx_mode
+// rather than the target.
+static int lx2px(int x) {
+    if (g_gfx_mode == 2) return x + gfx_ox;                          // 1:1, no scale
+    return (x + gfx_ox) * gt_w() / gl_w();
+}
+static int ly2py(int y) {
+    if (g_gfx_mode == 2) return y + gfx_oy;                          // top-left, y down
+    return (gt_h() - 1) - ((y + gfx_oy) * gt_h() / gl_h());
+}
 // Inverse transforms (physical pixel -> logical, origin-relative).
-static int px2lx(int px) { return px * GFX_LW / FB_WIDTH - gfx_ox; }
-static int py2ly(int py) { return (FB_HEIGHT - 1 - py) * GFX_LH / FB_HEIGHT - gfx_oy; }
+static int px2lx(int px) {
+    if (g_gfx_mode == 2) return px - gfx_ox;
+    return px * gl_w() / gt_w() - gfx_ox;
+}
+static int py2ly(int py) {
+    if (g_gfx_mode == 2) return py - gfx_oy;
+    return (gt_h() - 1 - py) * gl_h() / gt_h() - gfx_oy;
+}
 
 static int isqrt_i(int v) {
     if (v <= 0) return 0;
@@ -530,9 +1291,17 @@ static int isqrt_i(int v) {
     return r;
 }
 
+// The line pen width in physical (target) pixels. A coordinate-unit width scales
+// to the target like a radius does (gt_w()/gl_w()), so it is 1:1 in MODE 2 and on
+// a sprite target; never less than 1.
+static int line_pw(void) {
+    int w = gfx_line_w * gt_w() / gl_w();
+    return w < 1 ? 1 : w;
+}
+
 // Reset the default text/graphics viewports and graphics origin (VDU 26).
 static void reset_viewports(void) {
-    tv_l = 0; tv_t = 0; tv_r = TERM_COLS - 1; tv_b = TERM_ROWS - 1;
+    tv_l = 0; tv_t = 0; tv_r = g_term_cols - 1; tv_b = g_term_rows - 1;
     gfx_clear_clip();
     gfx_ox = 0; gfx_oy = 0;
     gpx0 = gpy0 = gpx1 = gpy1 = gpx2 = gpy2 = 0;
@@ -544,11 +1313,38 @@ static void reset_colours(void) {
     text_color = bbc_palette[7];     // COLOUR 7
     text_bg    = bbc_palette[0];     // COLOUR 128
     gfx_fg = 7; gfx_bg = 0; gfx_act = 0;
+    gfx_fg_true = 0; gfx_bg_true = 0;
+    gfx_line_w = 1; gfx_join = GJOIN_MITER; gfx_cap = GCAP_BUTT;   // reset the BASIC pen
+    sgfx_w = 1; sgfx_join = GJOIN_MITER; sgfx_cap = GCAP_BUTT;     // ... and the seed pen
     gfx_set_op(0);
 }
 
+// LINEWIDTH / LINEJOIN / LINECAP : the pen for thick lines and shape outlines.
+// width is in coordinate units (0/1 = a hairline); unknown join/cap fall back to
+// the defaults (miter / butt).
+void con_line_width(int width) { gfx_line_w = width < 1 ? 1 : width; }
+void con_line_join(int join) { gfx_join = (join >= GJOIN_MITER && join <= GJOIN_ROUND) ? join : GJOIN_MITER; }
+void con_line_cap(int cap)   { gfx_cap  = (cap  >= GCAP_BUTT  && cap  <= GCAP_SQUARE) ? cap  : GCAP_BUTT; }
+
+// Set the coordinate regime and the matching logical extent, WITHOUT touching the
+// screen, colours or viewports. The lightweight restore used by RUN/NEW/program
+// end so a program never inherits MODE 2, while whatever is on screen is left as
+// it is. MODE 2's extent is the live panel size (so lengths scale 1:1 and range
+// checks are correct); MODE 1's is the fixed BBC logical space.
+void con_set_gfx_mode(int n) {
+    if (n != 1 && n != 2) n = 1;
+    g_gfx_mode = n;
+    g_gfx_flip = (n == 1);
+    if (g_tgt_w > 0) return;                   // a SPRITETARGET owns the extent; leave it
+    if (n == 2) { g_gl_w = (int)g_fb_w; g_gl_h = (int)g_fb_h; }   // native: extent = panel
+    else        { g_gl_w = GFX_LW;      g_gl_h = GFX_LH;      }   // legacy: fixed logical
+}
+
+// MODE n: switch coordinate regime AND reset graphics state (colours, viewports,
+// origin) and clear the screen - the classic BBC MODE behaviour. Unknown modes
+// fall back to legacy (the interpreter raises the error; the backend stays lenient).
 void con_mode(int n) {
-    (void)n;                                  // resolution is fixed; MODE just resets
+    con_set_gfx_mode(n);
     reset_colours();
     reset_viewports();
     vdu5_mode = 0; vdu_enabled = 1; cursor_enabled = 1;
@@ -557,10 +1353,23 @@ void con_mode(int n) {
     uart_puts("\r\n");
 }
 
+int con_gfx_mode(void) { return g_gfx_mode; }
+
 void con_gcol(int action, int colour) {
     gfx_act = action & 7;
-    if (colour >= 128) gfx_bg = (colour - 128) & 7;   // GCOL a,128+c sets background
-    else               gfx_fg = colour & 7;
+    if (colour >= 128) { gfx_bg = (colour - 128) & 7; gfx_bg_true = 0; }   // background
+    else               { gfx_fg = colour & 7;         gfx_fg_true = 0; }   // foreground
+}
+
+// GCOL r,g,b : set the graphics foreground to a 24-bit truecolour.
+void con_gcol_rgb(int r, int g, int b) {
+    gfx_fg_true = 1;
+    gfx_fg_col  = rgb_pixel(r, g, b);
+}
+
+// COLOUR l,r,g,b : redefine logical colour l's palette entry (like VDU 19).
+void con_palette(int logical, int r, int g, int b) {
+    bbc_palette[logical & 7] = rgb_pixel(r, g, b);
 }
 
 void con_clg(void) {
@@ -568,7 +1377,9 @@ void con_clg(void) {
     int x0, y0, x1, y1;
     gfx_clip_rect(&x0, &y0, &x1, &y1);         // clear only the graphics viewport
     gfx_set_op(0);
-    fill_rect(x0, y0, x1, y1, bbc_palette[gfx_bg & 7]);
+    // Clearing a sprite target resets it to fully transparent (alpha 0) so
+    // untouched areas stay see-through; the screen clears to the gfx background.
+    fill_rect(x0, y0, x1, y1, g_tgt_w > 0 ? 0x00000000u : gcol_bg());
 }
 
 void con_plot(int code, int x, int y) {
@@ -587,7 +1398,7 @@ void con_plot(int code, int x, int y) {
 
     if (group == 0 && cmode == 0) return;          // plain MOVE
 
-    uint32_t col = (cmode == 3) ? bbc_palette[gfx_bg & 7] : bbc_palette[gfx_fg & 7];
+    uint32_t col = (cmode == 3) ? gcol_bg() : gcol_fg();
     int op = (cmode == 2) ? 3 : gfx_act;           // inverse colour -> EOR
     gfx_set_op(op);
 
@@ -595,17 +1406,23 @@ void con_plot(int code, int x, int y) {
     int x1 = lx2px(gpx1), y1 = ly2py(gpy1);
     int x2 = lx2px(gpx2), y2 = ly2py(gpy2);
 
+    int pw = line_pw();
     switch (group) {
-        case 0:    draw_line(x1, y1, x0, y0, col); break;          // line
-        case 64:   draw_line(x0, y0, x0, y0, col); break;          // single point
+        case 0:    if (pw > 1) stroke_line(x1, y1, x0, y0, pw, gfx_cap, col);  // line
+                   else        draw_line(x1, y1, x0, y0, col);
+                   break;
+        case 64:   if (pw > 1) fill_circle(x0, y0, pw / 2, col);   // point -> a fat dot
+                   else        draw_line(x0, y0, x0, y0, col);
+                   break;
         case 80:   fill_triangle(x0, y0, x1, y1, x2, y2, col); break;   // triangle
         case 96:   fill_rect(x1, y1, x0, y0, col); break;          // rectangle
         case 144:                                                   // circle outline
         case 152: {                                                 // circle fill
             int dx = x0 - x1, dy = y0 - y1;
             int r  = isqrt_i(dx * dx + dy * dy);
-            if (group == 152) fill_circle(x1, y1, r, col);
-            else              draw_circle(x1, y1, r, col);
+            if (group == 152)     fill_circle(x1, y1, r, col);
+            else if (pw > 1)      stroke_circle(x1, y1, r, pw, col);
+            else                  draw_circle(x1, y1, r, col);
             break;
         }
         default:   draw_line(x1, y1, x0, y0, col); break;          // fallback: line
@@ -615,10 +1432,504 @@ void con_plot(int code, int x, int y) {
 
 int con_point(int x, int y) {
     if (!fb_ready) return -1;
-    if (x < 0 || x >= GFX_LW || y < 0 || y >= GFX_LH) return -1;
+    if (x < 0 || x >= gl_w() || y < 0 || y >= gl_h()) return -1;
     uint32_t px = getpixel(lx2px(x), ly2py(y));
     for (int i = 0; i < 8; i++) if (bbc_palette[i] == px) return i;
     return -1;
+}
+
+// --- double buffering -------------------------------------------------------
+// The graphics driver owns the back buffer and the draw-target indirection; the
+// console just gates it on a live framebuffer and keeps the software mouse
+// pointer off the back buffer (it belongs on the visible screen only).
+int con_backbuffer(int on) {
+    if (!fb_ready) return on ? -1 : 0;
+    if (on) {
+        pointer_hide();                 // clear the arrow from the front first
+        return gfx_backbuffer(1);
+    }
+    gfx_backbuffer(0);
+    return 0;
+}
+void con_flip(void) { if (fb_ready) { gfx_flip(); sysmon_after_flip(); } }
+int  con_buffered(void) { return gfx_buffered(); }
+void con_screen_save(void)    { if (fb_ready) gfx_screen_save(); }
+void con_screen_restore(void) { if (fb_ready) gfx_screen_restore(); }
+
+// --- high-level shape commands (BBC logical coordinates) --------------------
+// All draw in the current graphics foreground (logical or truecolour) and honour
+// the GCOL plot op. Filled variants pass fill != 0.
+
+void con_line(int x1, int y1, int x2, int y2) {
+    if (!fb_ready) return;
+    int px1 = lx2px(x1), py1 = ly2py(y1), px2 = lx2px(x2), py2 = ly2py(y2);
+    int pw = line_pw();
+    gfx_set_op(gfx_act);
+    if (pw > 1) stroke_line(px1, py1, px2, py2, pw, gfx_cap, gcol_fg());
+    else        draw_line(px1, py1, px2, py2, gcol_fg());
+    gfx_set_op(0);
+    gpx0 = x2; gpy0 = y2;                 // leave the graphics cursor at the end
+}
+
+// RECTANGLE x,y,w,h : (x,y) is a corner, w/h are width/height in logical units.
+void con_rectangle(int x, int y, int w, int h, int fill) {
+    if (!fb_ready) return;
+    int x0 = lx2px(x), y0 = ly2py(y), x1 = lx2px(x + w), y1 = ly2py(y + h);
+    int pw = line_pw();
+    gfx_set_op(gfx_act);
+    if (fill) {
+        fill_rect(x0, y0, x1, y1, gcol_fg());
+    } else if (pw > 1) {                          // thick outline: a closed stroked polygon
+        int pts[8] = { x0, y0, x1, y0, x1, y1, x0, y1 };
+        stroke_polyline(pts, 4, 1 /*closed*/, pw, gfx_join, gfx_cap, gcol_fg());
+    } else {
+        draw_rect(x0, y0, x1, y1, gcol_fg());
+    }
+    gfx_set_op(0);
+}
+
+void con_circle(int x, int y, int r, int fill) {
+    if (!fb_ready) return;
+    int cx = lx2px(x), cy = ly2py(y);
+    int rp = r * gt_w() / gl_w();                  // scale to a round radius in target pixels
+    if (rp < 0) rp = -rp;
+    int pw = line_pw();
+    gfx_set_op(gfx_act);
+    if (fill)         fill_circle(cx, cy, rp, gcol_fg());
+    else if (pw > 1)  stroke_circle(cx, cy, rp, pw, gcol_fg());   // thick ring
+    else              draw_circle(cx, cy, rp, gcol_fg());
+    gfx_set_op(0);
+}
+
+void con_ellipse(int x, int y, int rx, int ry, int fill) {
+    if (!fb_ready) return;
+    int cx = lx2px(x), cy = ly2py(y);
+    int rpx = rx * gt_w() / gl_w();
+    int rpy = ry * gt_h() / gl_h();
+    int pw = line_pw();
+    gfx_set_op(gfx_act);
+    if (fill)         fill_ellipse(cx, cy, rpx, rpy, gcol_fg());
+    else if (pw > 1)  stroke_ellipse(cx, cy, rpx, rpy, pw, gcol_fg());
+    else              draw_ellipse(cx, cy, rpx, rpy, gcol_fg());
+    gfx_set_op(0);
+}
+
+void con_fill(int x, int y) {
+    if (!fb_ready) return;
+    flood_fill(lx2px(x), ly2py(y), gcol_fg());
+}
+
+// --- sprites (screen-rectangle capture / stamp via a DIM buffer) ------------
+// Layout at `addr`: 4 bytes width, 4 bytes height (little-endian), then
+// width*height pixels of 4 bytes each (framebuffer format), top row first.
+// Bytes are accessed one at a time to stay safe under -mstrict-align.
+static void sp_wr32(volatile unsigned char *p, uint32_t v) {
+    p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+}
+static uint32_t sp_rd32(volatile unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// --- sprite tint (GTINT) ----------------------------------------------------
+// A drawing-state colour that every blitted sprite is lerped toward, like GCOL.
+static int g_tint_on = 0, g_tint_r = 0, g_tint_g = 0, g_tint_b = 0, g_tint_a = 0;
+
+void con_sprite_tint(int on, int r, int g, int b, int a) {
+    g_tint_on = on ? 1 : 0;
+    g_tint_r = r & 0xff; g_tint_g = g & 0xff; g_tint_b = b & 0xff;
+    g_tint_a = a < 0 ? 0 : a > 255 ? 255 : a;
+}
+
+// Lerp a source pixel toward the tint colour (out = lerp(src,(r,g,b),a/255)),
+// keeping the source alpha so transparency is preserved.
+static uint32_t tint_px(uint32_t src) {
+    if (!g_tint_on || g_tint_a == 0) return src;
+    unsigned a = (unsigned)g_tint_a, na = 255 - a;
+    unsigned r = ( src        & 0xff);
+    unsigned g = ((src >> 8)  & 0xff);
+    unsigned b = ((src >> 16) & 0xff);
+    r = (r * na + (unsigned)g_tint_r * a + 127) / 255;
+    g = (g * na + (unsigned)g_tint_g * a + 127) / 255;
+    b = (b * na + (unsigned)g_tint_b * a + 127) / 255;
+    return (src & 0xFF000000u) | (b << 16) | (g << 8) | r;
+}
+
+// Blit one source pixel to (px,py): apply the tint, then honour the pixel's
+// alpha (0 = skip, 255 = opaque through the current plot op, otherwise blend
+// over the destination in store mode). The caller sets the plot op to gfx_act
+// around the loop; this restores it after a blended (partial-alpha) pixel.
+static void sp_put_pixel(int px, int py, uint32_t src) {
+    src = tint_px(src);
+    unsigned a = (src >> 24) & 0xFF;
+    if (a == 0) return;
+    if (a == 255) { putpixel_op(px, py, src); return; }
+    uint32_t dst = getpixel(px, py);
+    unsigned na = 255 - a;
+    unsigned r = (( src        & 0xff) * a + ( dst        & 0xff) * na + 127) / 255;
+    unsigned g = (((src >> 8)  & 0xff) * a + ((dst >> 8)  & 0xff) * na + 127) / 255;
+    unsigned b = (((src >> 16) & 0xff) * a + ((dst >> 16) & 0xff) * na + 127) / 255;
+    gfx_set_op(0);
+    putpixel_op(px, py, 0xFF000000u | (b << 16) | (g << 8) | r);
+    gfx_set_op(gfx_act);
+}
+
+// Minimal sine/cosine for sprite rotation (the kernel has no libm). Argument in
+// radians; range-reduced to [-pi/4,pi/4] with a short Taylor series - ample for
+// a nearest-sample blit. Ported from the interpreter's dsin().
+#define K_PI 3.14159265358979323846
+static double k_sin(double x) {
+    double twopi = 2 * K_PI, halfpi = K_PI / 2;
+    double kq = x / twopi;   kq = (double)(long)(kq >= 0 ? kq + 0.5 : kq - 0.5);
+    x -= kq * twopi;
+    double nq = x / halfpi;  int n = (int)(nq >= 0 ? nq + 0.5 : nq - 0.5);
+    double r = x - n * halfpi, r2 = r * r;
+    double st = r, ss = r;
+    for (int i = 1; i < 8; i++) { st *= -r2 / ((2 * i) * (2 * i + 1)); ss += st; }
+    double ct = 1, cc = 1;
+    for (int i = 1; i < 8; i++) { ct *= -r2 / ((2 * i - 1) * (2 * i)); cc += ct; }
+    switch (((n % 4) + 4) % 4) {
+        case 0:  return ss;
+        case 1:  return cc;
+        case 2:  return -ss;
+        default: return -cc;
+    }
+}
+static double k_cos(double x) { return k_sin(x + K_PI / 2); }
+
+void con_sprite_get(long addr, int x1, int y1, int x2, int y2) {
+    if (!fb_ready || !addr) return;
+    int px1 = lx2px(x1), py1 = ly2py(y1), px2 = lx2px(x2), py2 = ly2py(y2);
+    if (px1 > px2) { int t = px1; px1 = px2; px2 = t; }
+    if (py1 > py2) { int t = py1; py1 = py2; py2 = t; }
+    int w = px2 - px1 + 1, h = py2 - py1 + 1;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    sp_wr32(p, (uint32_t)w);
+    sp_wr32(p + 4, (uint32_t)h);
+    volatile unsigned char *q = p + 8;
+    for (int row = 0; row < h; row++)
+        for (int col = 0; col < w; col++) {
+            sp_wr32(q, getpixel(px1 + col, py1 + row));
+            q += 4;
+        }
+}
+
+// (x,y) is the logical point where the sprite's top-left corner is placed. Each
+// pixel's alpha (the high byte) controls transparency: 0 = fully transparent
+// (skipped, so the background shows through), 255 = opaque (drawn through the
+// current plot op, so EOR animation still works), values in between are
+// alpha-blended over the current screen pixel. GGET captures and images without
+// an alpha channel store 255 everywhere, so they draw fully opaque as before.
+void con_sprite_put(long addr, int x, int y) {
+    if (!fb_ready || !addr) return;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
+    if (w <= 0 || h <= 0 || w > gt_w() || h > gt_h()) return;
+    int dx = lx2px(x), dy = ly2py(y);
+    volatile unsigned char *q = p + 8;
+    gfx_set_op(gfx_act);
+    for (int row = 0; row < h; row++)
+        for (int col = 0; col < w; col++) {
+            uint32_t src = sp_rd32(q); q += 4;
+            sp_put_pixel(dx + col, dy + row, src);         // tint + alpha + plot op
+        }
+    gfx_set_op(0);
+}
+
+// Blit a sprite scaled by `scale` and rotated `angle` degrees clockwise about
+// its centre, that centre placed where the plain con_sprite_put's centre would
+// land - so (scale=1, angle=0) matches con_sprite_put. Destination-driven with
+// nearest sampling: for each output pixel we inverse-map back into the sprite.
+void con_sprite_put_ex(long addr, int x, int y, double scale, double angle) {
+    if (!fb_ready || !addr || scale <= 0) return;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
+    if (w <= 0 || h <= 0) return;
+    volatile unsigned char *pix = p + 8;
+
+    double hw = w * 0.5, hh = h * 0.5;
+    double cx = lx2px(x) + hw, cy = ly2py(y) + hh;         // sprite centre (physical)
+    double rad = angle * (K_PI / 180.0);
+    double c = k_cos(rad), s = k_sin(rad);
+    double ac = c < 0 ? -c : c, as = s < 0 ? -s : s;
+    // Tight half-extents of the scaled+rotated bounding box.
+    int Rx = (int)(scale * (hw * ac + hh * as)) + 1;
+    int Ry = (int)(scale * (hw * as + hh * ac)) + 1;
+
+    gfx_set_op(gfx_act);
+    for (int oy = -Ry; oy <= Ry; oy++)
+        for (int ox = -Rx; ox <= Rx; ox++) {
+            // Inverse transform (dest offset -> source offset), then to a pixel.
+            double u = ( ox * c + oy * s) / scale + hw;
+            double v = (-ox * s + oy * c) / scale + hh;
+            if (u < 0 || v < 0) continue;
+            int col = (int)u, row = (int)v;
+            if (col >= w || row >= h) continue;
+            uint32_t src = sp_rd32(pix + (((row * w) + col) << 2));
+            sp_put_pixel((int)(cx + ox), (int)(cy + oy), src);
+        }
+    gfx_set_op(0);
+}
+
+// --- TrueType text (GTEXT) --------------------------------------------------
+// Draw a string with the current TrueType font (see ttf.c). (x,y) is the logical
+// coordinate of the baseline at the start of the run; the pen advances in
+// physical pixels so glyphs stay crisp at their native size regardless of the
+// logical-to-physical scale. Each glyph's 8-bit coverage becomes a source pixel
+// (coverage as alpha, the graphics foreground as colour) and goes through
+// sp_put_pixel, so tint, plot op, viewport and the current draw target apply just
+// as for a sprite. Synthetic italic shears each row; underline draws a rule below
+// the baseline after the run. (Bold is baked into the coverage by ttf.c.)
+// Blit a run of the current TrueType font with its baseline start at physical
+// pixel (px,py), in framebuffer colour `fg`. Shared by con_gtext (BASIC's GTEXT,
+// logical coords) and sgfx_text (native seeds, device pixels).
+static void gtext_blit(int px, int py, const char *s, int len, uint32_t fg) {
+    if (!fb_ready || !s || len <= 0 || !ttf_ready()) return;
+    int flags   = ttf_style_flags();
+    int italic  = flags & 2;
+    int underln = flags & 4;
+    uint32_t rgb = fg & 0x00FFFFFFu;             // colour bytes; alpha set per pixel
+
+    int penx = px;
+    gfx_set_op(gfx_act);
+    for (int i = 0; i < len; i++) {
+        const unsigned char *bmp; int gw, gh, gx, gy, adv;
+        if (!ttf_glyph((unsigned char)s[i], &bmp, &gw, &gh, &gx, &gy, &adv)) break;
+        if (bmp && gw > 0 && gh > 0) {
+            for (int row = 0; row < gh; row++) {
+                int yy = py + gy + row;
+                int shear = italic ? (int)(-(gy + row) * 0.2) : 0;   // ascenders lean right
+                const unsigned char *srow = bmp + row * gw;
+                for (int col = 0; col < gw; col++) {
+                    unsigned cov = srow[col];
+                    if (!cov) continue;
+                    sp_put_pixel(penx + gx + col + shear, yy, ((uint32_t)cov << 24) | rgb);
+                }
+            }
+        }
+        penx += adv;
+    }
+    gfx_set_op(0);
+
+    if (underln && penx > px) {                  // rule two pixels below the baseline
+        int uy = py + 2;
+        for (int xx = px; xx < penx; xx++) putpixel_op(xx, uy, fg);
+    }
+}
+
+// Draw a string with the current TrueType font (see ttf.c). (x,y) is the logical
+// coordinate of the baseline at the start of the run; glyphs are anti-aliased and
+// honour tint, plot op, viewport and the current draw target, just like a sprite.
+void con_gtext(int x, int y, const char *s, int len) {
+    gtext_blit(lx2px(x), ly2py(y), s, len, gcol_fg());
+}
+
+// --- device-pixel graphics for native seeds (gfx.h / BGI-style, ABI v7) ------
+// These address the framebuffer directly: origin top-left, colours 0xRRGGBB.
+// They forward to the graphics.c primitives (which honour the clip rectangle and
+// the current draw target), so a seed's output composes with BASIC's graphics.
+// The plot op rests at 0 (store) between BASIC statements, which is the copy mode
+// BGI drawing expects.
+static uint32_t rgb_to_fb(uint32_t rgb) {
+    return rgb_pixel((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+}
+static uint32_t fb_to_rgb(uint32_t px) {
+    return (((px & 0xff) << 16) | (px & 0xff00) | ((px >> 16) & 0xff));   // R,G,B swap
+}
+
+int  sgfx_avail(void)  { return fb_ready ? 1 : 0; }
+int  sgfx_width(void)  { return (int)g_fb_w; }
+int  sgfx_height(void) { return (int)g_fb_h; }
+
+void sgfx_clear(uint32_t rgb) {
+    if (fb_ready) bar(0, 0, (int)g_fb_w - 1, (int)g_fb_h - 1, rgb_to_fb(rgb));
+}
+void sgfx_putpixel(int x, int y, uint32_t rgb) { if (fb_ready) putpixel(x, y, rgb_to_fb(rgb)); }
+uint32_t sgfx_getpixel(int x, int y) { return fb_ready ? fb_to_rgb(getpixel(x, y)) : 0; }
+
+// Fast paletted blit: convert the 256-entry 0xRRGGBB palette to framebuffer
+// pixel format once, then blit the w*h indexed image scaled + placed at (dx,dy).
+void sgfx_blit8(const unsigned char *idx, const unsigned int *pal,
+                int w, int h, int dx, int dy, int scale) {
+    if (!fb_ready || !idx || !pal) return;
+    uint32_t fbpal[256];
+    for (int i = 0; i < 256; i++) fbpal[i] = rgb_to_fb(pal[i]);
+    gfx_blit_indexed(idx, fbpal, w, h, dx, dy, scale);
+}
+
+// The seed's own line pen (device pixels) is declared with the other gfx state
+// up top so reset_colours() can reset it. Set via sgfx_line_style; honoured by
+// sgfx_line / sgfx_circle / sgfx_ellipse / sgfx_polyline.
+void sgfx_line_style(int width, int join, int cap) {
+    sgfx_w    = width < 1 ? 1 : width;
+    sgfx_join = (join >= GJOIN_MITER && join <= GJOIN_ROUND) ? join : GJOIN_MITER;
+    sgfx_cap  = (cap  >= GCAP_BUTT  && cap  <= GCAP_SQUARE) ? cap  : GCAP_BUTT;
+}
+void sgfx_polyline(const int *pts, int n, int closed, uint32_t rgb) {
+    if (fb_ready) stroke_polyline(pts, n, closed, sgfx_w < 1 ? 1 : sgfx_w,
+                                  sgfx_join, sgfx_cap, rgb_to_fb(rgb));
+}
+
+void sgfx_line(int x1, int y1, int x2, int y2, uint32_t rgb) {
+    if (!fb_ready) return;
+    if (sgfx_w > 1) stroke_line(x1, y1, x2, y2, sgfx_w, sgfx_cap, rgb_to_fb(rgb));
+    else            draw_line(x1, y1, x2, y2, rgb_to_fb(rgb));
+}
+void sgfx_fillrect(int x1, int y1, int x2, int y2, uint32_t rgb) {
+    if (fb_ready) fill_rect(x1, y1, x2, y2, rgb_to_fb(rgb));
+}
+// The console font, the same glyph table and blit the text terminal uses
+// (term_glyph): fill the cell in `bg`, then draw the glyph in `fg`. Writes
+// through the active surface, so it works into the back buffer too.
+void sgfx_font(int *w, int *h) { if (w) *w = CHAR_W; if (h) *h = CHAR_H; }
+void sgfx_glyph(int px, int py, int ch, uint32_t fg, uint32_t bg) {
+    if (!fb_ready) return;
+    bar(px, py, px + CHAR_W - 1, py + CHAR_H - 1, rgb_to_fb(bg));
+    draw_char((char)(ch & 0xFF), px, py, rgb_to_fb(fg));
+}
+void sgfx_circle(int cx, int cy, int r, uint32_t rgb) {
+    if (!fb_ready) return;
+    if (sgfx_w > 1) stroke_circle(cx, cy, r, sgfx_w, rgb_to_fb(rgb));
+    else            draw_circle(cx, cy, r, rgb_to_fb(rgb));
+}
+void sgfx_fillcircle(int cx, int cy, int r, uint32_t rgb)  { if (fb_ready) fill_circle(cx, cy, r, rgb_to_fb(rgb)); }
+void sgfx_ellipse(int cx, int cy, int rx, int ry, uint32_t rgb) {
+    if (!fb_ready) return;
+    if (sgfx_w > 1) stroke_ellipse(cx, cy, rx, ry, sgfx_w, rgb_to_fb(rgb));
+    else            draw_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb));
+}
+void sgfx_fillellipse(int cx, int cy, int rx, int ry, uint32_t rgb) { if (fb_ready) fill_ellipse(cx, cy, rx, ry, rgb_to_fb(rgb)); }
+void sgfx_flood(int x, int y, uint32_t rgb) { if (fb_ready) flood_fill(x, y, rgb_to_fb(rgb)); }
+
+void sgfx_clip(int x1, int y1, int x2, int y2) { if (fb_ready) gfx_set_clip(x1, y1, x2, y2); }
+void sgfx_noclip(void)                         { if (fb_ready) gfx_clear_clip(); }
+
+// Scanline fill of an arbitrary (convex or concave) polygon, even-odd rule.
+void sgfx_fillpoly(const int *xy, int npts, uint32_t rgb) {
+    if (!fb_ready || npts < 3 || !xy) return;
+    uint32_t c = rgb_to_fb(rgb);
+    int ymin = xy[1], ymax = xy[1];
+    for (int i = 1; i < npts; i++) { int y = xy[i * 2 + 1]; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
+    if (ymin < 0) ymin = 0;
+    if (ymax > (int)g_fb_h - 1) ymax = (int)g_fb_h - 1;
+    for (int y = ymin; y <= ymax; y++) {
+        int xs[64], nx = 0;
+        for (int i = 0; i < npts; i++) {
+            int j = (i + 1) % npts;
+            int y0 = xy[i * 2 + 1], y1 = xy[j * 2 + 1];
+            int x0 = xy[i * 2],     x1 = xy[j * 2];
+            if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {   // half-open crossing
+                int xc = x0 + (int)((long)(y - y0) * (x1 - x0) / (y1 - y0));
+                if (nx < 64) xs[nx++] = xc;
+            }
+        }
+        for (int a = 0; a < nx - 1; a++)                        // insertion-ish sort
+            for (int b = a + 1; b < nx; b++)
+                if (xs[b] < xs[a]) { int t = xs[a]; xs[a] = xs[b]; xs[b] = t; }
+        for (int k = 0; k + 1 < nx; k += 2)
+            for (int x = xs[k]; x <= xs[k + 1]; x++) putpixel(x, y, c);
+    }
+}
+
+// Draw TrueType text at device pixel (x,y) (baseline start) in colour rgb, in
+// copy mode (the seed's colour wins regardless of BASIC's GCOL action).
+void sgfx_text(int x, int y, const char *s, int len, uint32_t rgb) {
+    if (!fb_ready) return;
+    int save = gfx_act; gfx_act = 0;
+    gtext_blit(x, y, s, len, rgb_to_fb(rgb));
+    gfx_act = save;
+}
+
+// --- render-to-sprite (NEWSPRITE / SPRITETARGET) ----------------------------
+// Initialise a DIM buffer as a w*h fully transparent sprite (8-byte header then
+// zeroed - alpha 0 - pixels). Bytes written one at a time to stay alignment-safe.
+void con_newsprite(long addr, int w, int h) {
+    if (!addr || w <= 0 || h <= 0) return;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    sp_wr32(p, (uint32_t)w);
+    sp_wr32(p + 4, (uint32_t)h);
+    volatile unsigned char *q = p + 8;
+    long n = (long)w * h;
+    for (long i = 0; i < n; i++) { sp_wr32(q, 0); q += 4; }
+}
+
+// Redirect all drawing into sprite `addr`: the graphics driver writes the
+// sprite's pixel area (aligned 32-bit stores; the DIM heap is 16-aligned) and
+// the coordinate space becomes the sprite's own pixels, origin bottom-left.
+int con_target_sprite(long addr) {
+    if (!fb_ready || !addr) return -1;
+    volatile unsigned char *p = (volatile unsigned char *)(uintptr_t)addr;
+    int w = (int)sp_rd32(p), h = (int)sp_rd32(p + 4);
+    if (w <= 0 || h <= 0) return -1;
+    pointer_hide();                              // keep the arrow off the sprite
+    gfx_set_target((uint32_t *)(uintptr_t)(addr + 8), (uint32_t)w, (uint32_t)h);
+    g_tgt_w = w; g_tgt_h = h;
+    g_gl_w  = w; g_gl_h  = h;                    // 1:1 pixel coordinates
+    return 0;
+}
+
+// Return drawing to the screen (or the back buffer, if BUFFER ON). Restore the
+// screen extent for the CURRENT mode - the panel size in MODE 2, the fixed BBC
+// logical space in MODE 1 - not a hard-coded legacy extent.
+void con_target_screen(void) {
+    gfx_reset_target();
+    g_tgt_w = 0; g_tgt_h = 0;
+    if (g_gfx_mode == 2) { g_gl_w = (int)g_fb_w; g_gl_h = (int)g_fb_h; }
+    else                 { g_gl_w = GFX_LW;      g_gl_h = GFX_LH;      }
+}
+
+// --- tilemap ----------------------------------------------------------------
+// Draw the visible window of a tile grid in one call. `map` -> cols*rows LE u32
+// words, row-major (top row first); value 0 = empty (skipped), k>=1 = sheet tile
+// (k-1). Tiles are tilew x tileh, packed row-major in the `sheet` sprite;
+// scrollx/scrolly shift the world left/up. Positions are target pixels, origin
+// top-left; clipped to the viewport, honouring alpha, the plot op and the tint.
+void con_tilemap(long sheet, long map, int cols, int rows,
+                 int tilew, int tileh, int scrollx, int scrolly) {
+    if (!fb_ready || !sheet || !map) return;
+    if (cols <= 0 || rows <= 0 || tilew <= 0 || tileh <= 0) return;
+    volatile unsigned char *sp = (volatile unsigned char *)(uintptr_t)sheet;
+    int sw = (int)sp_rd32(sp), sh = (int)sp_rd32(sp + 4);
+    if (sw <= 0 || sh <= 0) return;
+    int tpr = sw / tilew;                          // tiles per sheet row
+    if (tpr <= 0) return;
+    volatile unsigned char *spix = sp + 8;
+    volatile unsigned char *mp   = (volatile unsigned char *)(uintptr_t)map;
+
+    int vx0, vy0, vx1, vy1;
+    gfx_clip_rect(&vx0, &vy0, &vx1, &vy1);         // viewport in target pixels
+
+    // Loose range of visible cells; the per-pixel clip below handles exact edges.
+    int c_lo = (vx0 + scrollx) / tilew - 1, c_hi = (vx1 + scrollx) / tilew + 1;
+    int r_lo = (vy0 + scrolly) / tileh - 1, r_hi = (vy1 + scrolly) / tileh + 1;
+    if (c_lo < 0) c_lo = 0;
+    if (r_lo < 0) r_lo = 0;
+    if (c_hi > cols - 1) c_hi = cols - 1;
+    if (r_hi > rows - 1) r_hi = rows - 1;
+
+    gfx_set_op(gfx_act);
+    for (int mr = r_lo; mr <= r_hi; mr++) {
+        int dy0 = mr * tileh - scrolly;            // tile top on screen (top-left origin)
+        for (int mc = c_lo; mc <= c_hi; mc++) {
+            uint32_t idx = sp_rd32(mp + ((((long)mr * cols) + mc) << 2));
+            if (idx == 0) continue;                // empty cell: transparent
+            int t = (int)idx - 1;
+            int ssx = (t % tpr) * tilew, ssy = (t / tpr) * tileh;
+            if (ssy + tileh > sh) continue;        // tile index past the sheet: skip
+            int dx0 = mc * tilew - scrollx;
+            for (int py = 0; py < tileh; py++) {
+                int dy = dy0 + py;
+                if (dy < vy0 || dy > vy1) continue;
+                volatile unsigned char *srow = spix + ((((long)(ssy + py) * sw) + ssx) << 2);
+                for (int px = 0; px < tilew; px++) {
+                    int dx = dx0 + px;
+                    if (dx < vx0 || dx > vx1) continue;
+                    sp_put_pixel(dx, dy, sp_rd32(srow + (px << 2)));
+                }
+            }
+        }
+    }
+    gfx_set_op(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -638,8 +1949,12 @@ static int vdu_qn = 0, vdu_qneed = 0, vdu_cmd = -1;
 
 static int vdu_word(int i)  { return vdu_q[i] | (vdu_q[i+1] << 8); }
 static int vdu_sword(int i) { int v = vdu_word(i); return v >= 32768 ? v - 65536 : v; }
-static int gfx_char_w(void) { return CHAR_W * GFX_LW / FB_WIDTH; }
-static int gfx_char_h(void) { return CHAR_H * GFX_LH / FB_HEIGHT; }
+static int gfx_char_w(void) { return CHAR_W * gl_w() / gt_w(); }
+static int gfx_char_h(void) { return CHAR_H * gl_h() / gt_h(); }
+// Signed logical y-delta that moves the VDU 5 graphics text cursor DOWN one line.
+// In MODE 1 (y up) moving down means decreasing the logical y; in MODE 2 (y down)
+// it means increasing it - so a line feed goes down the screen in both modes.
+static int gfx_line_down(void) { return g_gfx_flip ? -gfx_char_h() : gfx_char_h(); }
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 // --- VDU 5: text at the graphics cursor -------------------------------------
@@ -660,7 +1975,7 @@ static void gfx_text_char(unsigned char uc) {
     gpx0 += gfx_char_w();
 }
 static void gfx_text_cr(void) { gpx0 = gfx_vp_left(); }
-static void gfx_text_lf(void) { gpy0 -= gfx_char_h(); }
+static void gfx_text_lf(void) { gpy0 += gfx_line_down(); }
 static void gfx_text_bs(void) { gpx0 -= gfx_char_w(); }
 
 // Output a printable character: at the graphics cursor in VDU 5 mode, otherwise
@@ -712,12 +2027,12 @@ static void vdu_execute(int cmd) {
                  else if (cursor_col < tv_r) cursor_col++;
                  else term_advance();
                  break;
-        case 10: if (vdu5_mode) gpy0 -= gfx_char_h();      // cursor down (LF)
+        case 10: if (vdu5_mode) gpy0 += gfx_line_down();   // cursor down (LF)
                  else { if (++cursor_row > tv_b) { scroll_rect(tv_l*CHAR_W, tv_t*CHAR_H,
                             (tv_r+1)*CHAR_W-1, (tv_b+1)*CHAR_H-1, CHAR_H, text_bg);
                             cursor_row = tv_b; } }
                  break;
-        case 11: if (vdu5_mode) gpy0 += gfx_char_h();      // cursor up
+        case 11: if (vdu5_mode) gpy0 -= gfx_line_down();   // cursor up
                  else if (cursor_row > tv_t) cursor_row--;
                  break;
         case 12: con_cls(); break;                         // clear text (CLS)
@@ -769,8 +2084,8 @@ static void vdu_execute(int cmd) {
         case 26: reset_viewports(); cursor_col = tv_l; cursor_row = tv_t; break;
         case 27: vdu_putchar(vdu_q[0]); break;             // print next byte literally
         case 28: {                                          // text viewport
-            int l = clampi(vdu_q[0],0,TERM_COLS-1), bm = clampi(vdu_q[1],0,TERM_ROWS-1);
-            int r = clampi(vdu_q[2],0,TERM_COLS-1), t  = clampi(vdu_q[3],0,TERM_ROWS-1);
+            int l = clampi(vdu_q[0],0,g_term_cols-1), bm = clampi(vdu_q[1],0,g_term_rows-1);
+            int r = clampi(vdu_q[2],0,g_term_cols-1), t  = clampi(vdu_q[3],0,g_term_rows-1);
             tv_l = l < r ? l : r; tv_r = l < r ? r : l;
             tv_t = t < bm ? t : bm; tv_b = t < bm ? bm : t;
             cursor_col = tv_l; cursor_row = tv_t;
@@ -866,7 +2181,7 @@ void exception_handler(uint64_t type, uint64_t esr, uint64_t elr, uint64_t far) 
     // flush_boot_log() uses is itself wedged by the fault (e.g. a pending PCIe
     // SError that re-fires during the SD write). Read these off the screen.
     if (fb_ready) {
-        fill_rect(0, 0, FB_WIDTH - 1, FB_HEIGHT - 1, COLOR_BLACK);
+        fill_rect(0, 0, (int)g_fb_w - 1, (int)g_fb_h - 1, COLOR_BLACK);
         cursor_col = 0; cursor_row = 0; cursor_visible = 0;
         text_color = COLOR_WHITE;
         // Recent boot progress first (shows the [PCIE]/[XHCI] lines), then the
@@ -911,15 +2226,19 @@ static int board_real_hw(void) {
 // Framebuffer setup via mailbox
 // ---------------------------------------------------------------------------
 
-static int setup_fb(void) {
+// Ask the GPU to (re)allocate the framebuffer at w x h, 32bpp, RGB order, and
+// wire it into the graphics driver. Updates g_fb_* and the text grid. Returns 1
+// on success. Shared by the boot path and by SCREEN (con_screen); the caller is
+// responsible for (re-)marking the buffer non-cacheable once the MMU is up.
+static int fb_configure(uint32_t w, uint32_t h) {
     mbox[ 0] = 35 * 4;
     mbox[ 1] = 0;
     mbox[ 2] = 0x00048003; mbox[ 3] = 8; mbox[ 4] = 8;   // set physical w/h
-    mbox[ 5] = FB_WIDTH;
-    mbox[ 6] = FB_HEIGHT;
+    mbox[ 5] = w;
+    mbox[ 6] = h;
     mbox[ 7] = 0x00048004; mbox[ 8] = 8; mbox[ 9] = 8;   // set virtual w/h
-    mbox[10] = FB_WIDTH;
-    mbox[11] = FB_HEIGHT;
+    mbox[10] = w;
+    mbox[11] = h;
     mbox[12] = 0x00048005; mbox[13] = 4; mbox[14] = 4;   // set depth
     mbox[15] = 32;
     // Force pixel order to RGB (1). Without this each platform uses its own
@@ -937,13 +2256,13 @@ static int setup_fb(void) {
 
     int ok = mbox_call();
     uart_dec("[FB] mbox_call returned: ", (uint32_t)ok);
-    uart_hex("[FB] mbox[1] response:   ", mbox[1]);
     uart_dec("[FB] width:  ", mbox[5]);
     uart_dec("[FB] height: ", mbox[6]);
-    uart_hex("[FB] pixel order: ", mbox[19]);
     uart_hex("[FB] bus addr: ", mbox[23]);
-    uart_dec("[FB] size:   ", mbox[24]);
+    uart_dec("[FB] size:   ", mbox[24]);   // bytes the GPU allocated (0 on some firmware)
     uart_dec("[FB] pitch:  ", mbox[28]);
+    uart_dec("[FB] depth:  ", mbox[15]);   // bits per pixel actually granted
+    uart_dec("[FB] order:  ", mbox[19]);   // 0 = BGR, 1 = RGB actually granted
 
     if (!ok || mbox[28] == 0) return 0;
 
@@ -951,16 +2270,67 @@ static int setup_fb(void) {
     uint32_t fb_phys = fb_bus & 0x3FFFFFFF;  // strip VideoCore bus alias
     uint32_t pitch   = mbox[28];
     uint32_t fb_size = mbox[24];
+    // Some firmware returns 0 for the allocated size. We rely on this to mark the
+    // buffer non-cacheable once the MMU is up; if it were 0 the framebuffer would
+    // stay cached and the display would show stale/garbage pixels on real hardware
+    // (QEMU ignores caching, so it would look fine there). Fall back to the exact
+    // buffer extent (pitch * height) so the whole surface is always covered.
+    if (fb_size == 0) fb_size = pitch * mbox[6];
     uint32_t *fb     = (uint32_t *)(uintptr_t)fb_phys;
 
     uart_hex("[FB] physical: ", fb_phys);
-    // The framebuffer is brought up before the MMU (see kernel_main), so we just
-    // record its extent here; kernel_main re-marks it non-cacheable once the MMU
-    // page tables exist, so CPU pixel writes stay coherent with the GPU scan-out.
+    uart_dec("[FB] use size: ", fb_size);
     g_fb_phys = fb_phys;
     g_fb_size = fb_size;
+    g_fb_w    = mbox[5];                     // the GPU may round to a supported size
+    g_fb_h    = mbox[6];
+    g_term_cols = (int)g_fb_w / CHAR_W;
+    g_term_rows = (int)g_fb_h / CHAR_H;
     init_graphics(fb, mbox[5], mbox[6], pitch);
     fb_ready = 1;
+    return 1;
+}
+
+// SCREEN width,height : switch the display to a new resolution mid-session. A
+// non-positive w or h means "restore the startup resolution". Returns 1 on
+// success. Reconfigures the framebuffer, re-marks it non-cacheable for the live
+// MMU, rebuilds the text grid, clears the screen and re-homes the cursor/pointer.
+// A no-op (no clear) when the requested size already matches the current one, so
+// restoring at the end of a program that never changed resolution costs nothing.
+int con_screen(int w, int h) {
+    if (!fb_ready) return 0;
+    if (w <= 0 || h <= 0) { w = (int)g_start_w; h = (int)g_start_h; }
+    if (w < 64)   w = 64;                        // keep the GPU request sane
+    if (h < 64)   h = 64;
+    if (w > 1920) w = 1920;
+    if (h > 1080) h = 1080;
+    if ((uint32_t)w == g_fb_w && (uint32_t)h == g_fb_h) return 1;   // already there
+
+    if (!fb_configure((uint32_t)w, (uint32_t)h)) return 0;
+    mmu_set_noncached(g_fb_phys, g_fb_size);   // the new buffer must be non-cacheable too
+
+    reset_viewports();
+    cleardevice();
+    cursor_col = 0; cursor_row = 0; cursor_visible = 0;
+    g_mouse_x = (int)g_fb_w / 2; g_mouse_y = (int)g_fb_h / 2;
+    // In MODE 2 the coordinate space IS the resolution, so a SCREEN change moves
+    // the drawable range with it. (MODE 1's logical extent is deliberately
+    // resolution-independent, so it is left alone.)
+    if (g_gfx_mode == 2 && g_tgt_w == 0) { g_gl_w = (int)g_fb_w; g_gl_h = (int)g_fb_h; }
+    return 1;
+}
+
+int con_screen_w(void) { return (int)g_fb_w; }
+int con_screen_h(void) { return (int)g_fb_h; }
+
+static int setup_fb(void) {
+    // Boot: bring the framebuffer up at the compile-time startup resolution and
+    // remember it as the resolution SCREEN restores to. The MMU is still off here,
+    // so the buffer is naturally coherent; kernel_main marks it non-cacheable once
+    // the page tables exist.
+    if (!fb_configure(FB_WIDTH, FB_HEIGHT)) return 0;
+    g_start_w = g_fb_w;
+    g_start_h = g_fb_h;
     return 1;
 }
 
@@ -989,12 +2359,17 @@ void kernel_main(void) {
     // real hardware this invalidates stale firmware cache state first.
     boot_msg("[MMU] enabling MMU + caches...\n");
     mmu_init();
+    uart_hex("[MMU] FB non-cached base: ", g_fb_phys);
+    uart_dec("[MMU] FB non-cached size: ", g_fb_size);
     mmu_set_noncached(g_fb_phys, g_fb_size);   // re-mark FB NC (mmu_init rebuilt the tables)
     boot_msg("[MMU] enabled\n");
 
     // Show the BerryBasic boot logo (con_splash draws it when the REPL banner
     // prints; clearing the boot-progress text first).
     int real_hw = board_real_hw();
+    g_real_hw = real_hw;                        // let the audio driver know (skips PWM on QEMU)
+    boot_msg(real_hw ? "[BOARD] real Pi hardware (PWM audio + PCIe enabled)\n"
+                     : "[BOARD] QEMU/emulated (PWM audio + PCIe skipped)\n");
     g_show_logo = 1;
 
     // Mount the SD card (the data partition holds the user's BASIC programs).
@@ -1009,6 +2384,8 @@ void kernel_main(void) {
     g_kbd_ok = usb_kbd_init();
     boot_msg(g_kbd_ok ? "[USB] keyboard ready\n"
                       : "[USB] no USB-C keyboard\n");
+    g_mouse_dwc2 = usb_mouse_present();
+    if (g_mouse_dwc2) boot_msg("[USB] mouse ready (DWC2)\n");
 
     // On real hardware the USB-A ports are behind the VL805 xHCI on PCIe; bring
     // it up and look for a keyboard there too. QEMU does not model the PCIe
@@ -1016,17 +2393,36 @@ void kernel_main(void) {
     if (!g_kbd_ok && real_hw) {
         boot_msg("[USB] trying USB-A (PCIe/VL805 xHCI)...\n");
         uintptr_t xhci_mmio = pcie_init();
-        if (xhci_mmio) g_xhci_ok = xhci_kbd_init(xhci_mmio);
+        if (xhci_mmio) { g_xhci_ok = xhci_kbd_init(xhci_mmio); xhci_selftest(); }  /* Phase 2 self-test */
         boot_msg(g_xhci_ok ? "[USB] USB-A keyboard ready\n"
                            : "[USB] no USB-A keyboard\n");
+        g_mouse_xhci = xhci_mouse_present();
+        if (g_mouse_xhci) boot_msg("[USB] mouse ready (USB-A)\n");
+
+        // USB mass storage (Phase 3+4): bring up every BOT/SCSI stick as a blockdev
+        // and graft each into the path tree at its own /USBn (first /USB, next
+        // /USB1, ...) so BASIC reaches them with CD "/USB", CAT, LOAD.
+        if (xhci_mmio && msc_init() > 0) mount_new_usb(0);
     }
 
-    // Write the full boot log to BOOTLOG.TXT on the data partition so USB
-    // enumeration can be diagnosed on real hardware (no serial cable needed).
+    // Select the configured keyboard layout (default US); a program can change
+    // it at run time with the KEYBOARD statement.
+    hid_set_layout(CFG_KBD_LAYOUT);
+
+    // Write the boot log so far (USB enumeration) to BOOTLOG.TXT on the data
+    // partition, so it can be diagnosed on real hardware with no serial cable.
+    flush_boot_log();
+
+    // Interpreter bring-up. This touches audio hardware (snd_init) and scans the
+    // /seed directory - both can stall on real silicon - so log it and flush the
+    // log AGAIN afterwards: if a future change hangs here, the last timestamped
+    // line in BOOTLOG.TXT pinpoints the stage instead of ending at the USB probe.
+    boot_msg("[BASIC] initialising interpreter (audio, keywords)...\n");
+    basic_init();
+    boot_msg("[BASIC] interpreter ready\n");
     flush_boot_log();
 
     // Hand control to the BASIC interpreter (runs forever on the target).
-    boot_msg("[LOOP] entering BASIC\n");
-    basic_init();
+    boot_msg("[LOOP] entering BASIC REPL\n");
     basic_repl();
 }

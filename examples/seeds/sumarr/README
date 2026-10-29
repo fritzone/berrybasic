@@ -1,0 +1,14 @@
+SUMARR - crunch a whole numeric array at native speed.
+
+Language features
+  - SEED_EXPORT; the payoff case for native code
+  - a direct, zero-copy pointer into a BASIC array's storage
+
+Try it
+  DIM A(1000) : ... fill A() ...
+    SEED h%, "SUMARR.SED" : PRINT CALL(h%, "A")
+
+Build it on the machine
+  grow sumarr          # -> build/SUMARR.SED
+It is also prebuilt in /SEED as SUMARR.SED, ready to use.
+

@@ -1,0 +1,17 @@
+<title>RND</title>
+<h1>RND</h1>
+<p>Returns a random number.</p>
+<h2>Syntax</h2>
+<pre>RND(n)</pre>
+<h2>Description</h2>
+<p>With a positive whole <b>n</b>, returns a random integer from 1 to <b>n</b>.
+With <b>n</b> = 1, returns a random fraction from 0 up to (but not including) 1.
+A common idiom for a dice roll is <b>RND(6)</b>.</p>
+<h2>Examples</h2>
+<code>
+10 FOR i = 1 TO 5 : PRINT RND(6); : NEXT
+20 PRINT
+30 PRINT RND(1)       : REM a fraction 0..1
+</code>
+<h2>See also</h2>
+<p><a href="INT">INT</a>, <a href="INDEX">Index</a></p>

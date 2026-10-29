@@ -1,0 +1,15 @@
+SORTARR - sort a numeric BASIC array ascending, in place.
+
+Language features
+  - SEED_EXPORT; a BASIC array passed by name and sorted in place
+  - standard <stdlib.h> qsort and <string.h> memcpy in a seed
+
+Try it
+  DIM E(4) : E(0)=5:E(1)=2:E(2)=8:E(3)=1:E(4)=9
+    SEED h%, "SORTARR.SED" : CALL h%, "E"
+
+Build it on the machine
+  grow sortarr          # -> build/SORTARR.SED
+  (grow links the berry-libc from SEEDCORE.PKT for this one automatically)
+It is also prebuilt in /SEED as SORTARR.SED, ready to use.
+

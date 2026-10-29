@@ -1,0 +1,21 @@
+project seeds
+
+subdir add
+subdir bgidemo
+subdir bufsum
+subdir dynarr
+subdir filedemo
+subdir hypot
+subdir inputlog
+subdir median
+subdir nativexy
+subdir paint
+subdir particle
+subdir pinblink
+subdir revstr
+subdir shout
+subdir sortarr
+subdir sumarr
+subdir thickpen
+subdir upper
+subdir uprecs

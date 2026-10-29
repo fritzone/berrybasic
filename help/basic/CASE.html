@@ -1,0 +1,25 @@
+<title>CASE</title>
+<h1>CASE ... ENDCASE</h1>
+<p>Chooses one of several branches by matching a value.</p>
+<h2>Syntax</h2>
+<pre>CASE expression OF
+  WHEN value [, value ...] : statements
+  ...
+  OTHERWISE : statements
+ENDCASE</pre>
+<h2>Description</h2>
+<p>The expression is compared with each WHEN clause in turn; the first match runs,
+then control jumps past ENDCASE. If nothing matches, the OTHERWISE clause (if
+present) runs.</p>
+<h2>Examples</h2>
+<code>
+10 INPUT "Grade 1-3: ", g
+20 CASE g OF
+30   WHEN 1 : PRINT "gold"
+40   WHEN 2 : PRINT "silver"
+50   WHEN 3 : PRINT "bronze"
+60   OTHERWISE : PRINT "no medal"
+70 ENDCASE
+</code>
+<h2>See also</h2>
+<p><a href="IF">IF</a>, <a href="INDEX">Index</a></p>

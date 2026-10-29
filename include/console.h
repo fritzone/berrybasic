@@ -27,21 +27,161 @@ void con_cls(void);             // clear screen, cursor home
 void con_colour(int c);         // set text foreground colour (BBC COLOUR 0..7)
 int  con_getkey(void);          // block for one keypress, return its ASCII code
 
+// Keyboard layout (KEYBOARD statement / KEYBOARD$ function). con_set_keyboard
+// selects a layout by two-letter code (US/UK/NO/DK/SE/DE, case-insensitive) and
+// returns 1 on success, 0 if unknown. con_get_keyboard returns the active code.
+int         con_set_keyboard(const char *code);
+const char *con_get_keyboard(void);
+
 unsigned long long con_micros(void);   // microseconds since boot (for TIME)
 int  con_inkey(int centiseconds);      // wait up to n centiseconds for a key; -1 if none
 int  con_pos(void);                    // text cursor column (POS)
 int  con_vpos(void);                   // text cursor row (VPOS)
+int  con_rows(void);                   // text rows on screen, or 0 if unpaged (host/tests)
+int  con_cols(void);                   // text columns on screen, or 0 (host/tests)
+int  con_canonical_mode(int);          // enable key input when running under desktop host
+
+// System clipboard (one kernel-side buffer, shared by the REPL and every POD).
+void con_clip_set(const char *data, int len);
+int  con_clip_len(void);
+int  con_clip_get(char *buf, int max);   // fills buf, returns the FULL stored length
 // Show the boot logo + banner if appropriate (target QEMU only). Returns 1 if it
 // printed `banner` itself (beside the logo); 0 if the caller should print it.
 int  con_splash(const char *banner);
 
 // --- BBC-style graphics -----------------------------------------------------
-// Coordinates are BBC logical units: x in 0..1279, y in 0..1023, origin at the
-// bottom-left, independent of the physical screen resolution.
-void con_mode(int n);                    // MODE n: clear text+graphics, reset state
+// MODE n selects the graphics coordinate regime: 1 = BBC logical coordinates
+// (1280x1024, origin bottom-left, scaled to the panel, resolution-independent);
+// 2 = native coordinates (physical pixels at the current resolution, origin
+// TOP-LEFT, y down, 1:1 - the same convention as the seed sgfx_* API and
+// MOUSEX/MOUSEY). Any other n falls back to 1. MODE also resets colours,
+// viewports and origin and clears the screen. con_set_gfx_mode switches only the
+// coordinate regime, leaving the screen and state untouched (used to restore
+// MODE 1 at RUN/NEW/program end). con_gfx_mode reads the active mode (1 or 2).
+void con_mode(int n);
+void con_set_gfx_mode(int n);
+int  con_gfx_mode(void);
+// SCREEN width,height: switch the physical display resolution for the duration of
+// a program. A non-positive w or h restores the startup resolution. Returns 1 on
+// success, 0 on failure (or on backends without a real framebuffer). con_screen_w
+// / con_screen_h report the current physical size (SCREENW / SCREENH).
+int  con_screen(int w, int h);
+int  con_screen_w(void);
+int  con_screen_h(void);
 void con_gcol(int action, int colour);   // GCOL action,colour: graphics fg + plot op
+
+// The line pen for thick lines and shape outlines. `width` is in coordinate units
+// (1 = a hairline); `join` is how outline corners are finished (0 miter, 1 bevel,
+// 2 round) and `cap` how open line ends are finished (0 butt, 1 round, 2 square).
+// LINE / DRAW / PLOT lines honour width + cap; RECTANGLE outlines honour width +
+// join; CIRCLE / ELLIPSE outlines honour width. Reset to 1 / miter / butt by MODE
+// and at the start of a run. Values for join and cap (match the driver's GJOIN_*
+// / GCAP_*):
+enum { CON_JOIN_MITER = 0, CON_JOIN_BEVEL = 1, CON_JOIN_ROUND  = 2 };
+enum { CON_CAP_BUTT   = 0, CON_CAP_ROUND  = 1, CON_CAP_SQUARE  = 2 };
+void con_line_width(int width);          // pen width, in coordinate units
+void con_line_join(int join);            // CON_JOIN_*
+void con_line_cap(int cap);              // CON_CAP_*
 void con_plot(int code, int x, int y);   // PLOT code,x,y (master graphics primitive)
 void con_clg(void);                      // CLG: clear graphics area to gfx background
 int  con_point(int x, int y);            // POINT(x,y): logical colour 0..7, or -1 off-screen
+
+// --- double buffering -------------------------------------------------------
+// con_backbuffer(1) allocates (once) a full-screen off-screen buffer and routes
+// all drawing to it; the visible screen freezes until con_flip(). con_backbuffer
+// (0) routes drawing back to the visible screen. con_flip() presents the back
+// buffer (a no-op when buffering is off). con_buffered() reports the state.
+// con_backbuffer returns 0 on success, <0 if the buffer could not be allocated.
+int  con_backbuffer(int on);
+void con_flip(void);
+int  con_buffered(void);
+
+// Save/restore the whole visible screen to a private stash (separate from the
+// double buffer). A full-screen program (the editor) uses this to stash a
+// running program's output and show it again on demand while drawing its own UI.
+void con_screen_save(void);
+void con_screen_restore(void);
+
+// --- render-to-sprite -------------------------------------------------------
+// con_newsprite initialises a DIM buffer as a w*h fully transparent sprite.
+// con_target_sprite redirects all drawing into that sprite (coordinates become
+// its own pixels, origin bottom-left); returns 0 on success, <0 on a bad sprite.
+// con_target_screen returns drawing to the screen (or the back buffer).
+void con_newsprite(long addr, int w, int h);
+int  con_target_sprite(long addr);
+void con_target_screen(void);
+
+// TILEMAP: draw the visible window of a tile grid. `map` -> cols*rows LE u32
+// words, row-major (top row first); value 0 = empty, k>=1 = sheet tile (k-1).
+// Tiles are tilew x tileh, packed row-major in the `sheet` sprite; scrollx/
+// scrolly shift the world. Respects the viewport, target buffer and tint.
+void con_tilemap(long sheet, long map, int cols, int rows,
+                 int tilew, int tileh, int scrollx, int scrolly);
+
+// --- graphics library (all in BBC logical coordinates) ----------------------
+void con_gcol_rgb(int r, int g, int b);              // GCOL r,g,b : truecolour foreground
+void con_palette(int logical, int r, int g, int b);  // COLOUR l,r,g,b : redefine a palette slot
+void con_line(int x1, int y1, int x2, int y2);       // LINE
+void con_rectangle(int x, int y, int w, int h, int fill);  // RECTANGLE [FILL] x,y,w,h
+void con_circle(int x, int y, int r, int fill);      // CIRCLE [FILL] x,y,r
+void con_ellipse(int x, int y, int rx, int ry, int fill);  // ELLIPSE [FILL] x,y,rx,ry
+void con_fill(int x, int y);                         // FILL x,y : flood fill
+// Sprites: capture a screen rectangle into a DIM buffer at `addr`, and stamp it
+// back (top-left at the given logical point, honouring the plot op).
+void con_sprite_get(long addr, int x1, int y1, int x2, int y2);
+void con_sprite_put(long addr, int x, int y);
+// Blit a sprite scaled by `scale` (1.0 = original) and rotated `angle` degrees
+// clockwise about its centre; the centre lands where con_sprite_put's would, so
+// (1,0) == con_sprite_put. Honours alpha, GCOL action, viewport, tint, and the
+// current draw target. scale<=0 draws nothing; angle is taken mod 360.
+void con_sprite_put_ex(long addr, int x, int y, double scale, double angle);
+// GTINT: set (on!=0) or clear the sprite tint - out = lerp(src,(r,g,b),a/255),
+// applied to every blitted sprite (both con_sprite_put forms), alpha preserved.
+void con_sprite_tint(int on, int r, int g, int b, int a);
+
+// --- TrueType text ----------------------------------------------------------
+// GTEXT x,y,string$ : draw `s` (len bytes) with the current TrueType font, size
+// and style (set via ttf.h / LOADFONT / FONTSIZE / FONTSTYLE) in the current
+// graphics foreground colour. (x,y) is the logical coordinate of the baseline at
+// the start of the text; glyphs are anti-aliased and honour the viewport, plot
+// op, tint and draw target, exactly like a sprite blit. A no-op on backends with
+// no framebuffer, or when no font is loaded.
+void con_gtext(int x, int y, const char *s, int len);
+
+// --- keyboard modifiers and locks -------------------------------------------
+// Which modifier keys are held and which locks are set, as a KMOD_* bitmask
+// (see drivers/usb_hid.h): SHIFT CTRL ALT ALTGR META, and CAPS NUM SCROLL.
+// These cannot come back from con_getkey, because Shift on its own is not a key
+// that types anything - it is state, and this is how you read it.
+//
+// It is a snapshot taken when the keyboard was last read, so poll a key first
+// (con_inkey(0) will do) or the answer is as old as your last read. 0 when no
+// USB keyboard is present (a serial terminal sends characters, not modifiers).
+int  con_keymods(void);
+
+// Keys currently held down (BerryBasiC key codes), for games that need
+// hold-to-move rather than one-shot presses. Fills out[] (up to max) and returns
+// the count, or -1 when there is no USB keyboard (a serial terminal reports
+// presses, not held state). Poll a key first (con_inkey(0)) so the report is fresh.
+int  con_keys_down(int *out, int max);
+
+// --- system monitor (F12 overlay) -------------------------------------------
+// Memory usage across the interpreter's fixed pools, filled by the interpreter
+// (sys_meminfo, implemented in basic.c) and read by the kernel's F12 overlay.
+// All figures are in bytes. "heap" is the 48 MB seed/POD arena; "vars" is the
+// GC'd string heap for BASIC variables; "dim" is the DIM byte arena.
+typedef struct {
+    unsigned long heap_used, heap_total;
+    unsigned long vars_used, vars_total;
+    unsigned long dim_used,  dim_total;
+} sysmem_t;
+void sys_meminfo(sysmem_t *m);
+
+// --- pointer (USB mouse) ----------------------------------------------------
+// Poll the mouse and report the current pointer position in raw framebuffer
+// pixels (origin top-left: x in 0..width-1, y in 0..height-1) and the button
+// bitmask (bit0=left, bit1=right, bit2=middle). When no mouse is present, or on
+// the host backend, position and buttons read back as 0.
+void con_mouse(int *x, int *y, int *buttons);
 
 #endif

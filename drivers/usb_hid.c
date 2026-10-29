@@ -1,7 +1,25 @@
 #include "usb_hid.h"
 
-// HID usage -> ASCII (UK-ish layout, matching the DWC2 driver's original tables).
-static const char keys_normal[104] = {
+// Shared USB HID boot-keyboard decoding for both backends (DWC2 + xHCI).
+//
+// Keyboard layouts
+// ----------------
+// The physical keyboard always sends the same HID *usage codes* (0x04 = the key
+// in the "Q" position, etc.); what those keys should type depends on the layout
+// printed on the caps. We keep one full US-ANSI base table and express every
+// other layout as a short list of per-key overrides against it, because the vast
+// majority of keys (letters, digits, space, Enter, the keypad) are identical
+// everywhere and only a dozen or so symbol keys move around.
+//
+// Three levels are decoded: unshifted, Shift, and AltGr (the right-Alt key,
+// HID modifier bit 0x40) which types the third legend on Nordic/German boards
+// (@ $ { [ ] } \ | ~ and the like). Accent "dead keys" are not composed; the
+// key types the accent character itself (e.g. Norwegian ¨ types ¨), which is
+// what a programming console needs. Output is 8-bit Latin-1, and the framebuffer
+// font has glyphs for the whole upper range (æ ø å ä ö ü ß § £ € …).
+
+// --- US-ANSI base tables (HID usage code -> character) ----------------------
+static const unsigned char us_normal[104] = {
     0,   0,   0,   0,   'a', 'b', 'c', 'd',
     'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
     'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
@@ -11,44 +29,328 @@ static const char keys_normal[104] = {
     ']', '\\','#', ';', '\'','`', ',', '.',
     '/', 0,   0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,
-    0,   0,   KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
+    0,   KEY_INS, KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
     KEY_LEFT, KEY_DOWN, KEY_UP, 0, '/', '*', '-', '+',
     '\n','1', '2', '3', '4', '5', '6', '7',
     '8', '9', '0', '.', '\\',0,   0,   '='
 };
 
-static const char keys_shift[104] = {
+static const unsigned char us_shift[104] = {
     0,   0,   0,   0,   'A', 'B', 'C', 'D',
     'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
     'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T',
-    'U', 'V', 'W', 'X', 'Y', 'Z', '!', '"',
+    'U', 'V', 'W', 'X', 'Y', 'Z', '!', '@',
     '#', '$', '%', '^', '&', '*', '(', ')',
     '\n', 0,  '\b','\t',' ', '_', '+', '{',
-    '}', '|', '~', ':', '@', '~', '<', '>',
+    '}', '|', '~', ':', '"', '~', '<', '>',
     '?', 0,   0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,
-    0,   0,   KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
+    0,   KEY_INS, KEY_HOME, 0, KEY_DEL, KEY_END, 0, KEY_RIGHT,
     KEY_LEFT, KEY_DOWN, KEY_UP, 0, '/', '*', '-', '+',
     '\n','1', '2', '3', '4', '5', '6', '7',
     '8', '9', '0', '.', '|', 0,   0,   '='
 };
 
-char hid_to_ascii(uint8_t kc, uint8_t mod) {
-    if (kc == 0 || kc >= 104) return 0;
-    return (mod & 0x22) ? keys_shift[kc] : keys_normal[kc];   // 0x22 = either Shift
+// One override: for HID usage `kc`, the unshifted / shifted / AltGr characters
+// (0 = "no character at this level").
+typedef struct { unsigned char kc, norm, shft, alt; } kov_t;
+
+// UK ISO: a handful of symbols differ from US.
+static const kov_t ov_uk[] = {
+    { 0x1F, '2', '"',  0   },   // 2
+    { 0x20, '3', 0xA3, 0   },   // 3 -> shift is the pound sign
+    { 0x34, '\'','@',  0   },   // ' / @
+    { 0x32, '#', '~',  0   },   // non-US # / ~
+    { 0x31, '\\','|',  0   },   // \ / |
+    { 0x35, '`', 0xAC, 0xA6},   // ` / not-sign / broken-bar
+    { 0x64, '\\','|',  0   },   // ISO key
+};
+
+// Norwegian (Bokmål). Æ Ø Å plus the AltGr programming symbols.
+static const kov_t ov_no[] = {
+    { 0x1F, '2',  '"',  '@'  },   // 2  " @
+    { 0x20, '3',  '#',  0xA3 },   // 3  # £
+    { 0x21, '4',  0xA4, '$'  },   // 4  ¤ $
+    { 0x22, '5',  '%',  0x80 },   // 5  % €
+    { 0x23, '6',  '&',  0    },   // 6  &
+    { 0x24, '7',  '/',  '{'  },   // 7  / {
+    { 0x25, '8',  '(',  '['  },   // 8  ( [
+    { 0x26, '9',  ')',  ']'  },   // 9  ) ]
+    { 0x27, '0',  '=',  '}'  },   // 0  = }
+    { 0x2D, '+',  '?',  '\\' },   // + ? backslash
+    { 0x2E, 0xB4, '`',  0    },   // ´ ` (accent key)
+    { 0x2F, 0xE5, 0xC5, 0    },   // å Å
+    { 0x30, 0xA8, '^',  '~'  },   // ¨ ^ ~
+    { 0x33, 0xF8, 0xD8, 0    },   // ø Ø
+    { 0x34, 0xE6, 0xC6, 0    },   // æ Æ
+    { 0x31, '\'', '*',  0    },   // ' *
+    { 0x35, '|',  0xA7, 0    },   // | § (top-left)
+    { 0x36, ',',  ';',  0    },   // , ;
+    { 0x37, '.',  ':',  0    },   // . :
+    { 0x38, '-',  '_',  0    },   // - _
+    { 0x64, '<',  '>',  '|'  },   // < > | (ISO key)
+};
+
+// Danish: as Norwegian, but Æ and Ø are swapped and the top-left key is ½/§.
+static const kov_t ov_dk[] = {
+    { 0x1F, '2',  '"',  '@'  }, { 0x20, '3',  '#',  0xA3 },
+    { 0x21, '4',  0xA4, '$'  }, { 0x22, '5',  '%',  0x80 },
+    { 0x23, '6',  '&',  0    }, { 0x24, '7',  '/',  '{'  },
+    { 0x25, '8',  '(',  '['  }, { 0x26, '9',  ')',  ']'  },
+    { 0x27, '0',  '=',  '}'  }, { 0x2D, '+',  '?',  '\\' },
+    { 0x2E, 0xB4, '`',  '|'  }, { 0x2F, 0xE5, 0xC5, 0    },   // å Å
+    { 0x30, 0xA8, '^',  '~'  }, { 0x33, 0xE6, 0xC6, 0    },   // æ Æ
+    { 0x34, 0xF8, 0xD8, 0    },                               // ø Ø
+    { 0x31, '\'', '*',  0    }, { 0x35, 0xBD, 0xA7, 0    },   // ½ §
+    { 0x36, ',',  ';',  0    }, { 0x37, '.',  ':',  0    },
+    { 0x38, '-',  '_',  0    }, { 0x64, '<',  '>',  '\\' },
+};
+
+// Swedish: as Norwegian, but Ä Ö replace Æ Ø and the top-left key is §/½.
+static const kov_t ov_se[] = {
+    { 0x1F, '2',  '"',  '@'  }, { 0x20, '3',  '#',  0xA3 },
+    { 0x21, '4',  0xA4, '$'  }, { 0x22, '5',  '%',  0x80 },
+    { 0x23, '6',  '&',  0    }, { 0x24, '7',  '/',  '{'  },
+    { 0x25, '8',  '(',  '['  }, { 0x26, '9',  ')',  ']'  },
+    { 0x27, '0',  '=',  '}'  }, { 0x2D, '+',  '?',  '\\' },
+    { 0x2E, 0xB4, '`',  0    }, { 0x2F, 0xE5, 0xC5, 0    },   // å Å
+    { 0x30, 0xA8, '^',  '~'  }, { 0x33, 0xF6, 0xD6, 0    },   // ö Ö
+    { 0x34, 0xE4, 0xC4, 0    },                               // ä Ä
+    { 0x31, '\'', '*',  0    }, { 0x35, 0xA7, 0xBD, 0    },   // § ½
+    { 0x36, ',',  ';',  0    }, { 0x37, '.',  ':',  0    },
+    { 0x38, '-',  '_',  0    }, { 0x64, '<',  '>',  '|'  },
+};
+
+// German (QWERTZ, T1). Y/Z swapped; ä ö ü ß; @ on AltGr+Q, € on AltGr+E.
+static const kov_t ov_de[] = {
+    { 0x1C, 'z', 'Z', 0    },   // Y position -> z
+    { 0x1D, 'y', 'Y', 0    },   // Z position -> y
+    { 0x1F, '2', '"', 0    },   // 2 "
+    { 0x20, '3', 0xA7, 0   },   // 3 §
+    { 0x21, '4', '$', 0    },   // 4 $
+    { 0x22, '5', '%', 0    },   // 5 %
+    { 0x23, '6', '&', 0    },   // 6 &
+    { 0x24, '7', '/', '{'  },   // 7 / {
+    { 0x25, '8', '(', '['  },   // 8 ( [
+    { 0x26, '9', ')', ']'  },   // 9 ) ]
+    { 0x27, '0', '=', '}'  },   // 0 = }
+    { 0x14, 'q', 'Q', '@'  },   // q Q @
+    { 0x08, 'e', 'E', 0x80 },   // e E €
+    { 0x2D, 0xDF,'?', '\\' },   // ß ? backslash
+    { 0x2E, 0xB4,'`', 0    },   // ´ `
+    { 0x2F, 0xFC,0xDC,0    },   // ü Ü
+    { 0x30, '+', '*', '~'  },   // + * ~
+    { 0x33, 0xF6,0xD6,0    },   // ö Ö
+    { 0x34, 0xE4,0xC4,0    },   // ä Ä
+    { 0x31, '#', '\'',0    },   // # '
+    { 0x35, '^', 0xB0,0    },   // ^ °
+    { 0x36, ',', ';', 0    },   // , ;
+    { 0x37, '.', ':', 0    },   // . :
+    { 0x38, '-', '_', 0    },   // - _
+    { 0x64, '<', '>', '|'  },   // < > |
+};
+
+#define OV(a) (a), (sizeof (a) / sizeof (a)[0])
+static const struct { const char *code; const kov_t *ov; int n; } layouts[] = {
+    { "US", 0, 0 },
+    { "UK", OV(ov_uk) },
+    { "NO", OV(ov_no) },
+    { "DK", OV(ov_dk) },
+    { "SE", OV(ov_se) },
+    { "DE", OV(ov_de) },
+};
+#define N_LAYOUTS ((int)(sizeof layouts / sizeof layouts[0]))
+
+// Resolved active tables (US until hid_set_layout says otherwise).
+static unsigned char cur_normal[104], cur_shift[104], cur_altgr[104];
+static char cur_code[4] = "US";
+static int  resolved = 0;
+
+static void resolve(int li) {
+    for (int i = 0; i < 104; i++) {
+        cur_normal[i] = us_normal[i];
+        cur_shift[i]  = us_shift[i];
+        cur_altgr[i]  = 0;
+    }
+    const kov_t *ov = layouts[li].ov;
+    for (int i = 0; i < layouts[li].n; i++) {
+        cur_normal[ov[i].kc] = ov[i].norm;
+        cur_shift[ov[i].kc]  = ov[i].shft;
+        cur_altgr[ov[i].kc]  = ov[i].alt;
+    }
+    int j = 0; while (layouts[li].code[j] && j < 3) { cur_code[j] = layouts[li].code[j]; j++; }
+    cur_code[j] = 0;
+    resolved = 1;
 }
 
-char hid_report_char(const uint8_t report[8], uint8_t prev[8]) {
-    char out = 0;
-    uint8_t mod = report[0];
+static int ieq(char a, char b) {                 // ASCII case-insensitive compare
+    if (a >= 'a' && a <= 'z') a -= 32;
+    if (b >= 'a' && b <= 'z') b -= 32;
+    return a == b;
+}
+
+int hid_set_layout(const char *code) {
+    if (!code) return 0;
+    for (int li = 0; li < N_LAYOUTS; li++) {
+        const char *c = layouts[li].code;
+        if (ieq(code[0], c[0]) && code[0] && ieq(code[1], c[1]) &&
+            (code[2] == 0 || code[2] == ' ')) {
+            resolve(li);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+const char *hid_layout_code(void) { return cur_code; }
+
+// --- keys with no character -------------------------------------------------
+// The layout tables only hold characters, so the keys that type nothing are
+// resolved first, straight from the usage code. None of them move between
+// layouts, which is why they need no per-layout override.
+static int special_key(uint8_t kc) {
+    if (kc >= 0x3A && kc <= 0x45) return KEY_F(kc - 0x3A + 1);   // F1..F12
+    switch (kc) {
+        case 0x29: return KEY_ESC;
+        case 0x4B: return KEY_PGUP;
+        case 0x4E: return KEY_PGDN;
+        default:   return 0;
+    }
+}
+
+// --- modifier / lock state --------------------------------------------------
+static uint8_t g_mod;                       // raw HID modifier byte, last report
+static int     g_caps, g_num = 1, g_scroll; // NumLock starts on: the keypad
+                                            // types digits, which is what the
+                                            // layout tables give it.
+static int     g_leds_dirty = 1;            // tell the device at the first poll
+
+int hid_modifiers(void) {
+    int m = 0;
+    if (g_mod & 0x22) m |= KMOD_SHIFT;       // either Shift
+    if (g_mod & 0x11) m |= KMOD_CTRL;        // either Ctrl
+    if (g_mod & 0x04) m |= KMOD_ALT;         // left Alt
+    if (g_mod & 0x40) m |= KMOD_ALTGR;       // right Alt = AltGr
+    if (g_mod & 0x88) m |= KMOD_META;        // either GUI/Windows
+    if (g_caps)       m |= KMOD_CAPS;
+    if (g_num)        m |= KMOD_NUM;
+    if (g_scroll)     m |= KMOD_SCROLL;
+    return m;
+}
+
+int  hid_leds(void) {                        // the HID output report byte
+    return (g_num ? 1 : 0) | (g_caps ? 2 : 0) | (g_scroll ? 4 : 0);
+}
+int  hid_leds_dirty(void) { return g_leds_dirty; }
+void hid_leds_ack(void)   { g_leds_dirty = 0; }
+
+// CapsLock inverts the shift state of the *letter* keys only - not the digits
+// or symbols - so it is applied to the result rather than to the lookup. Latin-1
+// has its letters in two contiguous runs, with the division signs sitting in the
+// middle of them (0xD7 x, 0xF7 /), which are not letters and must not flip.
+static int caps_flip(int c) {
+    if (c >= 'a'  && c <= 'z')                return c - 32;
+    if (c >= 'A'  && c <= 'Z')                return c + 32;
+    if (c >= 0xE0 && c <= 0xFE && c != 0xF7)  return c - 32;
+    if (c >= 0xC0 && c <= 0xDE && c != 0xD7)  return c + 32;
+    return c;
+}
+
+int hid_to_key(uint8_t kc, uint8_t mod) {
+    int sp = special_key(kc);
+    if (sp) return sp;
+    if (kc == 0 || kc >= 104) return 0;
+    if (!resolved) resolve(0);                   // default to US on first use
+    if (mod & 0x40) return cur_altgr[kc];        // AltGr (right Alt): third legend
+    int c = (mod & 0x22) ? cur_shift[kc] : cur_normal[kc];   // 0x22 = either Shift
+    if (g_caps) c = caps_flip(c);
+    return c;
+}
+
+// The lock keys toggle their lock and type nothing. Returns 1 if `kc` was one.
+static int lock_key(uint8_t kc) {
+    switch (kc) {
+        case 0x39: g_caps   = !g_caps;   break;  // CapsLock
+        case 0x53: g_num    = !g_num;    break;  // NumLock
+        case 0x47: g_scroll = !g_scroll; break;  // ScrollLock
+        default: return 0;
+    }
+    g_leds_dirty = 1;                            // the backend will SET_REPORT
+    return 1;
+}
+
+// The set of keys currently held down, refreshed on every report. Unlike the
+// newly-pressed key hid_report_key returns (for typing), this is the whole
+// current state, so a game can tell a held movement key from a released one.
+static int g_keys_down[HID_KEYS_MAX];
+static int g_keys_n;
+
+// ---------------------------------------------------------------------------
+// Typematic auto-repeat. A held key sends no further HID reports (SET_IDLE 0),
+// so repeat is synthesised from time: the last freshly-pressed key becomes the
+// repeat key; after HID_REPEAT_DELAY it re-emits every HID_REPEAT_RATE until it
+// is released (or another key takes over). hid_report_key() maintains the state
+// as reports arrive; the backends call hid_repeat() from their poll to collect
+// the repeats. Time is passed in (microseconds) so this file stays free of any
+// hardware - it is shared by both backends and the host build.
+#define HID_REPEAT_DELAY 400000u                 // hold this long before repeating
+#define HID_REPEAT_RATE   45000u                 // then repeat this often (~22/s)
+
+static int      g_rep_key  = 0;                  // key to auto-repeat (0 = none)
+static uint32_t g_rep_next = 0;                  // timestamp (us) of the next repeat
+
+int hid_report_key(const uint8_t report[8], uint8_t prev[8], uint32_t now_us) {
+    int out = 0;
+    g_mod = report[0];                           // refresh the modifier snapshot
+    g_keys_n = 0;
     for (int i = 2; i < 8; i++) {
         uint8_t kc = report[i];
         if (kc == 0) continue;
+        int k = hid_to_key(kc, g_mod);           // full current key set (held state)
+        if (k && g_keys_n < HID_KEYS_MAX) g_keys_down[g_keys_n++] = k;
         int held = 0;
         for (int j = 2; j < 8; j++)
             if (prev[j] == kc) { held = 1; break; }
-        if (!held) { out = hid_to_ascii(kc, mod); break; }
+        if (held) continue;
+        if (lock_key(kc)) continue;              // toggles a lock, types nothing
+        if (!out) out = hid_to_key(kc, g_mod);   // first newly-pressed key wins
     }
     for (int k = 0; k < 8; k++) prev[k] = report[k];
+
+    // Typematic bookkeeping: a fresh press (re)arms repeat on that key; with no
+    // fresh press, keep repeating only while that same key is still held.
+    if (out) {
+        g_rep_key = out;
+        g_rep_next = now_us + HID_REPEAT_DELAY;
+    } else if (g_rep_key) {
+        int still = 0;
+        for (int i = 0; i < g_keys_n; i++) if (g_keys_down[i] == g_rep_key) { still = 1; break; }
+        if (!still) g_rep_key = 0;                // released: stop repeating
+    }
     return out;
+}
+
+// Return an auto-repeat key if one is due (else 0). now_us = a microsecond clock.
+int hid_repeat(uint32_t now_us) {
+    if (!g_rep_key) return 0;
+    if ((int32_t)(now_us - g_rep_next) < 0) return 0;   // not time yet (wrap-safe)
+    g_rep_next = now_us + HID_REPEAT_RATE;
+    return g_rep_key;
+}
+
+// Copy the currently-held keys (BerryBasiC key codes) into out; returns count.
+int hid_keys_down(int *out, int max) {
+    int n = g_keys_n < max ? g_keys_n : max;
+    for (int i = 0; i < n; i++) out[i] = g_keys_down[i];
+    return n;
+}
+
+int hid_mouse_decode(const uint8_t *report, int len,
+                     int *btn, int *dx, int *dy, int *wheel) {
+    if (len < 3) return 0;
+    *btn   = report[0] & 0x07;
+    *dx    = (int)(int8_t)report[1];       // sign-extend the movement deltas
+    *dy    = (int)(int8_t)report[2];
+    *wheel = (len >= 4) ? (int)(int8_t)report[3] : 0;
+    return 1;
 }

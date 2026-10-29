@@ -1,0 +1,16 @@
+BUFSUM - sum the bytes of a buffer BASIC built with DIM + ?.
+
+Language features
+  - the memory bridge: DIM name size reserves a block, ? pokes bytes
+  - passing a raw address to a seed
+  - processing BASIC-owned memory at native speed
+
+Try it
+  DIM B% 9
+    FOR I = 0 TO 9 : B%?I = I*I : NEXT
+    SEED h%, "BUFSUM.SED" : PRINT CALL(h%, B%, 10)
+
+Build it on the machine
+  grow bufsum          # -> build/BUFSUM.SED
+It is also prebuilt in /SEED as BUFSUM.SED, ready to use.
+

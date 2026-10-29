@@ -1,0 +1,17 @@
+<title>RECTANGLE</title>
+<h1>RECTANGLE</h1>
+<p>Draws a rectangle outline (or a filled box).</p>
+<h2>Syntax</h2>
+<pre>RECTANGLE x, y, width, height
+RECTANGLE FILL x, y, width, height</pre>
+<h2>Description</h2>
+<p>Draws a rectangle with its corner at (x,y) and the given width and height in
+the current <a href="GCOL">GCOL</a> colour. Add <b>FILL</b> for a solid box.</p>
+<h2>Examples</h2>
+<code>
+10 GCOL 4
+20 RECTANGLE 100, 100, 300, 150
+30 GCOL 1 : RECTANGLE FILL 500, 300, 120, 120
+</code>
+<h2>See also</h2>
+<p><a href="CIRCLE">CIRCLE</a>, <a href="PLOT">PLOT</a>, <a href="INDEX">Index</a></p>

@@ -17,8 +17,12 @@ SECTIONS
 
     .seed : ALIGN(8) {
         KEEP(*(.seed.header))     /* seed_header at offset 0 */
-        . = 16;                   /* entry always at offset 16 (== sizeof header) */
-        KEEP(*(.seed.entry))      /* entry function next     */
+        . = 16;                   /* header is 16 bytes                          */
+        KEEP(*(.seed.keyword))    /* optional seed_keyword descriptor (32 B)     */
+        . = ALIGN(16);            /* the entry is a 16-aligned function: keep the */
+                                  /*   offset deterministic so it matches the     */
+                                  /*   header's entry_off (16, or 48 with a kw)   */
+        KEEP(*(.seed.entry))      /* entry function next                          */
         *(.text .text.*)
         *(.rodata .rodata.* .srodata .srodata.*)
         *(.data .data.* .sdata .sdata.*)

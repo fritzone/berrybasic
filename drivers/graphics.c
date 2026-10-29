@@ -28,13 +28,148 @@ static int clipped(int x, int y) {
     return 0;
 }
 
+// --- draw target / double buffering -----------------------------------------
+// The primitives above all write through fb_buf/fb_width/fb_height/
+// fb_pitch_words: the "active" surface. Normally that is the real framebuffer
+// ("front"); gfx_backbuffer(1) points it at an off-screen back buffer instead,
+// so a whole frame can be composed unseen and shown at once by gfx_flip(). The
+// front surface is remembered so we can switch back and copy to it.
+static uint32_t *front_buf;
+static uint32_t  front_width, front_height, front_pitch_words;
+static int       buffered = 0;          // BUFFER ON: the "screen" is the back buffer
+static int       targeting_sprite = 0;  // SPRITETARGET: drawing into a sprite
+
+// Back-buffer store, sized to the largest resolution SCREEN allows (1920x1080).
+// A static store (like the image arenas) keeps the driver heap-free.
+#define BACK_CAP (1920u * 1080u)
+static uint32_t back_store[BACK_CAP] __attribute__((aligned(16)));
+
+// Point the active surface at the current "screen": the back buffer when
+// buffering is on, otherwise the real framebuffer.
+static void gfx_apply_screen(void) {
+    if (buffered) {
+        fb_buf = back_store; fb_pitch_words = front_width;
+    } else {
+        fb_buf = front_buf;  fb_pitch_words = front_pitch_words;
+    }
+    fb_width = front_width; fb_height = front_height;
+}
+
 void init_graphics(uint32_t *fb, uint32_t w, uint32_t h, uint32_t pitch) {
     fb_buf         = fb;
     fb_width       = w;
     fb_height      = h;
     fb_pitch_words = pitch >> 2;
     clip_on        = 0;
+    // A (re)configured framebuffer becomes the front surface, un-buffered.
+    front_buf         = fb;
+    front_width       = w;
+    front_height      = h;
+    front_pitch_words = pitch >> 2;
+    buffered          = 0;
+    targeting_sprite  = 0;
 }
+
+int gfx_backbuffer(int on) {
+    if (on && (uint64_t)front_width * front_height > BACK_CAP) return -1;
+    buffered = on ? 1 : 0;
+    if (!targeting_sprite) gfx_apply_screen();   // don't disturb an active sprite target
+    return 0;
+}
+
+// SPRITETARGET: redirect all drawing into an arbitrary WxH surface (tightly
+// packed, pitch = w). SPRITETARGET OFF restores the screen (front or back).
+void gfx_set_target(uint32_t *buf, uint32_t w, uint32_t h) {
+    fb_buf = buf; fb_width = w; fb_height = h; fb_pitch_words = w;
+    clip_on = 0;                     // the old clip was in a different surface's space
+    targeting_sprite = 1;
+}
+void gfx_reset_target(void) {
+    targeting_sprite = 0;
+    clip_on = 0;
+    gfx_apply_screen();
+}
+
+// Present the back buffer: copy it row by row onto the front (the front pitch may
+// exceed its width, so we cannot copy in one block).
+void gfx_flip(void) {
+    if (!buffered) return;
+    for (uint32_t y = 0; y < front_height; y++) {
+        uint32_t *d = front_buf  + (uint64_t)y * front_pitch_words;
+        uint32_t *s = back_store + (uint64_t)y * front_width;
+        for (uint32_t x = 0; x < front_width; x++) d[x] = s[x];
+    }
+}
+
+int gfx_buffered(void) { return buffered; }
+
+// --- saved screen (for the editor's Alt+F5 output view) ---------------------
+// A stash of the whole visible screen, separate from the double buffer, so a POD
+// (the editor) can snapshot a running program's output - text OR graphics, any
+// mode - and show it again on demand while it draws its own UI over the front.
+static uint32_t saved_store[BACK_CAP] __attribute__((aligned(16)));
+static int      saved_valid = 0;
+
+// Copy the visible front surface into the saved store.
+void gfx_screen_save(void) {
+    for (uint32_t y = 0; y < front_height; y++) {
+        uint32_t *s = front_buf   + (uint64_t)y * front_pitch_words;
+        uint32_t *d = saved_store + (uint64_t)y * front_width;
+        for (uint32_t x = 0; x < front_width; x++) d[x] = s[x];
+    }
+    saved_valid = 1;
+}
+
+// Copy the saved store back onto the visible front surface (no-op if none saved).
+void gfx_screen_restore(void) {
+    if (!saved_valid) return;
+    for (uint32_t y = 0; y < front_height; y++) {
+        uint32_t *d = front_buf   + (uint64_t)y * front_pitch_words;
+        uint32_t *s = saved_store + (uint64_t)y * front_width;
+        for (uint32_t x = 0; x < front_width; x++) d[x] = s[x];
+    }
+}
+
+// Fast nearest-neighbour blit of a w*h 8-bit indexed image (palette already in
+// framebuffer pixel format) onto the ACTIVE surface, scaled by `scale`, top-left
+// at (dx,dy), clipped to the surface. One call pushes a whole paletted frame (a
+// game's 320x200) instead of tens of thousands of putpixels. Honours the back
+// buffer (composes there when BUFFER is on), so a game double-buffers cleanly.
+void gfx_blit_indexed(const uint8_t *idx, const uint32_t *fbpal,
+                      int w, int h, int dx, int dy, int scale) {
+    if (scale < 1) scale = 1;
+    for (int sy = 0; sy < h; sy++) {
+        const uint8_t *srow = idx + (unsigned)sy * (unsigned)w;
+        int oy0 = dy + sy * scale;
+        for (int r = 0; r < scale; r++) {
+            int py = oy0 + r;
+            if ((unsigned)py >= fb_height) continue;
+            uint32_t *drow = fb_buf + (uint64_t)py * fb_pitch_words;
+            for (int sx = 0; sx < w; sx++) {
+                uint32_t c = fbpal[srow[sx]];
+                int ox0 = dx + sx * scale;
+                for (int k = 0; k < scale; k++) {
+                    int px = ox0 + k;
+                    if ((unsigned)px < fb_width) drow[px] = c;
+                }
+            }
+        }
+    }
+}
+
+// --- direct front-buffer access (F12 system overlay) ------------------------
+// These always target the real visible surface, ignoring the buffered/sprite
+// redirection of fb_buf, so the overlay shows on screen even mid-BUFFER.
+void gfx_front_putpixel(int x, int y, uint32_t color) {
+    if ((unsigned)x >= front_width || (unsigned)y >= front_height) return;
+    front_buf[(uint64_t)y * front_pitch_words + x] = color;
+}
+uint32_t gfx_front_getpixel(int x, int y) {
+    if ((unsigned)x >= front_width || (unsigned)y >= front_height) return 0;
+    return front_buf[(uint64_t)y * front_pitch_words + x];
+}
+int gfx_front_width(void)  { return (int)front_width; }
+int gfx_front_height(void) { return (int)front_height; }
 
 void putpixel(int x, int y, uint32_t color) {
     if (clipped(x, y)) return;
@@ -65,6 +200,8 @@ static void gpix(int x, int y, uint32_t c) {
         default: *d = c;                       break;   // store
     }
 }
+
+void putpixel_op(int x, int y, uint32_t color) { gpix(x, y, color); }
 
 // Draw one glyph (GLYPH_BYTES row bytes, MSB = leftmost pixel) at (x,y), each
 // source pixel scaled to `scale`x`scale`, using the current plot op (gfx_set_op)
@@ -235,5 +372,236 @@ void scroll_up(int pixels, uint32_t fill) {
     for (uint32_t y = keep; y < fb_height; y++) {
         uint32_t *dst = fb_buf + (uint64_t)y * fb_pitch_words;
         for (uint32_t x = 0; x < fb_width; x++) dst[x] = fill;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended primitives for the BASIC graphics library: rectangle outline,
+// ellipse (outline + fill), and flood fill. All honour the clip rectangle; the
+// outline/fill shapes go through gpix() so the current plot op (OR/AND/EOR/
+// invert) applies, exactly like the built-in line/rectangle/circle.
+// ---------------------------------------------------------------------------
+
+static long gsqrt(long v) {                 // integer sqrt (Newton), v >= 0
+    if (v <= 0) return 0;
+    long x = v, y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + v / x) / 2; }
+    return x;
+}
+
+void draw_rect(int x0, int y0, int x1, int y1, uint32_t color) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    for (int x = x0; x <= x1; x++) { gpix(x, y0, color); gpix(x, y1, color); }
+    for (int y = y0; y <= y1; y++) { gpix(x0, y, color); gpix(x1, y, color); }
+}
+
+void fill_ellipse(int cx, int cy, int rx, int ry, uint32_t color) {
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    if (ry == 0) { hspan(cx - rx, cx + rx, cy, color); return; }
+    long rx2 = (long)rx * rx, ry2 = (long)ry * ry;
+    for (int dy = 0; dy <= ry; dy++) {
+        int xr = (int)gsqrt(rx2 * (ry2 - (long)dy * dy) / ry2);
+        hspan(cx - xr, cx + xr, cy - dy, color);
+        if (dy != 0) hspan(cx - xr, cx + xr, cy + dy, color);
+    }
+}
+
+void draw_ellipse(int cx, int cy, int rx, int ry, uint32_t color) {
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    if (ry == 0) { hspan(cx - rx, cx + rx, cy, color); return; }
+    if (rx == 0) { for (int y = cy - ry; y <= cy + ry; y++) gpix(cx, y, color); return; }
+    long rx2 = (long)rx * rx, ry2 = (long)ry * ry;
+    // Two scan passes (by dy and by dx) so the outline never has gaps on the
+    // flat top/bottom or the steep sides.
+    for (int dy = 0; dy <= ry; dy++) {
+        int xr = (int)gsqrt(rx2 * (ry2 - (long)dy * dy) / ry2);
+        gpix(cx - xr, cy - dy, color); gpix(cx + xr, cy - dy, color);
+        gpix(cx - xr, cy + dy, color); gpix(cx + xr, cy + dy, color);
+    }
+    for (int dx = 0; dx <= rx; dx++) {
+        int yr = (int)gsqrt(ry2 * (rx2 - (long)dx * dx) / rx2);
+        gpix(cx - dx, cy - yr, color); gpix(cx + dx, cy - yr, color);
+        gpix(cx - dx, cy + yr, color); gpix(cx + dx, cy + yr, color);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thick strokes: wide lines and shape outlines with selectable joins and caps.
+// Everything is physical pixels (the console layer maps logical -> pixels and a
+// logical width -> a pixel width before calling here). A stroke is built from
+// filled convex pieces - a rectangle per segment (two triangles), a wedge per
+// interior vertex (the join), and a piece per open end (the cap) - so it honours
+// the current plot op through fill_triangle / fill_circle like every primitive.
+// In STORE mode (the default) the overlaps between pieces are harmless; EOR/AND
+// thick strokes would double-hit the overlaps and are not recommended.
+// ---------------------------------------------------------------------------
+
+static double gfsqrt(double x) {                 // double sqrt (Newton), x >= 0
+    if (x <= 0) return 0;
+    double g = x > 1 ? x : 1;
+    for (int i = 0; i < 24; i++) g = 0.5 * (g + x / g);
+    return g;
+}
+static int iround(double v) { return (int)(v < 0 ? v - 0.5 : v + 0.5); }
+
+// The rectangular body of one segment p0->p1, offset by +/-hw along the (unit)
+// left normal (nx,ny), as two triangles.
+static void seg_quad(double x0, double y0, double x1, double y1,
+                     double nx, double ny, double hw, uint32_t color) {
+    int ax = iround(x0 + nx*hw), ay = iround(y0 + ny*hw);
+    int bx = iround(x0 - nx*hw), by = iround(y0 - ny*hw);
+    int cx = iround(x1 - nx*hw), cy = iround(y1 - ny*hw);
+    int dx = iround(x1 + nx*hw), dy = iround(y1 + ny*hw);
+    fill_triangle(ax, ay, bx, by, cx, cy, color);
+    fill_triangle(ax, ay, cx, cy, dx, dy, color);
+}
+
+// Fill the join wedge at vertex v between incoming unit dir d0 and outgoing d1.
+static void do_join(double vx, double vy, double d0x, double d0y,
+                    double d1x, double d1y, double hw, int join, uint32_t color) {
+    double cross = d0x*d1y - d0y*d1x;
+    if (cross > -1e-9 && cross < 1e-9) return;            // straight: no wedge
+    if (join == GJOIN_ROUND) { fill_circle(iround(vx), iround(vy), iround(hw), color); return; }
+    double n0x = -d0y, n0y = d0x, n1x = -d1y, n1y = d1x;  // left normals
+    double s = (cross > 0) ? -1.0 : 1.0;                  // outer side of the turn
+    double oax = vx + s*n0x*hw, oay = vy + s*n0y*hw;      // outer corner, incoming edge
+    double obx = vx + s*n1x*hw, oby = vy + s*n1y*hw;      // outer corner, outgoing edge
+    fill_triangle(iround(oax), iround(oay), iround(obx), iround(oby),
+                  iround(vx), iround(vy), color);         // bevel triangle
+    if (join == GJOIN_MITER) {
+        double det = -cross;                              // = d0x*(-d1y) - (-d1x)*d0y
+        if (det > -1e-9 && det < 1e-9) return;
+        double t = ((obx-oax)*(-d1y) - (-d1x)*(oby-oay)) / det;
+        double mx = oax + t*d0x, my = oay + t*d0y;        // outer edges meet here
+        double dmx = mx - vx, dmy = my - vy;
+        if (gfsqrt(dmx*dmx + dmy*dmy) <= hw * 10.0)        // miter limit (ratio ~10)
+            fill_triangle(iround(oax), iround(oay), iround(obx), iround(oby),
+                          iround(mx), iround(my), color);  // sharp miter tip
+    }
+}
+
+// Fill the end cap at (ex,ey), the segment running toward (tx,ty).
+static void do_cap(double ex, double ey, double tx, double ty,
+                   double hw, int cap, uint32_t color) {
+    if (cap == GCAP_BUTT) return;
+    double dx = tx-ex, dy = ty-ey, l = gfsqrt(dx*dx + dy*dy);
+    if (l < 1e-6) return;
+    double ux = dx/l, uy = dy/l, nx = -uy, ny = ux;
+    if (cap == GCAP_ROUND) { fill_circle(iround(ex), iround(ey), iround(hw), color); return; }
+    double bx = ex - ux*hw, by = ey - uy*hw;             // extend hw beyond the end
+    int p1x = iround(ex + nx*hw), p1y = iround(ey + ny*hw);
+    int p2x = iround(ex - nx*hw), p2y = iround(ey - ny*hw);
+    int p3x = iround(bx - nx*hw), p3y = iround(by - ny*hw);
+    int p4x = iround(bx + nx*hw), p4y = iround(by + ny*hw);
+    fill_triangle(p1x, p1y, p2x, p2y, p3x, p3y, color);
+    fill_triangle(p1x, p1y, p3x, p3y, p4x, p4y, color);
+}
+
+void stroke_polyline(const int *pts, int n, int closed, int width,
+                     int join, int cap, uint32_t color) {
+    if (n < 1 || width < 1) return;
+    double hw = width * 0.5;
+    if (n == 1) { if (cap == GCAP_ROUND) fill_circle(pts[0], pts[1], iround(hw), color); return; }
+
+    int segs = closed ? n : n - 1;
+    for (int i = 0; i < segs; i++) {                      // segment bodies
+        int j = (i + 1) % n;
+        double x0 = pts[2*i], y0 = pts[2*i+1], x1 = pts[2*j], y1 = pts[2*j+1];
+        double dx = x1-x0, dy = y1-y0, len = gfsqrt(dx*dx + dy*dy);
+        if (len < 1e-6) continue;
+        double ux = dx/len, uy = dy/len;
+        seg_quad(x0, y0, x1, y1, -uy, ux, hw, color);
+    }
+    int vs = closed ? 0 : 1, ve = closed ? n : n - 1;    // joins at interior (all if closed)
+    for (int vi = vs; vi < ve; vi++) {
+        int p = (vi - 1 + n) % n, q = (vi + 1) % n;
+        double vx = pts[2*vi], vy = pts[2*vi+1];
+        double d0x = vx - pts[2*p], d0y = vy - pts[2*p+1], l0 = gfsqrt(d0x*d0x + d0y*d0y);
+        double d1x = pts[2*q] - vx, d1y = pts[2*q+1] - vy, l1 = gfsqrt(d1x*d1x + d1y*d1y);
+        if (l0 < 1e-6 || l1 < 1e-6) continue;
+        do_join(vx, vy, d0x/l0, d0y/l0, d1x/l1, d1y/l1, hw, join, color);
+    }
+    if (!closed) {                                       // caps at the two open ends
+        do_cap(pts[0], pts[1], pts[2], pts[3], hw, cap, color);
+        do_cap(pts[2*(n-1)], pts[2*(n-1)+1], pts[2*(n-2)], pts[2*(n-2)+1], hw, cap, color);
+    }
+}
+
+void stroke_line(int x0, int y0, int x1, int y1, int width, int cap, uint32_t color) {
+    int pts[4] = { x0, y0, x1, y1 };
+    stroke_polyline(pts, 2, 0, width, GJOIN_MITER, cap, color);
+}
+
+// A thick circle outline of centre radius r and full width `width`, as a filled
+// annulus (gap-free scanline between the inner and outer radii). Joins/caps do
+// not apply to a smooth closed curve.
+void stroke_circle(int cx, int cy, int r, int width, uint32_t color) {
+    if (r < 0) r = -r;
+    double hw = width * 0.5;
+    int ro = iround(r + hw), ri = iround(r - hw);
+    if (ri < 0) ri = 0;
+    long ro2 = (long)ro*ro, ri2 = (long)ri*ri;
+    for (int y = -ro; y <= ro; y++) {
+        long yy = (long)y*y;
+        if (yy > ro2) continue;
+        int xo = (int)gsqrt(ro2 - yy);
+        if (yy <= ri2) {
+            int xi = (int)gsqrt(ri2 - yy);
+            hspan(cx - xo, cx - xi, cy + y, color);
+            hspan(cx + xi, cx + xo, cy + y, color);
+        } else {
+            hspan(cx - xo, cx + xo, cy + y, color);
+        }
+    }
+}
+
+// A thick ellipse outline: concentric 1px outlines spanning the width. (Each
+// draw_ellipse is itself gap-free; adjacent radii differ by one pixel.)
+void stroke_ellipse(int cx, int cy, int rx, int ry, int width, uint32_t color) {
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    double hw = width * 0.5;
+    int lo = -iround(hw), hi = iround(hw);
+    for (int k = lo; k <= hi; k++) {
+        int erx = rx + k, ery = ry + k;
+        if (erx >= 0 && ery >= 0) draw_ellipse(cx, cy, erx, ery, color);
+    }
+}
+
+// Scanline flood fill. A fixed span-seed stack bounds memory; seeding one entry
+// per contiguous run keeps it small. Matches by RGB (alpha ignored). Best effort:
+// if the stack fills on a huge region it simply stops early.
+#define FLOOD_CAP 8192
+void flood_fill(int sx, int sy, uint32_t newc) {
+    int cx0, cy0, cx1, cy1;
+    gfx_clip_rect(&cx0, &cy0, &cx1, &cy1);
+    if (sx < cx0 || sx > cx1 || sy < cy0 || sy > cy1) return;
+    uint32_t target = getpixel(sx, sy) & 0x00FFFFFFu;
+    if (target == (newc & 0x00FFFFFFu)) return;         // nothing to do
+
+    static int stk[FLOOD_CAP * 2];
+    int sp = 0;
+    stk[sp++] = sx; stk[sp++] = sy;
+    while (sp) {
+        int y = stk[--sp];
+        int x = stk[--sp];
+        if ((getpixel(x, y) & 0x00FFFFFFu) != target) continue;
+        int xl = x, xr = x;
+        while (xl > cx0 && (getpixel(xl - 1, y) & 0x00FFFFFFu) == target) xl--;
+        while (xr < cx1 && (getpixel(xr + 1, y) & 0x00FFFFFFu) == target) xr++;
+        for (int i = xl; i <= xr; i++) putpixel(i, y, newc);
+        for (int ny = y - 1; ny <= y + 1; ny += 2) {
+            if (ny < cy0 || ny > cy1) continue;
+            int i = xl;
+            while (i <= xr) {
+                if ((getpixel(i, ny) & 0x00FFFFFFu) == target) {
+                    if (sp < FLOOD_CAP * 2 - 2) { stk[sp++] = i; stk[sp++] = ny; }
+                    while (i <= xr && (getpixel(i, ny) & 0x00FFFFFFu) == target) i++;
+                } else i++;
+            }
+        }
     }
 }

@@ -1,0 +1,18 @@
+<title>PLOT</title>
+<h1>PLOT</h1>
+<p>The general drawing primitive: move or draw to a point.</p>
+<h2>Syntax</h2>
+<pre>PLOT mode, x, y</pre>
+<h2>Description</h2>
+<p>The <b>mode</b> selects the action: 4 moves the graphics cursor to (x,y)
+without drawing, 5 draws a line to it in the current <a href="GCOL">GCOL</a>
+colour. <a href="DRAW">MOVE</a> and <a href="DRAW">DRAW</a> are handy shorthands
+for PLOT 4 and PLOT 5.</p>
+<h2>Examples</h2>
+<code>
+10 GCOL 3
+20 PLOT 4, 100, 100
+30 PLOT 5, 500, 400
+</code>
+<h2>See also</h2>
+<p><a href="DRAW">DRAW</a>, <a href="CIRCLE">CIRCLE</a>, <a href="GCOL">GCOL</a>, <a href="INDEX">Index</a></p>
